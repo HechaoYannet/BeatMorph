@@ -3,7 +3,7 @@ name = "beatmorph"
 version = "0.1.0"
 description = "BeatMorph — 音游谱面端到端自动生成系统（音频→MERT→VQ-VAE→RAG→DPO→.osu）"
 readme = "README.md"
-requires-python = ">=3.10,<3.13"
+requires-python = ">=3.10,<3.14"
 authors = [
     { name = "BeatMorph Team" },
 ]
@@ -36,6 +36,7 @@ audio = [
     "demucs>=0.11",                # 可选声源分离 (HTDemucs) - 规避 pip 改名问题
     "soundfile>=0.12",
     "librosa>=0.10",
+    "llvmlite>=0.39",              # 强制选有 cp312 win_amd64 wheel 的版本
     "torchlibrosa>=0.1",
 ]
 train = [
@@ -86,9 +87,15 @@ managed = true
 # 默认开发组依赖（贡献者一键拉齐环境）
 default-groups = ["dev"]
 
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
 [tool.uv.sources]
-# 预留：为 ty 系仓库或私有源配置覆盖
-# torch = { index = "pytorch-cu121" }
+torch = [{ index = "pytorch-cu130" }]
+torchaudio = [{ index = "pytorch-cu130" }]
+torchvision = [{ index = "pytorch-cu130" }]
 
 # 分组依赖（uv sync 自动安装）
 [dependency-groups]

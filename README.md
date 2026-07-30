@@ -53,7 +53,7 @@ docs/             BasePlan + plans + decisions + 约束文档
 需 Python 3.11 与 [uv](https://docs.astral.sh/uv/)。
 
 ```bash
-git clone <repo-url> BeatMorph && cd BeatMorph
+git clone https://github.com/HechaoYannet/BeatMorph.git BeatMorph && cd BeatMorph
 uv sync --group dev          # 安装依赖
 uv run pre-commit install    # 安装提交钩子
 make test-fast               # 冒烟测试（跳过 slow/gpu/e2e）

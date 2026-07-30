@@ -1,0 +1,20 @@
+# Hydra 数据配置样例 — osu! 50K 子集
+# 奠基文档 §3.4.1 / §7 Phase 2：50K 谱面跑通自回归生成。
+
+data:
+  name: osu_50k
+  parquet_dir: ${oc.env:BEATMORPH_DATA_DIR,data/processed}/osu_50k
+  embeddings_dir: ${oc.env:BEATMORPH_DATA_DIR,data/embeddings}/mert_v1_330m
+
+  # 质量过滤（奠基文档 §4.3）
+  min_stars: 3.0
+  min_play_count: 500
+
+  # 切片
+  section_bars: 4
+  sample_rate_hz: 16000
+  mert_frame_rate_hz: 25
+
+  dataloader:
+    num_workers: 8
+    pin_memory: true

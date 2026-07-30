@@ -1,0 +1,44 @@
+# ─────────────────────────────────────────────────────────────
+# BeatMorph — pre-commit hooks
+# 安装：uv run pre-commit install
+# 手动跑：uv run pre-commit run --all-files
+# ─────────────────────────────────────────────────────────────
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: check-yaml
+      - id: check-toml
+      - id: check-json
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: ["--maxkb=1024"]           # 阻止大文件入库（模型/音频走 LFS/外部存储）
+      - id: end-of-file-fixer
+        exclude: \.osu$|\.sm$|\.ma2$     # 谱面文件保留原始尾行
+      - id: trailing-whitespace
+        exclude: \.osu$|\.sm$|\.ma2$
+      - id: mixed-line-ending
+        args: ["--fix=lf"]
+      - id: detect-private-key            # 防密钥泄露
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.5.7
+    hooks:
+      - id: ruff
+        args: ["--fix"]
+      - id: ruff-format
+
+  - repo: https://github.com/commitizen-tools/commitizen
+    rev: v3.29.0
+    hooks:
+      - id: commitizen
+        stages: [commit-msg]             # 强制 Conventional Commits
+
+# 本地 hook：强制提交信息引用 RFC/计划（可选，团队按需启用）
+  # - repo: local
+  #   hooks:
+  #     - id: require-issue-ref
+  #       name: require issue/plan reference in commit
+  #       entry: bash -c 'grep -Eq "#[0-9]+|plan:" "$1" || exit 1' --
+  #       language: system
+  #       stages: [commit-msg]

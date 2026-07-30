@@ -1,0 +1,29 @@
+# Hydra 训练配置样例 — Stage 2 AR 预训练
+# 奠基文档 §7 Phase 2。
+
+defaults:
+  - model: ar_transformer
+  - data: osu_50k
+  - _self_
+
+experiment:
+  name: stage2_ar_pretrain
+  seed: 42
+  max_steps: 100000
+  grad_accum: 1
+  precision: bf16-mixed      # PyTorch Lightning
+  gradient_clip: 1.0
+
+trainer:
+  strategy: auto             # 单卡；多卡改 fsdp
+  devices: 1
+  accelerator: gpu
+
+infra:
+  wandb:
+    project: beatmorph
+    entity: null
+    log_every_n_steps: 50
+  checkpoint:
+    dir: ${oc.env:BEATMORPH_RUNS_DIR,runs}/checkpoints
+    save_every_n_steps: 2000

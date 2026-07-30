@@ -1,0 +1,205 @@
+[project]
+name = "beatmorph"
+version = "0.1.0"
+description = "BeatMorph — 音游谱面端到端自动生成系统（音频→MERT→VQ-VAE→RAG→DPO→.osu）"
+readme = "README.md"
+requires-python = ">=3.10,<3.13"
+authors = [
+    { name = "BeatMorph Team" },
+]
+license = { text = "Apache-2.0" }
+keywords = ["rhythm-game", "chart-generation", "MERT", "VQ-VAE", "music-ai"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Multimedia :: Sound/Audio :: Analysis",
+]
+
+# 运行时依赖随各模块实现再补充，此处先固定核心基础栈
+dependencies = [
+    "numpy>=1.26,<3.0",
+    "torch>=2.5.0",                # 奠基文档指定 2.5+，配合 torch.compile
+    "torchaudio>=2.5.0",
+    "pydantic>=2.5",               # 配置/数据契约校验
+    "hydra-core>=1.3",             # 配置管理（奠基文档指定）
+    "omegaconf>=2.3",
+    "einops>=0.7",                 # 张量形状语义化
+    "tqdm>=4.66",
+    "rich>=13.7",                  # 终端美化/日志
+]
+
+[project.optional-dependencies]
+audio = [
+    # Stage 0 音频编码
+    "transformers>=4.40",          # MERT 预训练权重
+    "demucs>=0.11",                # 可选声源分离 (HTDemucs) - 规避 pip 改名问题
+    "soundfile>=0.12",
+    "librosa>=0.10",
+    "torchlibrosa>=0.1",
+]
+train = [
+    "pytorch-lightning>=2.2",      # 奠基文档指定（FSDP 分布式）
+    "wandb>=0.16",                 # 实验管理
+    "datasets>=2.18",              # HuggingFace Datasets 存储
+    "pyarrow>=15.0",               # Parquet
+    "tensorboard>=2.16",
+]
+rag = [
+    # RAG 检索
+    "faiss-cpu>=1.8",              # 检索索引（百万级）
+    # faiss-gpu 按需另外安装
+]
+dev = [
+    "ruff>=0.5.0",
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "pytest-xdist>=3.5",
+    "mypy>=1.10",
+    "pre-commit>=3.7",
+    "ipykernel>=6.29",
+]
+
+[project.urls]
+Homepage = "https://github.com/BeatMorph/BeatMorph"
+Documentation = "https://github.com/BeatMorph/BeatMorph/tree/main/docs"
+Repository = "https://github.com/BeatMorph/BeatMorph"
+
+# ── 命令行入口（后续随模块实现启用）──
+# [project.scripts]
+# beatmorph-train = "beatmorph.cli.train:main"
+# beatmorph-generate = "beatmorph.cli.generate:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["beatmorph"]
+
+# ─────────────────────────────────────────────────────────────
+# uv 配置（奠基文档指定 uv 包管理）
+# ─────────────────────────────────────────────────────────────
+[tool.uv]
+# 统一锁文件，保证跨设备可复现
+managed = true
+# 默认开发组依赖（贡献者一键拉齐环境）
+default-groups = ["dev"]
+
+[tool.uv.sources]
+# 预留：为 ty 系仓库或私有源配置覆盖
+# torch = { index = "pytorch-cu121" }
+
+# 分组依赖（uv sync 自动安装）
+[dependency-groups]
+dev = [
+    "ruff>=0.5.0",
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "mypy>=1.10",
+    "pre-commit>=3.7",
+]
+
+# ─────────────────────────────────────────────────────────────
+# Ruff：lint + format
+# ─────────────────────────────────────────────────────────────
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = [
+    "data",
+    "models",
+    "runs",
+    "outputs",
+    "docs",
+]
+
+[tool.ruff.lint]
+select = [
+    "E", "W",    # pycodestyle
+    "F",         # pyflakes
+    "I",         # isort
+    "B",         # bugbear
+    "UP",        # pyupgrade
+    "C4",        # comprehensions
+    "SIM",       # simplify
+    "N",         # pep8-naming
+    "ANN",       # flake8-annotations（鼓励类型标注）
+    "PT",        # pytest 风格
+    "PTH",       # 使用 pathlib
+    "PL",        # pylint 子集
+    "RUF",       # ruff 专属
+]
+ignore = [
+    "E501",      # 行长由 formatter 处理
+    "ANN101",    # 不强制 self 标注
+    "ANN102",    # 不强制 cls 标注
+    "PLR0913",   # 允许较多函数参数（ML 代码常见）
+    "B008",      # 允许默认值实例化（如 Typer/FastAPI 风格）
+]
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["F401", "E402"]
+"tests/**" = ["ANN", "PLR2004", "S101"]
+"scripts/**" = ["ANN", "INP001"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["beatmorph"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+docstring-code-format = true
+
+# ─────────────────────────────────────────────────────────────
+# pytest
+# ─────────────────────────────────────────────────────────────
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+python_files = ["test_*.py", "*_test.py"]
+addopts = [
+    "-ra",
+    "--strict-markers",
+    "--strict-config",
+    "--cov=beatmorph",
+    "--cov-report=term-missing",
+    "--cov-report=html",
+]
+markers = [
+    "slow: 标记慢测试（CI 可单独跳过）",
+    "gpu: 需要 GPU 才能运行的测试",
+    "integration: 集成测试（多模块串联）",
+    "e2e: 端到端测试（音频→谱面）",
+]
+
+# ─────────────────────────────────────────────────────────────
+# mypy
+# ─────────────────────────────────────────────────────────────
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unused_configs = true
+ignore_missing_imports = true        # torch/transformers 等无 stub
+exclude = "(data|models|runs|outputs)/"
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = ["torch.*", "torchaudio.*", "transformers.*", "librosa.*", "pyarrow.*"]
+ignore_missing_imports = true
+
+# ─────────────────────────────────────────────────────────────
+# coverage
+# ─────────────────────────────────────────────────────────────
+[tool.coverage.run]
+source = ["beatmorph"]
+branch = true
+omit = ["*/__init__.py", "tests/*", "scripts/*"]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+]

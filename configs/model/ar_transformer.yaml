@@ -1,0 +1,23 @@
+# Hydra 模型配置样例 — Stage 2 AR Transformer
+# 奠基文档 §3.4.1。组合式超参管理参见 docs/DECISION_LOG.md。
+
+model:
+  name: ar_transformer
+  n_layers: 12              # 12-16
+  n_heads: 16
+  dim: 768                  # 与 MERT feat 对齐
+  context_tokens: 256       # 约 256 小节
+  codebook_size: 2048       # 2048 基础 / 4096 精细
+  dropout: 0.1
+
+  # 条件注入
+  audio_cross_attention: true
+  adaln_conditioning: [difficulty, style]
+
+train:
+  optimizer: adamw
+  lr: 3.0e-4
+  weight_decay: 0.01
+  warmup_steps: 1000
+  batch_size: 32
+  teacher_forcing: true

@@ -1,0 +1,148 @@
+# ─────────────────────────────────────────────────────────────
+# BeatMorph — .gitignore
+# Python / ML / 音频 / 谱面 工程通用忽略
+# ─────────────────────────────────────────────────────────────
+
+# ── Python ──
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# ── 虚拟环境 ──
+.venv/
+venv/
+env/
+ENV/
+.python-version-local
+
+# ── uv / poetry ──
+# uv.lock 应提交以保证跨设备可复现；如需忽略本地实验锁文件取消下一行注释
+# uv.lock
+.python-version-local
+
+# ── 类型检查 / 测试 / 覆盖率 ──
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+*.cover
+.hypothesis/
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pyre/
+.pytype/
+.ruff_cache/
+
+# ── Jupyter ──
+.ipynb_checkpoints/
+*/.ipynb_checkpoints/*
+
+# ── 环境变量与密钥 ──
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+
+# ── 模型权重 / 大文件（走 Git LFS 或外部存储，不允许入库）──
+*.ckpt
+*.safetensors
+*.pt
+*.pth
+*.bin
+*.onnx
+*.gguf
+*.h5
+# MERT 等预训练权重目录
+models/pretrained/
+# 保留目录结构占位
+!models/.gitkeep
+!models/README.md
+# HuggingFace 缓存
+.cache/huggingface/
+
+# ── 数据集（百万级谱面 / embedding，禁止入库）──
+data/raw/
+data/processed/
+data/embeddings/
+data/parquet/
+data/index/
+*.parquet
+*.arrow
+# 但保留示例 / 小型测试夹具
+!data/fixtures/**
+!data/examples/**
+
+# ── 音频文件（版权敏感，禁止入库）──
+*.wav
+*.mp3
+*.flac
+*.ogg
+*.m4a
+!data/fixtures/**/*.wav
+!data/fixtures/**/*.mp3
+
+# ── 谱面原始数据（量大，走数据存储）──
+*.osz
+# 转换后的中间产物
+*.osu.bak
+
+# ── 实验产物 / 训练输出 ──
+runs/
+outputs/
+logs/
+wandb/
+mlruns/
+checkpoints/
+predictions/
+*.log
+
+# ── Hydra 配置运行时输出 ──
+multirun/
+hydra/
+
+# ── IDE / 编辑器 ──
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── 操作系统 ──
+*.tmp
+*.bak
+
+# ── 文档构建 ──
+site/
+_build/
+
+# ── 本地开发脚本（个人临时文件）──
+scripts/local_*
+*.local.*

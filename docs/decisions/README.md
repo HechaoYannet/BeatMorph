@@ -48,11 +48,11 @@
 
 | RFC | 主题 | 来源 plan | 状态 |
 |-----|------|-----------|------|
-| RFC-0001 | Note 时间单位（秒 vs 毫秒） | 00 | 提案（暂定秒） |
+| RFC-0001 | Note 时间单位（秒 vs 毫秒） | 00 | [采纳](RFC-0001-note-time-unit.md)（秒） |
 | RFC-0002 | 长音频 MERT 滑窗策略 | 01 | 提案 |
-| RFC-0003 | Adapter 选型 LoRA vs MLP | 01 | 提案 |
+| RFC-0003 | Adapter 选型 LoRA vs MLP | 01 | [采纳](RFC-0003-adapter-lora-vs-mlp.md)（LoRA） |
 | RFC-0004 | Tokenizer 起步数据量 50K vs 100万 | 02（08 依赖） | 提案 |
-| RFC-0005 | 变速曲 `bpm` 字段扩展为时间点 | 00/02/03（08 依赖） | 提案 |
+| RFC-0005 | 变速曲 `bpm` 字段扩展为时间点 | 00/02/03（08 依赖） | [采纳](RFC-0005-bpm-timepoints.md) |
 | RFC-0006 | `sections_type` 是否作分类目标 | 03 | 提案 |
 | RFC-0007 | AR 隐层 dim=768 | 04 | 提案 |
 | RFC-0008 | 超长曲滑窗段落衔接 | 04 | 提案 |
@@ -71,5 +71,7 @@
 | RFC-0021 | `section_bars` 默认 4 是否随曲风/拍号动态 | 08 | 提案（暂定 4） |
 | RFC-0022 | 日志 JSON 化强制范围 | 09 | 提案 |
 | RFC-0023 | 检查点本地 vs 云（OSS/S3）存储 | 09 | 提案 |
+| RFC-0024 | sayobot 数据源与 §4.3 质量过滤激活 | 08 | [采纳](RFC-0024-sayobot-data-source.md) |
+| RFC-0025 | R-6 细化：多 K mania 数据诚实标记 + 训练层 4K 过滤 | 00/07/08 | [采纳](RFC-0025-multikey-data-r6.md) |
 
-> 下一个可用编号：**RFC-0024**。
+> 下一个可用编号：**RFC-0026**。

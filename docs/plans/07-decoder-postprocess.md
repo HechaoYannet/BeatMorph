@@ -75,14 +75,14 @@ class SmReader(ChartReader):
 
 ## 4. 内部设计
 
-- **Stage 3 解码**：`decode(tokens)` 逐小节——码本查表 → 轻量 MLP+1D-CNN → 在 `(lane, time_bins)` 网格 argmax 还原 Note；时间 = `PatternToken.start_time` + 栅格偏移（秒）。`NoteType` 维 argmax 决定 TAP/HOLD/MINE/ROLL/FAKE；HOLD/ROLL 的 duration 由独立回归头给出。组装 `Chart(notes, mode=MANIA_4K, bpm, sections=<可选>)`。解码权重与训练在 Plan 02，本模块只编排/调用。
+- **Stage 3 解码**：`decode(tokens)` 逐小节——码本查表 → 轻量 MLP+1D-CNN → 在 `(lane, time_bins)` 网格 argmax 还原 Note；时间 = `PatternToken.start_time` + 栅格偏移（秒）。`NoteType` 维 argmax 决定 TAP/HOLD/MINE/ROLL/FAKE；HOLD/ROLL 的 duration 由独立回归头给出。组装 `Chart(notes, mode=MANIA_4K, bpm_points=[BpmPoint(0, bpm)], sections=<可选>)`（RFC-0005）。解码权重与训练在 Plan 02，本模块只编排/调用。
 - **红线规则集（apply）**——仅修物理不可达，不动键型排列语义（R-5）：
   - 越界：`lane ≥ lane_count()` 者——钳到合法区间内最近 lane（保密度优先于删除），记警示。
   - 单帧同按：同一 `time±10ms` 窗口按键数 > `MAX_SIMULTANEOUS_4K` → 按 lane 升序保留前 2，其余整体推迟到下一合法窗口（仅时间平移）。
   - 同手间隔：同侧 lane（见 RFC-0017）两 Note 间隔 < 70ms → 将后一者时间平移至 ≥ 70ms，不改 lane/type。
   - 长条：`HOLD/ROLL` 且 `duration ≤ 0` → 降级为 `TAP`；终点越过下一同时刻 Note 视为重叠，截断 duration。
 - **validate（只报告）**：遍历同规则集，返回 `["rule:X note[idx=#i] ..."]`，空列表 = 完全合法可玩。盲测中可仅调 validate 不自改，交人工 review。
-- **Writer 分发**：按目标模式/后缀选 `OsuManiaWriter`/`SmWriter`；时间制转换 `.osu`→毫秒整型（四舍五入）、`.sm`→beat 浮点（用 `Chart.bpm`）。Writer 先 `chart.sorted_notes()` 保证确定性输出，再按各格式头 + HitObjects 段落写盘。
+- **Writer 分发**：按目标模式/后缀选 `OsuManiaWriter`/`SmWriter`；时间制转换 `.osu`→毫秒整型（四舍五入，秒→ms，RFC-0001）、`.sm`→beat 浮点（按 `Chart.bpm_points` 分段，RFC-0005）。Writer 先 `chart.sorted_notes()` 保证确定性输出，再按各格式头 + HitObjects 段落写盘。
   - `.osu`：`[Difficulty] CircleSize=4` 固定 4K；Note 写为 `x,y,time,type,hitsound,...`，time = `round(note.time*1000)`；HOLD 末尾追加 `endTime`。
   - `.sm`：以 `#NOTES:` 段 + beat 网格（`beat = (time−section_start)*bpm/60`）描述；lane 映射 0/1 列。
 - **Reader 对称性**：`OsuManiaReader`/`SmReader` 反向解析回 `Chart`，时间统一归一为秒，供数据流水线 Plan 08 复用（解析现成谱面）；读写同 `mode` 往返须保 Note 不丢、时间误差可量化（M3）。

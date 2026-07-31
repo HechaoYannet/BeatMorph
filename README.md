@@ -64,7 +64,12 @@ make test-fast               # 冒烟测试（跳过 slow/gpu/e2e）
 beatmorph-generate --audio song.mp3 --difficulty 8 --ref reference.osu -o out.osu
 ```
 
-> GPU 训练需自行安装匹配 CUDA 的 PyTorch；可选依赖组：`uv sync --extra audio --extra train --extra rag`。
+## 训练与数据
+
+Phase 1 端到端流程（环境 → sayobot 数据下载 → 预处理 → MERT 离线提取 → Stage1 训练）见
+**[docs/TRAINING.md](docs/TRAINING.md)**（操作手册）。小型开发样本（`data/dev_sample/`，走 Git LFS）供 VQ-VAE / AR 冒烟。
+
+> GPU 训练需自行安装匹配 CUDA 的 PyTorch；可选依赖组：`uv sync --extra audio --extra train --extra rag --extra data`。
 
 ## 技术选型一览
 

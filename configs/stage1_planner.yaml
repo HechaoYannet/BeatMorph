@@ -1,0 +1,36 @@
+# Hydra 训练配置 — Stage 1 密度规划训练
+# 奠基文档 §7 Phase 1 / plan 03。
+
+defaults:
+  - model: planner
+  - data: osu_50k
+  - _self_
+
+experiment:
+  name: stage1_planner
+  seed: 42
+  max_steps: 100000
+  grad_accum: 1
+  precision: bf16-mixed      # PyTorch Lightning
+  gradient_clip: 1.0
+
+trainer:
+  strategy: auto             # 单卡；多卡改 fsdp
+  devices: 1
+  accelerator: gpu
+
+infra:
+  wandb:
+    project: beatmorph
+    entity: null
+    log_every_n_steps: 50
+  checkpoint:
+    dir: ${oc.env:BEATMORPH_RUNS_DIR,runs}/checkpoints
+    save_every_n_steps: 2000
+
+log_level: INFO
+
+# data 段由 data/osu_50k.yaml 注入；planner 训练额外需 embeddings_dir
+data:
+  charts_path: ${oc.env:BEATMORPH_DATA_DIR,data/processed}/charts.jsonl
+  embeddings_dir: ${oc.env:BEATMORPH_DATA_DIR,data/embeddings}/mert_v1_330m

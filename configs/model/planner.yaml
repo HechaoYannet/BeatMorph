@@ -1,0 +1,15 @@
+# Hydra 模型组配置 — Stage 1 密度规划器（group=model → 自动前缀为 cfg.model）
+# 奠基文档 §3.3 / plan 03。6 层双向 Transformer，多任务回归 + 5 类段落类型。
+# 注意：组配置文件内容自动挂到组的 key 下，**勿再包 model:**（否则会双重嵌套 cfg.model.model）。
+
+name: density_planner
+n_layers: 6             # 奠基 §3.3 6 层
+n_heads: 8
+dim: 768                # 与 MERT feat 对齐免投影
+section_bars: 4         # 契约 PlanOutput.section_bars
+n_type_classes: 5       # intro/verse/chorus/bridge/outro
+dropout: 0.1
+loss:
+  huber: 1.0
+  tv: 0.1
+  ce_type: 0.5

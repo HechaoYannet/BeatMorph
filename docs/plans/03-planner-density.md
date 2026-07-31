@@ -62,7 +62,7 @@ class DensityPlanner:
 
 ## 4. 内部设计
 
-- **Section 划分**：按 `section_bars=4` 小节切分音频时长（需 BPM，来自 `Chart.bpm` 或管线），每段映射到对应 `audio_emb` 子区间并做 mean-pool 得段级向量。
+- **Section 划分**：按 `section_bars=4` 小节切分音频时长（需 BPM，来自 `Chart.bpm_points`，见 RFC-0005；变速曲分段推小节），每段映射到对应 `audio_emb` 子区间并做 mean-pool 得段级向量。
 - **编码器**：6 层双向 Transformer，输入 = 段级 audio 向量序列 + difficulty embedding（前缀或相加）+ style_emb（Cross-Attention 或前缀拼接）。
 - **多任务头**：
   - 回归头：3 个独立 MLP 出 density/energy/rest，sigmoid 限 [0,1]。
@@ -107,5 +107,5 @@ class DensityPlanner:
 ## 9. 开放问题
 
 - [ ] RFC-0006：是否将 `sections_type` 纳入回归/分类目标——奠基 §3.3 仅列三个连续量，本计划暂新增分类头，待 RFC 定稿。
-- [ ] RFC-0005（依赖）：变速曲目的 Section 划分——依赖核心契约 `bpm` 字段是否扩展为时间点列表。
+- [x] RFC-0005（依赖）：变速曲目的 Section 划分——核心契约已采纳 `bpm_points`（见 [RFC-0005](../decisions/RFC-0005-bpm-timepoints.md)），Section 划分按分段 BPM 推小节。
 - [ ] 伪标签 `sections_type` 启发式规则集待与数据组（plan 08）联合定义，避免主观偏差。

@@ -1,0 +1,17 @@
+# Hydra 模型组配置 — Stage 0 MERT 编码器（group=model → 自动前缀为 cfg.model）
+# 奠基文档 §3.1 / plan 01 / RFC-0003（LoRA 采纳）。冻结主干 + Adapter，[B,T_seq,768]@25Hz。
+# 注意：组配置文件内容自动挂到 group key 下，**勿再包 model:**（否则双重嵌套）。
+
+name: mert
+model_name: m-a-p/MERT-v1-330M     # HF id；ModelScope 仓 ID 可在此覆盖
+layer: 12                           # 第 12 层 hidden state（768 维）
+adapter: lora                       # lora | mlp | none（RFC-0003 采纳 LoRA）
+lora_rank: 8
+lora_alpha: 16
+lora_dropout: 0.05
+use_demucs: false                   # Phase 1 demucs 仍 stub
+feat: 768
+frame_rate: 25.0
+source: modelscope                  # modelscope | huggingface（优先级，fallback）
+device: auto
+fp16: true

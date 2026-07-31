@@ -25,15 +25,15 @@ class RAGRetriever:
         self.index_path = index_path
         raise NotImplementedError("RAG 检索器尚未实现，见 docs/plans/05-rag-retrieval.md")
 
-    def build_index(self, corpus_dir: str) -> None:  # noqa: ARG002
+    def build_index(self, corpus_dir: str) -> None:
         """构建 FAISS 检索索引（音频 emb + 密度曲线联合向量）。"""
-        ...
+        raise NotImplementedError
 
     def retrieve(
         self,
-        query_emb: "torch.Tensor",        # noqa: ARG002
-        difficulty: int,                  # noqa: ARG002
-        bpm: float,                       # noqa: ARG002
+        query_emb: torch.Tensor,
+        difficulty: int,
+        bpm: float,
     ) -> list[list[PatternToken]]:
         """检索 Top-K 参考谱面的 Token 序列。
 
@@ -44,4 +44,4 @@ class RAGRetriever:
         Returns:
             Top-K 条参考 Pattern Token 序列。
         """
-        ...
+        raise NotImplementedError

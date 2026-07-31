@@ -9,8 +9,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 
 def main() -> None:
     """生成谱面 CLI 主入口（待实现）。"""

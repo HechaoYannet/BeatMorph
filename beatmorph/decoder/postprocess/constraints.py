@@ -40,4 +40,4 @@ class PostProcessor:
 
     def validate(self, chart: Chart) -> list[str]:
         """返回违规项描述列表；空列表表示完全合法可玩。"""
-        ...
+        raise NotImplementedError

@@ -27,17 +27,17 @@ class DPOTrainer:
 
     def compute_loss(
         self,
-        policy_chosen_logps: "torch.Tensor",     # noqa: ARG002
-        policy_rejected_logps: "torch.Tensor",   # noqa: ARG002
-        ref_chosen_logps: "torch.Tensor",        # noqa: ARG002
-        ref_rejected_logps: "torch.Tensor",      # noqa: ARG002
-    ) -> "torch.Tensor":
+        policy_chosen_logps: torch.Tensor,
+        policy_rejected_logps: torch.Tensor,
+        ref_chosen_logps: torch.Tensor,
+        ref_rejected_logps: torch.Tensor,
+    ) -> torch.Tensor:
         """计算 DPO 损失。
 
         见奠基文档 §3.6.1：maximize log σ(β · ((π_c−π_r) − (π_ref_c−π_ref_r)))。
         """
-        ...
+        raise NotImplementedError
 
-    def build_preference_pairs(self, ratings_db: str) -> None:  # noqa: ARG002
+    def build_preference_pairs(self, ratings_db: str) -> None:
         """从 osu! 排行榜评分数据构造偏好对。"""
-        ...
+        raise NotImplementedError

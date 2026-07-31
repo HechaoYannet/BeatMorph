@@ -36,11 +36,11 @@ class ARTransformer:
 
     def generate(
         self,
-        audio_emb: "torch.Tensor",          # noqa: ARG002
-        sections: list[Section],            # noqa: ARG002
-        difficulty: int,                    # noqa: ARG002
-        rag_prefix: "torch.Tensor | None" = None,  # noqa: ARG002
-        max_tokens: int = 256,              # noqa: ARG002
+        audio_emb: torch.Tensor,
+        sections: list[Section],
+        difficulty: int,
+        rag_prefix: torch.Tensor | None = None,
+        max_tokens: int = 256,
     ) -> list[PatternToken]:
         """自回归生成 Pattern Token 序列。
 
@@ -53,4 +53,4 @@ class ARTransformer:
         Returns:
             生成的 Pattern Token 序列。
         """
-        ...
+        raise NotImplementedError

@@ -33,6 +33,8 @@ dependencies = [
 audio = [
     # Stage 0 音频编码
     "transformers>=4.40",          # MERT 预训练权重
+    "peft>=0.11",                  # LoRA Adapter 注入（RFC-0003 采纳）
+    "modelscope>=1.18",            # MERT 权重国内拉取（ModelScope 镜像，HF fallback）
     "demucs>=0.11",                # 可选声源分离 (HTDemucs) - 规避 pip 改名问题
     "soundfile>=0.12",
     "librosa>=0.10",
@@ -51,6 +53,10 @@ rag = [
     "faiss-cpu>=1.8",              # 检索索引（百万级）
     # faiss-gpu 按需另外安装
 ]
+data = [
+    # 数据下载（sayobot 谱面集抓取，RFC-0024）
+    "httpx>=0.27",                # 下载脚本 HTTP 客户端
+]
 dev = [
     "ruff>=0.5.0",
     "pytest>=8.0",
@@ -59,6 +65,8 @@ dev = [
     "mypy>=1.10",
     "pre-commit>=3.7",
     "ipykernel>=6.29",
+    "httpx>=0.27",                # 离线下载脚本单测（mock httpx，需 import）
+    "respx>=0.21",                # httpx mock（tests/unit/scripts）
 ]
 
 [project.urls]
@@ -66,10 +74,10 @@ Homepage = "https://github.com/BeatMorph/BeatMorph"
 Documentation = "https://github.com/BeatMorph/BeatMorph/tree/main/docs"
 Repository = "https://github.com/BeatMorph/BeatMorph"
 
-# ── 命令行入口（后续随模块实现启用）──
-# [project.scripts]
-# beatmorph-train = "beatmorph.cli.train:main"
-# beatmorph-generate = "beatmorph.cli.generate:main"
+# ── 命令行入口（Plan 09，随模块实现启用）──
+[project.scripts]
+beatmorph-train = "beatmorph.cli.train:main"
+# beatmorph-generate = "beatmorph.cli.generate:main"  # Plan 07/09 末（Phase 2）
 
 [build-system]
 requires = ["hatchling"]
@@ -105,6 +113,8 @@ dev = [
     "pytest-cov>=5.0",
     "mypy>=1.10",
     "pre-commit>=3.7",
+    "httpx>=0.27",                # 下载脚本单测（mock，需 import）
+    "respx>=0.21",                # httpx mock（tests/unit/scripts）
 ]
 
 # ─────────────────────────────────────────────────────────────
@@ -139,15 +149,23 @@ select = [
 ]
 ignore = [
     "E501",      # 行长由 formatter 处理
-    "ANN101",    # 不强制 self 标注
-    "ANN102",    # 不强制 cls 标注
+    "RUF001",    # CJK 全角字符在字符串中易被判歧义，本仓中文文档惯例，豁免
+    "RUF002",    # 同 RUF001，针对 docstring
+    "RUF003",    # 同 RUF001，针对注释
+    "ANN101",    # 不强制 self 标注（pre-commit ruff 0.5.x 仍生效；新版 ruff 已废弃该项，保留以兼容）
+    "ANN102",    # 不强制 cls 标注（同 ANN101）
     "PLR0913",   # 允许较多函数参数（ML 代码常见）
+    "PLR0917",   # 同 PLR0913，允许较多位置参数（ML 构造器/forward 常见）
+    "PLR2004",   # 允许张量秩/维度魔法值（如 !=3 / ==2 / 768/25/16），ML 代码惯例，常量化反成噪声
+    "N812",      # 允许 `import torch.nn.functional as F`（PyTorch 社区约定俗成的非小写别名）
+    "PLW0603",   # 日志单例初始化用 global（core/logging.py 有意为之）
+    "PLC0415",   # 允许函数内局部 import（惰性加载重依赖，如 logging 的 json）
     "B008",      # 允许默认值实例化（如 Typer/FastAPI 风格）
 ]
 
 [tool.ruff.lint.per-file-ignores]
 "__init__.py" = ["F401", "E402"]
-"tests/**" = ["ANN", "PLR2004", "S101"]
+"tests/**" = ["ANN", "PLR2004", "S101", "N806"]
 "scripts/**" = ["ANN", "INP001"]
 
 [tool.ruff.lint.isort]

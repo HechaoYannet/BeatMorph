@@ -39,7 +39,7 @@ def setup_logging(level: str = "INFO", json_output: bool = False) -> None:
 class _JsonFormatter(logging.Formatter):
     """极简 JSON 行格式器（生产环境）。"""
 
-    def format(self, record: logging.LogRecord) -> str:  # noqa: A003
+    def format(self, record: logging.LogRecord) -> str:
         import json
 
         payload: dict[str, Any] = {

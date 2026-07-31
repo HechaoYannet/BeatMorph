@@ -12,7 +12,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    import torch
+    pass
 
 from beatmorph.core.contracts import Chart, PatternToken
 
@@ -29,7 +29,7 @@ class VQVAETokenizer:
         self.bars_per_token = bars_per_token
         raise NotImplementedError("VQ-VAE Tokenizer 尚未实现，见 docs/plans/02-tokenizer-vqvae.md")
 
-    def encode(self, chart: Chart) -> list[PatternToken]:  # noqa: ARG002
+    def encode(self, chart: Chart) -> list[PatternToken]:
         """将完整谱面编码为 Pattern Token 序列。
 
         Args:
@@ -37,12 +37,12 @@ class VQVAETokenizer:
         Returns:
             按小节顺序排列的 PatternToken 列表。
         """
-        ...
+        raise NotImplementedError
 
-    def decode(self, tokens: list[PatternToken]) -> Chart:  # noqa: ARG002
+    def decode(self, tokens: list[PatternToken]) -> Chart:
         """将 Token 序列解码回 Note 序列（Stage3 解码器调用）。"""
-        ...
+        raise NotImplementedError
 
     def codebook_usage(self) -> float:
         """返回当前码本利用率（0-1，用于监控 R-2 坍缩）。"""
-        ...
+        raise NotImplementedError

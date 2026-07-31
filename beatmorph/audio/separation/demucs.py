@@ -25,7 +25,7 @@ class DemucsSeparator:
         self.device = device
         raise NotImplementedError("声源分离未实现，见 docs/plans/01-audio-encoder.md")
 
-    def separate(self, wav: "torch.Tensor") -> dict[str, "torch.Tensor"]:  # noqa: ARG002
+    def separate(self, wav: torch.Tensor) -> dict[str, torch.Tensor]:
         """将混合音频分解为四轨。
 
         Args:
@@ -33,4 +33,4 @@ class DemucsSeparator:
         Returns:
             ``{stem: [B, T_samples]}`` 映射，键见 :data:`STEMS`。
         """
-        ...
+        raise NotImplementedError

@@ -1,0 +1,24 @@
+osu file format v14
+
+[General]
+Mode: 3
+
+[Metadata]
+Title:Minimal
+Artist:Minimal
+Creator:Min
+Version:Easy
+BeatmapID:1
+BeatmapSetID:1
+Tags:
+
+[Difficulty]
+CircleSize:4
+OverallDifficulty:3
+
+[TimingPoints]
+0,600,4,0,0,100,1,0
+
+[HitObjects]
+64,192,1000,1,0,0:0:0:0:
+256,192,2000,1,0,0:0:0:0:

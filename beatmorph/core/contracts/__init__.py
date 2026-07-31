@@ -5,6 +5,7 @@
 """
 
 from beatmorph.core.contracts.events import (
+    BpmPoint,
     Chart,
     GameMode,
     Note,
@@ -14,35 +15,33 @@ from beatmorph.core.contracts.events import (
 )
 from beatmorph.core.contracts.tensors import (
     AR_CONTEXT_TOKENS,
-    AudioEmbedding,
     CODEBOOK_BASE,
     CODEBOOK_FINE,
     DEFAULT_LANE_COUNT,
     MERT_DEFAULT_FEAT_DIM,
     MERT_FRAME_RATE_HZ,
+    AudioEmbedding,
     PlanOutput,
     RAGContext,
     TokenSeq,
 )
 
 __all__ = [
-    # events
-    "Note",
-    "NoteType",
-    "GameMode",
-    "Section",
-    "Chart",
-    "PatternToken",
-    # tensors
-    "AudioEmbedding",
-    "PlanOutput",
-    "TokenSeq",
-    "RAGContext",
-    # 常量
-    "MERT_FRAME_RATE_HZ",
-    "MERT_DEFAULT_FEAT_DIM",
+    "AR_CONTEXT_TOKENS",
     "CODEBOOK_BASE",
     "CODEBOOK_FINE",
     "DEFAULT_LANE_COUNT",
-    "AR_CONTEXT_TOKENS",
+    "MERT_DEFAULT_FEAT_DIM",
+    "MERT_FRAME_RATE_HZ",
+    "AudioEmbedding",
+    "BpmPoint",
+    "Chart",
+    "GameMode",
+    "Note",
+    "NoteType",
+    "PatternToken",
+    "PlanOutput",
+    "RAGContext",
+    "Section",
+    "TokenSeq",
 ]

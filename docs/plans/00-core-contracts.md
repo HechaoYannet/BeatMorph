@@ -6,7 +6,7 @@
 ## 1. 目标与范围
 
 ### 交付
-- 跨模块共享的数据类型（`Note`/`Chart`/`Section`/`PatternToken` 等）。
+- 跨模块共享的数据类型（`Note`/`BpmPoint`/`Chart`/`Section`/`PatternToken` 等）。
 - 跨模块张量形状约定（`AudioEmbedding`/`PlanOutput`/`TokenSeq`/`RAGContext`）。
 - 关键常量（MERT 帧率 25Hz、码本 2048/4096、4K 键位、AR 上下文 256）。
 - 统一日志入口。
@@ -29,7 +29,9 @@
 | MERT 25Hz、768d | §3.1 |
 | 码本 2048/4096、AR 256 tokens | §3.2 / §3.4.1 |
 
-**唯一偏离**：奠基文档未明确 Note 时间单位。本计划规定 `Note.time` 为**秒（float）**，理由：① 与音频时间轴天然对齐；② 内部统一浮点，写入各格式时由 Writer 转毫秒/Beat。该决策记入 RFC-0001。
+**偏离 1**：奠基文档未明确 Note 时间单位。本计划规定 `Note.time` 为**秒（float）**，理由：① 与音频时间轴天然对齐；② 内部统一浮点，写入各格式时由 Writer 转毫秒/Beat。已由 [RFC-0001](../decisions/RFC-0001-note-time-unit.md) 采纳定稿。
+
+**偏离 2**：奠基文档全程以 scalar `bpm` 描述，未覆盖变速曲。`Chart` 改用 `bpm_points: list[BpmPoint]`（至少 1 个，按 time 升序）表示「时间→BPM」分段常数序列；常速曲退化为单元素列表。已由 [RFC-0005](../decisions/RFC-0005-bpm-timepoints.md) 采纳定稿，影响 plan 02/03/08。
 
 ## 3. 接口契约
 
@@ -49,12 +51,12 @@ class Chart(BaseModel):
     version: str = "ir-1"        # IR schema 版本，破坏性变更时升号
     mode: GameMode = MANIA_4K
     difficulty: int              # 1-15
-    bpm: float > 0
+    bpm_points: list[BpmPoint]   # >=1，按 time 升序（RFC-0005 变速时间点）
     notes: list[Note]
     sections: list[Section]      # 可选（Stage1 产物）
     meta: dict[str, str|int|float]
 ```
-方法：`lane_count()`、`sorted_notes()`（按 (time,lane) 确定性排序）。
+方法：`primary_bpm()`（取首点 BPM，供标量场景）、`lane_count()`、`sorted_notes()`（按 (time,lane) 确定性排序）。`BpmPoint(time: 秒, bpm: float>0)`。
 
 ### 3.3 Section / PatternToken
 见 `beatmorph/core/contracts/events.py`。`density_target`/`energy_level`/`rest_probability` 均 ∈[0,1]，由 pydantic `Field(ge=0,le=1)` 强制。
@@ -100,6 +102,6 @@ class Chart(BaseModel):
 
 ## 9. 开放问题
 
-- [ ] RFC-0001：Note 时间单位秒 vs 毫秒（本计划暂定秒）。
-- [ ] 多 BPM 变速曲目的 `bpm` 字段是否需扩为列表 + 时间点（奠基文档未覆盖）。
+- [x] RFC-0001：Note 时间单位秒 vs 毫秒 —— [采纳，秒](../decisions/RFC-0001-note-time-unit.md)。
+- [x] 多 BPM 变速曲目的 `bpm` 字段是否需扩为列表 + 时间点 —— [采纳 RFC-0005](../decisions/RFC-0005-bpm-timepoints.md)，`Chart.bpm_points: list[BpmPoint]`。
 - [ ] `GameMode.OSU_STD` 非键位模型，`lane_count()` 返回 0 的语义待 Phase 4 明确。

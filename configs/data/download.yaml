@@ -1,0 +1,35 @@
+# Hydra 数据下载配置 — sayobot.cn 镜像抓取（RFC-0024）
+# 奠基文档 §4.3 数据获取 / Plan 08 §1。脚本：scripts/download_sayobot.py
+#
+# 用法：uv run python scripts/download_sayobot.py --raw-dir <raw_dir> ...
+#      本 yaml 仅为可复现记录/日志，CLI 自带等价默认值，二者阈值与 PreprocessPipeline 常量同口径。
+
+download:
+  source: sayobot
+  api_base: https://api.sayobot.cn
+  download_base: https://txy1.sayobot.cn
+
+  # 落地目录与 manifest（均落在 gitignored data/raw/ 下）
+  raw_dir: ${oc.env:BEATMORPH_RAW_DIR,data/raw}
+  manifest: ${oc.env:BEATMORPH_RAW_DIR,data/raw}/manifest.jsonl
+  cache_dir: ${oc.env:BEATMORPH_RAW_DIR,data/raw}/.osz_cache
+
+  # §4.3 质量过滤阈值（与 PreprocessPipeline.MIN_STARS / MIN_PLAY_COUNT 同口径）
+  min_stars: 3.0
+  min_play_count: 500
+
+  # sayobot 列表 API 参数（mania 全流派全语言）
+  mode: 8              # mania 位掩码 bit3
+  class: 31
+  subtype: 63
+  genre: 1535
+  language: 4095
+  page_limit: 25       # 单页条数
+
+  # 下载策略
+  only_4k: true        # 仅保留含 4K mania diff 的 set（奠基 §1.1 4K 优先）
+  skip_unranked: true  # 跳过 order==0.0 或 approved==3（省带宽，§4.3 本就会剔）
+  rate_delay_s: 1.0    # 每 set 间隔（礼貌限流）
+  retries: 3           # 连接级重试
+  keep_osz: false      # 解压后删除 .osz 缓存
+  no_verify: false     # cmcc:25225 证书失败时脚本自动按请求降级 verify=False（见 RFC-0024 风险）

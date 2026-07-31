@@ -73,7 +73,7 @@ class PreprocessPipeline:
 ## 4. 内部设计
 
 - **Step1 解析**：`parse_osu(path)` → `OsuManiaReader.read` 得 `Chart`；清理规则——丢弃负时间 Note、`lane` 越界丢弃、同名文件 0 字节跳过、编码乱码以 cp936/utf-8 兜底重试。StepMania 走 `SmReader` 同构。
-- **Step2 统计量（伪标签）**：`compute_section_stats(chart, section_bars=4)` 按 BPM 切每 4 小节一个 `Section`；density = 段内 NPS / 全曲峰值 NPS；energy = Note 密度加权×HOLD 比例；rest = 间隔 > 阈值比例；sections_type = 启发式（intro/outro/低谷规则）。回填 `Chart.sections`，供 Plan 03 直接读作监督信号。与 Plan 03 伪标签生成器共口径，避免语义漂移。
+- **Step2 统计量（伪标签）**：`compute_section_stats(chart, section_bars=4)` 按 `Chart.bpm_points`（RFC-0005，变速曲分段推小节）切每 4 小节一个 `Section`；density = 段内 NPS / 全曲峰值 NPS；energy = Note 密度加权×HOLD 比例；rest = 间隔 > 阈值比例；sections_type = 启发式（intro/outro/低谷规则）。回填 `Chart.sections`，供 Plan 03 直接读作监督信号。与 Plan 03 伪标签生成器共口径，避免语义漂移。
 - **Step3 MERT 离线提取**：音频按切片策略切段 → Plan 01 MERT `encode`（FP16）→ `(time_seq, 768)` 写盘；切片对齐到 `Section` 边界便于下游。`extract_mert_embeddings(audio_dir)` 批量产出，单次产出多次训练复用（§4.2「节省训练时算力」）。
 - **Step4 构建 VQ-VAE 数据集**：`(audio_emb, Chart, sections, 偏好对?)` 序列化为 HF `Dataset`，`cache_format='parquet'` 落地，支持流式 / 随机访问。
 - **质量过滤（§4.3）**：`difficulty_rating` ≥ `MIN_STARS=3.0` 且 `playcount > 500`；同曲目不同谱面为独立样本保留；DPO 偏好对取 `≥4.5星高Pass` vs `≤2星` 构造（§3.6 数据来源）。
@@ -132,5 +132,5 @@ Phase 1 聚焦 osu! 主链路（M1-M4 全在 osu!），其余源按 §7 R-6 节�
 - [ ] RFC-0020：解析产出用 `Chart` IR 统一 vs 沿用奠基「NoteEvent[]」术语——本计划已统一到契约，待 RFC 定稿确认。
 - [ ] RFC-0021：`section_bars` 默认 4 是否随曲风/拍号动态调整（奠基未指定）。
 - [ ] RFC-0004（依赖）：训练数据起步量 50K（§3.2.1）vs 100 万+（§4.1）的路线——与 Plan 02 对齐，本计划先 10K 提取为 Phase1 里程碑。
-- [ ] RFC-0005（依赖）：变速曲目 `bpm` 字段扩展（Plan 02/03 共提）直接影响 `compute_section_stats` 的小节切分，本模块伪标签同受影响。
+- [x] RFC-0005（依赖）：变速曲目 `bpm` 字段扩展——已采纳 `bpm_points`（见 [RFC-0005](../decisions/RFC-0005-bpm-timepoints.md)），`compute_section_stats` 的小节切分按分段 BPM 推导，本模块伪标签同此口径。
 - [ ] DPO 偏好对构造的"高/低星"阈值（§3.6 的 4.5/2 星）与 §4.3 过滤阈值的协同口径待与 Plan 06 联合定义。

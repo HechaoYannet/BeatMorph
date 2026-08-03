@@ -3,11 +3,11 @@
 - :class:`PlannerDataset`：Stage1 密度规划训练数据。每样本 yield
   ``(audio_emb, target, difficulty, section_bounds)``：从 ``charts.jsonl`` 读
   ``Chart``（含 ``compute_section_stats`` 产出的 sections 伪标签），配对同
-  ``beatmap_id`` 的离线 MERT embedding ``.pt``。
+  ``beatmap_set_id`` 的离线 MERT embedding ``.pt``（同 set 多难度共享一份去冗余）。
 - :class:`MERTExtractionDataset`：离线提取用，yield ``(.osu_path, audio_path)``。
 
 数据来源：PreprocessPipeline 的 jsonl/parquet 产出（含 sections）+
-``extract_mert_embeddings`` 产的 ``{beatmap_id}.pt``。
+``extract_mert_embeddings`` 产的 ``{beatmap_set_id}.pt``（同 set 共享一份）。
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ class PlannerDataset(Dataset):
 
     Args:
         charts_path: ``charts.jsonl``（PreprocessPipeline 产出，每行一个 Chart JSON）。
-        embeddings_dir: ``{beatmap_id}.pt`` 目录（extract_mert_embeddings 产出）。
+        embeddings_dir: ``{beatmap_set_id}.pt`` 目录（同 set 共享一份）（extract_mert_embeddings 产出）。
         section_bars: Section 小节数（与 planner 一致，默认 4）。
 
     每样本：
@@ -117,8 +117,14 @@ class PlannerDataset(Dataset):
                 if not chart.sections:
                     continue
 
-                bid = chart.meta.get("beatmap_id", self.charts_path.stem)
-                emb_path = self.embeddings_dir / f"{bid}.pt"
+                # embedding 按 beatmap_set_id 存储（同 set 多难度共享一份，见 embed.py）
+                sid = chart.meta.get("beatmap_set_id")
+                key = (
+                    str(sid)
+                    if sid is not None
+                    else chart.meta.get("beatmap_id", self.charts_path.stem)
+                )
+                emb_path = self.embeddings_dir / f"{key}.pt"
                 if not emb_path.exists():
                     n_missing += 1
                     continue

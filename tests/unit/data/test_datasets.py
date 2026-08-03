@@ -17,8 +17,8 @@ from beatmorph.data.datasets import MERTExtractionDataset, PlannerDataset
 # ── 夹具构造 ──────────────────────────────────────────────────
 
 
-def _chart_json(beatmap_id: int, n_secs: int = 3) -> str:
-    """构造一个带 sections 的 Chart JSON（含 beatmap_id + sections）。"""
+def _chart_json(beatmap_id: int, n_secs: int = 3, beatmap_set_id: int = 1000) -> str:
+    """构造一个带 sections 的 Chart JSON（含 beatmap_id + beatmap_set_id + sections）。"""
     secs = [
         Section(
             index=i,
@@ -41,15 +41,18 @@ def _chart_json(beatmap_id: int, n_secs: int = 3) -> str:
         artist="a",
         notes=[],
         sections=secs,
-        meta={"beatmap_id": beatmap_id, "beatmap_set_id": 1000, "creator": "x"},
+        meta={"beatmap_id": beatmap_id, "beatmap_set_id": beatmap_set_id, "creator": "x"},
     )
     return chart.model_dump_json()
 
 
-def _write_charts(path: Path, bids: list[int]) -> None:
+def _write_charts(path: Path, bids: list[int], set_ids: list[int] | None = None) -> None:
+    """写 charts.jsonl。set_ids 缺省时每 bid 用 1000+i 作 sid（默认不同 sid）。"""
+    if set_ids is None:
+        set_ids = [1000 + i for i in range(len(bids))]
     with path.open("w", encoding="utf-8") as f:
-        for bid in bids:
-            f.write(_chart_json(bid) + "\n")
+        for bid, sid in zip(bids, set_ids, strict=True):
+            f.write(_chart_json(bid, beatmap_set_id=sid) + "\n")
 
 
 class TestPlannerDataset:
@@ -57,10 +60,10 @@ class TestPlannerDataset:
         charts = tmp_path / "charts.jsonl"
         emb_dir = tmp_path / "emb"
         emb_dir.mkdir()
-        bids = [101, 102]
-        _write_charts(charts, bids)
-        for bid in bids:
-            torch.save(torch.randn(50, 768), emb_dir / f"{bid}.pt")
+        # 两个不同 set（不同 sid），emb 按 sid 命名（去冗余后每 set 一份）
+        _write_charts(charts, [101, 102], set_ids=[1001, 1002])
+        torch.save(torch.randn(50, 768), emb_dir / "1001.pt")
+        torch.save(torch.randn(50, 768), emb_dir / "1002.pt")
 
         ds = PlannerDataset(charts, emb_dir, section_bars=4)
         assert len(ds) == 2
@@ -77,11 +80,11 @@ class TestPlannerDataset:
         charts = tmp_path / "charts.jsonl"
         emb_dir = tmp_path / "emb"
         emb_dir.mkdir()
-        _write_charts(charts, [101, 102])
-        torch.save(torch.randn(50, 768), emb_dir / "101.pt")  # 102 缺
+        _write_charts(charts, [101, 102], set_ids=[1001, 1002])
+        torch.save(torch.randn(50, 768), emb_dir / "1001.pt")  # 1002 缺
 
         ds = PlannerDataset(charts, emb_dir)
-        assert len(ds) == 1  # 仅 101
+        assert len(ds) == 1  # 仅 sid 1001
 
     def test_skips_no_sections(self, tmp_path: Path) -> None:
         charts = tmp_path / "charts.jsonl"
@@ -177,7 +180,7 @@ class TestExtractMertEmbeddingsMock:
             out_dir=out_dir,
             device="cpu",
         )
-        emb_path = out_dir / "5.pt"
+        emb_path = out_dir / "1000.pt"  # 按 set_id 去冗余（BeatmapSetID:1000）
         assert emb_path.exists()
         emb = torch.load(emb_path, weights_only=True)
         assert emb.dim() == 2
@@ -192,3 +195,71 @@ class TestExtractMertEmbeddingsMock:
             device="cpu",
         )
         assert mock.calls == 1  # 仍 1，未重抽
+
+
+class TestSetIdDedup:
+    """embedding 按 set_id 去冗余（优化 A）：同 set 多难度共享一份 {sid}.pt。"""
+
+    def test_planner_pairs_same_set_two_diffs(self, tmp_path: Path) -> None:
+        """同 set 两难度（bid 201/202，同 sid 3000）都配对到同一 3000.pt。"""
+        charts = tmp_path / "charts.jsonl"
+        emb_dir = tmp_path / "emb"
+        emb_dir.mkdir()
+        _write_charts(charts, [201, 202], set_ids=[3000, 3000])  # 同 sid
+        torch.save(torch.randn(50, 768), emb_dir / "3000.pt")  # set 级一份
+
+        ds = PlannerDataset(charts, emb_dir)
+        assert len(ds) == 2  # 两个难度都成立（共享同一 emb）
+        # 两样本 emb_path 都指向 3000.pt
+        assert ds._samples[0]["emb_path"] == ds._samples[1]["emb_path"] == emb_dir / "3000.pt"
+
+    def test_extract_dedups_same_set(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """同 set 两 .osu（引用同一 tone.wav）只提取一份 {sid}.pt。"""
+        import numpy as np
+
+        try:
+            import soundfile as sf
+        except ImportError:
+            pytest.skip("soundfile not installed")
+
+        osu_dir = tmp_path / "raw" / "5000"
+        osu_dir.mkdir(parents=True)
+        # 两个难度 .osu，同 sid 5000，同 audio tone.wav
+        for ver in ("Easy", "Hard"):
+            (osu_dir / f"{ver}.osu").write_text(
+                "osu file format v14\n"
+                "[General]\nMode: 3\nAudioFilename: tone.wav\n"
+                f"[Metadata]\nTitle:T\nArtist:A\nCreator:M\nVersion:{ver}\n"
+                "BeatmapID:0\nBeatmapSetID:5000\n"
+                "[Difficulty]\nCircleSize:4\nOverallDifficulty:7\n"
+                "[TimingPoints]\n0,500,4,0,0,100,1,0\n"
+                "[HitObjects]\n64,192,1000,1,0,0:0:0:0:\n",
+                encoding="utf-8",
+            )
+        sr = 16000
+        wav = (np.sin(2 * np.pi * 440 * np.arange(sr) / sr) * 0.3).astype(np.float32)
+        sf.write(str(osu_dir / "tone.wav"), wav, sr)
+
+        class _MockEnc:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def encode(self, w: torch.Tensor) -> torch.Tensor:
+                self.calls += 1
+                return torch.randn(1, 25, 768)
+
+        mock = _MockEnc()
+        out_dir = tmp_path / "emb"
+        from beatmorph.data.pipeline.embed import PreprocessPipeline
+
+        PreprocessPipeline(tmp_path / "raw", tmp_path / "processed").extract_mert_embeddings(
+            tmp_path / "raw",
+            encoder=mock,
+            out_dir=out_dir,
+            device="cpu",
+        )
+        # 只产一份 {sid}.pt，encode 只调一次（去冗余）
+        assert (out_dir / "5000.pt").exists()
+        assert mock.calls == 1
+        # 不应有 bid 命名的 .pt
+        assert not (out_dir / "0.pt").exists()

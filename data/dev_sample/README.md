@@ -38,7 +38,7 @@
 VQ-VAE/AR 冒烟若需 embedding,在 GPU 设备首次 clone 后自行补齐:
 
 ```bash
-# 用本样本的 .osu(或自带音频)跑离线提取,产出 data/embeddings/mert_v1_330m/{bid}.pt
+# 用本样本的 .osu(或自带音频)跑离线提取,产出 data/embeddings/mert_v1_330m/{beatmap_set_id}.pt(同 set 共享一份,见 docs/TRAINING.md)
 uv run python -c "
 from pathlib import Path
 from beatmorph.data.pipeline.embed import PreprocessPipeline

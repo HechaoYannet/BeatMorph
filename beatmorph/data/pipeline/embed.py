@@ -173,8 +173,9 @@ class PreprocessPipeline:
         """Step 3：批量离线提取 MERT Embedding，节省训练时算力（§4.2 Step3）。
 
         遍历 ``audio_dir`` 下所有 ``.osu``（rglob）→ ``parse_osu`` 取 ``Chart`` →
-        相对 ``.osu`` 父目录解析 ``chart.audio_path``（basename）→ 加载+重采样 16kHz
-        单声道 → ``MERTAdapter.encode`` → ``[T_seq, 768]`` 落盘（断点续抽，已存在跳过）。
+        相对 ``.osu`` 父目录解析 ``chart.audio_path``（basename）→ 加载+重采样
+        → ``MERTAdapter.encode`` → ``[T_seq, feat]`` 落盘（断点续抽，已存在跳过）。
+        按 ``beatmap_set_id`` 去冗余：同 set 多难度共享同一音频，只提取一份 ``{sid}.pt``。
 
         Args:
             audio_dir: 含 ``{sid}/*.osu`` + 音频的根目录（= :attr:`raw_dir`）。
@@ -199,6 +200,8 @@ class PreprocessPipeline:
 
         enc = encoder
         n_ok = n_skip = n_fail = 0
+        # sid → 首次提取该 set 时用的音频 basename，用于检测「同 set 不同音频」边界
+        sid_first_audio: dict[str, str] = {}
         for i, path in enumerate(osu_files, start=1):
             try:
                 chart = parse_osu(path)
@@ -206,11 +209,31 @@ class PreprocessPipeline:
                     n_skip += 1
                     continue
 
-                bid = chart.meta.get("beatmap_id", path.stem)
-                emb_path = out_dir / f"{bid}.pt"
+                # 按 beatmap_set_id 去冗余：同 set 多难度共享同一 audio.mp3，
+                # 只为每个 set 提取一份 embedding ({sid}.pt)，避免 N× 冗余 (2.4× 经验值)。
+                sid = chart.meta.get("beatmap_set_id")
+                if sid is None:
+                    # 无 set_id 兜底：回退 beatmap_id（不享去重，但保证可配对）
+                    key = str(chart.meta.get("beatmap_id", path.stem))
+                else:
+                    key = str(sid)
+                emb_path = out_dir / f"{key}.pt"
                 if emb_path.exists():
+                    # 同 set 已提过 → 跳过（去重核心）。检测同 set 不同音频边界并 warn。
+                    if sid is not None and chart.audio_path:
+                        first_audio = sid_first_audio.get(key)
+                        if first_audio is not None and first_audio != chart.audio_path:
+                            logger.warning(
+                                "Set %s: 多个 .osu 引用不同音频（%s vs 首次 %s），"
+                                "已按首次提取，后续忽略（RFC-0024 边界，Phase1 罕见）",
+                                key,
+                                chart.audio_path,
+                                first_audio,
+                            )
                     n_skip += 1
                     continue
+                if sid is not None and chart.audio_path:
+                    sid_first_audio[key] = chart.audio_path
 
                 wav = _load_audio_resampled(path.parent / chart.audio_path)
                 if wav is None:

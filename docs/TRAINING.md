@@ -170,7 +170,7 @@ pipe.extract_mert_embeddings(
 "
 ```
 
-**产物**:`$BEATMORPH_DATA_DIR/embeddings/mert_v1_330m/{beatmap_id}.pt`,每个 `[T_seq, 768]` float32
+**产物**:`$BEATMORPH_DATA_DIR/embeddings/mert_v1_330m/{beatmap_set_id}.pt`(按 set 去冗余,同 set 多难度共享一份),每个 `[T_seq, 1024]` float32
 (`T_seq ≈ duration_s × 25`)。`adapter='none'`(纯冻结主干表征,离线提取不训 Adapter)、FP16、**断点续抽**(已存在 `.pt` 跳过)。
 
 **校验**:
@@ -235,7 +235,7 @@ uv run python -m beatmorph.cli.train --config-name stage1_planner \
 | 产物 | 路径 | 由谁产出 | 下游消费者 |
 |------|------|---------|-----------|
 | `charts.{parquet,jsonl}` | `data/processed/` | §4 PreprocessPipeline | VQ-VAE 训练(Plan02)、AR 训练(Plan04)、PlannerDataset |
-| MERT embeddings `.pt` | `data/embeddings/mert_v1_330m/{bid}.pt` | §5 extract_mert | PlannerDataset、AR Cross-Attention |
+| MERT embeddings `.pt` | `data/embeddings/mert_v1_330m/{beatmap_set_id}.pt`(按 set 去冗余) | §5 extract_mert | PlannerDataset、AR Cross-Attention |
 | Stage1 planner ckpt | `runs/checkpoints/` | §6 train.py | AR 规划条件(Plan04) |
 | MERT+Adapter ckpt | (Phase1 可选,`adapter='none'` 离线提取不含 Adapter) | `--config-name stage0_mert` | Stage0 推理 |
 

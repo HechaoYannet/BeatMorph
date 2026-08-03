@@ -8,11 +8,12 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 import torch
 from pytorch_lightning import LightningModule, Trainer
 from pytorch_lightning.callbacks import ModelCheckpoint
+from pytorch_lightning.loggers import TensorBoardLogger
 
 from beatmorph.core.logging import get_logger
 from beatmorph.planner.density import DensityPlanner
@@ -74,11 +75,29 @@ class PlannerLitModule(LightningModule):
         return opt
 
 
+def _build_logger(infra: dict[str, Any], exp: dict[str, Any]) -> TensorBoardLogger | Literal[False]:
+    """构造实验 logger。
+
+    Phase 1 用 TensorBoard（奠基 §5 的 W&B 留 Phase 2）。
+    配置 ``infra.tensorboard.{dir,name,version}`` 控制输出位置，
+    ``enabled: false`` 可关闭记录。
+    """
+    tb = infra.get("tensorboard", {})
+    if not tb.get("enabled", True):
+        return False
+    return TensorBoardLogger(
+        save_dir=str(tb.get("dir", "runs/tensorboard")),
+        name=str(tb.get("name", exp.get("name", "beatmorph"))),
+        version=tb.get("version"),  # None → Lightning 按 run 自动新版本目录
+    )
+
+
 def build_trainer(cfg: DictConfig | dict[str, Any] | None = None) -> Trainer:
     """根据配置构造 Lightning Trainer（Phase 1 最小）。
 
-    cfg 可含 ``experiment.{max_steps,grad_accum,precision,gradient_clip}``、
-    ``trainer.{strategy,devices,accelerator}``、``infra.checkpoint.{dir,save_every_n_steps}``。
+    cfg 可含 ``experiment.{max_steps,grad_accum,precision,gradient_clip,log_every_n_steps}``、
+    ``trainer.{strategy,devices,accelerator}``、
+    ``infra.checkpoint.{dir,save_every_n_steps}``、``infra.tensorboard.{dir,name,version,enabled}``。
     """
     cfg = dict(cfg) if cfg is not None else {}
 
@@ -111,6 +130,7 @@ def build_trainer(cfg: DictConfig | dict[str, Any] | None = None) -> Trainer:
         devices=tr.get("devices", 1),
         accelerator=tr.get("accelerator", "gpu"),
         callbacks=callbacks,
-        logger=False,  # W&B Phase2
+        logger=_build_logger(infra, exp),
+        log_every_n_steps=int(exp.get("log_every_n_steps", 50)),
     )
     return trainer

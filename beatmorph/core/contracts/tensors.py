@@ -67,7 +67,7 @@ class RAGContext:
 
 # ── 模块间约定的关键常量 ──
 MERT_FRAME_RATE_HZ: float = 25.0          # 奠基文档 §3.1
-MERT_DEFAULT_FEAT_DIM: int = 768
+MERT_DEFAULT_FEAT_DIM: int = 1024  # MERT-v1-330M hidden_size
 CODEBOOK_BASE: int = 2048                 # §3.2 基础码本
 CODEBOOK_FINE: int = 4096                 # §3.2 精细码本
 DEFAULT_LANE_COUNT: int = 4               # §1.1 先攻 4K

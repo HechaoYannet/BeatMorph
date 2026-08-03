@@ -253,7 +253,7 @@ class PreprocessPipeline:
         import os
 
         base = os.environ.get("BEATMORPH_DATA_DIR", "data/processed")
-        return Path(base) / "mert_v1_330m"
+        return Path(base) / "embeddings" / "mert_v1_330m"
 
     # ── 内部方法 ──────────────────────────────────────────────
 
@@ -371,7 +371,7 @@ def _audio_duration(audio_path: Path) -> float | None:
         return None
 
 
-def _load_audio_resampled(audio_path: Path, target_sr: int = 16000) -> object | None:
+def _load_audio_resampled(audio_path: Path, target_sr: int = 24000) -> object | None:
     """加载音频文件并重采样为目标采样率单声道，返回 numpy float32 ``[samples]``。
 
     优先 torchaudio（已装），fallback soundfile + 线性重采样。失败返回 None。

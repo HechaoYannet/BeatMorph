@@ -33,7 +33,7 @@ logger = get_logger(__name__)
 
 # ── 常量 ──────────────────────────────────────────────────────
 _DEFAULT_MODEL_NAME = "m-a-p/MERT-v1-330M"
-_TARGET_SR = 16000  # MERT 官方要求 16kHz 单声道
+_TARGET_SR = 24000  # MERT-v1-330M 官方要求 24kHz 单声道
 _WINDOW_S = 5.0  # 滑窗 5s
 _OVERLAP_S = 1.0  # 重叠 1s
 _FRAME_RATE = MERT_FRAME_RATE_HZ  # 25.0
@@ -157,9 +157,19 @@ class MERTAdapter(nn.Module):
     def _encode_chunk(self, wav: torch.Tensor) -> torch.Tensor:
         """编码一段 ≤5s 音频 → [B, T_seq, 768]。"""
         # MERT 需要 input_values（[normalized]），特征提取器做归一
-        inputs = self._feat_processor(wav, sampling_rate=_TARGET_SR, return_tensors="pt")
-        input_values = inputs["input_values"].to(wav.device)
+        # 特征提取器期望 1D 波形；传入 2D [1, samples] 在新版 transformers
+        # 中可能误加 channel 维 → squeeze 到 1D 后调用
+        wav_1d = wav.squeeze(0)  # [1, samples] → [samples]
+        inputs = self._feat_processor(wav_1d, sampling_rate=_TARGET_SR, return_tensors="pt")
+        input_values = inputs["input_values"]  # [samples] 或 [1, samples]
+        # 统一成 2D [batch, samples]
+        if input_values.dim() == 1:
+            input_values = input_values.unsqueeze(0)
+        elif input_values.dim() >= 3:
+            # 如有意外 channel 维 [batch, 1, samples] → squeeze
+            input_values = input_values.squeeze(1)
         dtype = torch.float16 if self.fp16 else torch.float32
+        input_values = input_values.to(dtype=dtype, device=wav.device)
 
         outputs = self.backbone(
             input_values,

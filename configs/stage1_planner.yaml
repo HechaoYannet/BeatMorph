@@ -13,6 +13,7 @@ experiment:
   grad_accum: 1
   precision: bf16-mixed      # PyTorch Lightning
   gradient_clip: 1.0
+  log_every_n_steps: 50      # TensorBoard 记录频率（step）
 
 trainer:
   strategy: auto             # 单卡；多卡改 fsdp
@@ -20,6 +21,11 @@ trainer:
   accelerator: gpu
 
 infra:
+  tensorboard:
+    dir: ${oc.env:BEATMORPH_RUNS_DIR,runs}/tensorboard
+    name: stage1_planner
+    # enabled: true           # false 关闭 TensorBoard 记录
+    # version: null           # null → 每次 run 自动新版本目录
   wandb:
     project: beatmorph
     entity: null
@@ -28,9 +34,14 @@ infra:
     dir: ${oc.env:BEATMORPH_RUNS_DIR,runs}/checkpoints
     save_every_n_steps: 2000
 
+train:
+  batch_size: 1   # Phase 1: 变长 embedding，单样本训练
+  lr: 3e-4
+  num_workers: 0
+
 log_level: INFO
 
 # data 段由 data/osu_50k.yaml 注入；planner 训练额外需 embeddings_dir
 data:
   charts_path: ${oc.env:BEATMORPH_DATA_DIR,data/processed}/charts.jsonl
-  embeddings_dir: ${oc.env:BEATMORPH_DATA_DIR,data/embeddings}/mert_v1_330m
+  embeddings_dir: ${oc.env:BEATMORPH_DATA_DIR,data/processed}/embeddings/mert_v1_330m

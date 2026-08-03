@@ -13,6 +13,7 @@ experiment:
   grad_accum: 1
   precision: bf16-mixed      # PyTorch Lightning
   gradient_clip: 1.0
+  log_every_n_steps: 50      # TensorBoard 记录频率（step）
 
 trainer:
   strategy: auto             # 单卡；多卡改 fsdp
@@ -20,6 +21,9 @@ trainer:
   accelerator: gpu
 
 infra:
+  tensorboard:
+    dir: ${oc.env:BEATMORPH_RUNS_DIR,runs}/tensorboard
+    name: stage2_ar_pretrain
   wandb:
     project: beatmorph
     entity: null

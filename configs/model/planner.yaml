@@ -5,7 +5,7 @@
 name: density_planner
 n_layers: 6             # 奠基 §3.3 6 层
 n_heads: 8
-dim: 768                # 与 MERT feat 对齐免投影
+dim: 1024               # 与 MERT-v1-330M feat 对齐免投影
 section_bars: 4         # 契约 PlanOutput.section_bars
 n_type_classes: 5       # intro/verse/chorus/bridge/outro
 dropout: 0.1

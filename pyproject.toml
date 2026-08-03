@@ -27,6 +27,7 @@ dependencies = [
     "einops>=0.7",                 # 张量形状语义化
     "tqdm>=4.66",
     "rich>=13.7",                  # 终端美化/日志
+    "torchcodec>=0.15.0",
 ]
 
 [project.optional-dependencies]

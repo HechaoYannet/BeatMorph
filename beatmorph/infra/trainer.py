@@ -47,13 +47,24 @@ class PlannerLitModule(LightningModule):
             batch["audio_emb"],
             batch["difficulty"],
             batch["section_bounds"],
+            section_mask=batch.get("section_mask"),
         )
         loss = self._loss_fn(pred, batch["target"])
         self.log("train/loss", loss, prog_bar=True)
-        self.log(
-            "train/loss_density",
-            torch.nn.functional.huber_loss(pred["density"].squeeze(-1), batch["target"]["density"]),
-        )
+        # density 分项 loss（mask-aware，跳过 padding 段）
+        mask = pred.get("section_mask")
+        den = pred["density"].squeeze(-1)
+        tgt_den = batch["target"]["density"]
+        if mask is not None:
+            self.log(
+                "train/loss_density",
+                torch.nn.functional.huber_loss(den[mask], tgt_den[mask]),
+            )
+        else:
+            self.log(
+                "train/loss_density",
+                torch.nn.functional.huber_loss(den, tgt_den),
+            )
         return loss
 
     def validation_step(self, batch: dict[str, Any], batch_idx: int) -> torch.Tensor:
@@ -61,6 +72,7 @@ class PlannerLitModule(LightningModule):
             batch["audio_emb"],
             batch["difficulty"],
             batch["section_bounds"],
+            section_mask=batch.get("section_mask"),
         )
         loss = self._loss_fn(pred, batch["target"])
         self.log("val/loss", loss, prog_bar=True)

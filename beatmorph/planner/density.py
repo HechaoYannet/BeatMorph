@@ -104,19 +104,22 @@ class DensityPlanner(nn.Module):
         difficulty: torch.Tensor,
         section_bounds: torch.Tensor,
         style_emb: torch.Tensor | None = None,
+        section_mask: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         """前向：段级回归 + 段落类型。
 
         Args:
-            audio_emb: ``[B, T_seq, 768]`` Stage0 输出。
+            audio_emb: ``[B, T_seq, dim]`` Stage0 输出（padding-aware collate 后 T_seq 取批次最大）。
             difficulty: ``[B]`` long，难度 1-15。
             section_bounds: ``[B, S+1]`` 每 batch 的 Section 时间边界秒，
                 ``section_bounds[:, :-1]`` 为各 Section 起始时间，
-                ``section_bounds[:, 1:]`` 为各 Section 结束时间。S = Section 数。
+                ``section_bounds[:, 1:]`` 为各 Section 结束时间。S = Section 数（padding 段 bounds=[0,0]）。
             style_emb: ``[B, top_k, dim]`` RAG 风格向量（可选，Phase 1 不用）。
+            section_mask: ``[B, S]`` bool，真段 True / padding 段 False。``loss_fn`` 据此过滤 padding。
+                None 表示无 padding（B=1 推理 / plan() 路径），此时 loss_fn 走原逻辑。
         Returns:
             dict 含 ``density/energy/rest [B,S,1]``（sigmoid 到 [0,1]）、
-            ``type_logits [B,S,5]``。
+            ``type_logits [B,S,5]``、及透传的 ``section_mask``。
         """
         if audio_emb.dim() != 3 or audio_emb.shape[-1] != self.dim:
             raise ValueError(f"audio_emb 须 [B,T_seq,{self.dim}]，得到 {tuple(audio_emb.shape)}")
@@ -148,6 +151,7 @@ class DensityPlanner(nn.Module):
             "energy": energy,
             "rest": rest,
             "type_logits": type_logits,
+            "section_mask": section_mask,
         }
 
     @torch.inference_mode()
@@ -220,27 +224,46 @@ class DensityPlanner(nn.Module):
         """多任务损失：Huber×3 + TV + CE(type)。
 
         Args:
-            pred: ``forward`` 输出（含 density/energy/rest/type_logits，[B,S,*]）。
+            pred: ``forward`` 输出（含 density/energy/rest/type_logits ``[B,S,*]`` 及
+                可选 ``section_mask [B,S]``）。
             target: dict 含 ``density/energy/rest [B,S]`` (float [0,1])、
                 ``type [B,S]`` (long 0..4)。
         """
-        l_den = F.huber_loss(pred["density"].squeeze(-1), target["density"])
-        l_eng = F.huber_loss(pred["energy"].squeeze(-1), target["energy"])
-        l_rst = F.huber_loss(pred["rest"].squeeze(-1), target["rest"])
-        l_reg = l_den + l_eng + l_rst
+        mask = pred.get("section_mask")  # [B,S] bool or None
+        den = pred["density"].squeeze(-1)  # [B, S]
 
-        # TV：相邻段密度差 L1（plan 03 §4，促平滑）
-        den = pred["density"].squeeze(-1)  # [b, s]
-        tv = (
-            (den[:, 1:] - den[:, :-1]).abs().mean()
-            if den.shape[1] > 1
-            else torch.zeros((), device=den.device)
-        )
-
-        l_type = F.cross_entropy(
-            pred["type_logits"].reshape(-1, self.n_type_classes),
-            target["type"].reshape(-1).long(),
-        )
+        if mask is None:
+            # 无 padding（B=1 推理 / plan() 路径）：原逻辑
+            l_den = F.huber_loss(den, target["density"])
+            l_eng = F.huber_loss(pred["energy"].squeeze(-1), target["energy"])
+            l_rst = F.huber_loss(pred["rest"].squeeze(-1), target["rest"])
+            l_reg = l_den + l_eng + l_rst
+            tv = (
+                (den[:, 1:] - den[:, :-1]).abs().mean()
+                if den.shape[1] > 1
+                else torch.zeros((), device=den.device)
+            )
+            l_type = F.cross_entropy(
+                pred["type_logits"].reshape(-1, self.n_type_classes),
+                target["type"].reshape(-1).long(),
+            )
+        else:
+            # padding-aware：仅真段（mask=True）参与 loss
+            m = mask
+            l_den = F.huber_loss(den[m], target["density"][m])
+            l_eng = F.huber_loss(pred["energy"].squeeze(-1)[m], target["energy"][m])
+            l_rst = F.huber_loss(pred["rest"].squeeze(-1)[m], target["rest"][m])
+            l_reg = l_den + l_eng + l_rst
+            # TV：仅相邻两段都为真时计差，跳过 padding 边界
+            adj = m[:, 1:] & m[:, :-1]  # [B, S-1]
+            if adj.any():
+                tv = (den[:, 1:][adj] - den[:, :-1][adj]).abs().mean()
+            else:
+                tv = torch.zeros((), device=den.device)
+            l_type = F.cross_entropy(
+                pred["type_logits"][m],
+                target["type"][m].long(),
+            )
         return self.huber_weight * l_reg + self.tv_weight * tv + self.ce_type_weight * l_type
 
     # ── 段级 pool ─────────────────────────────────────────────

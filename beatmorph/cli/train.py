@@ -66,23 +66,52 @@ def _resolve_data_paths(cfg: DictConfig) -> tuple[Path, Path]:
 
 
 def collate(batch: list[dict[str, Any]]) -> dict[str, Any]:
-    """简易 collate：各样本 section 数可能不一，逐样本拼成 batch tensor（按最大 S 填充）。
+    """padding-aware collate：变长 T_seq 与 S 按批次最大值填充，支持 batch>1。
 
-    Phase 1 简化：要求 batch 内 S 一致（DataLoader 默认 batch_size 可设 1 适配变长）。
+    产出 ``section_mask [B,S]``（真段=True，pad 段=False）供 ``loss_fn`` 过滤 padding 段；
+    ``audio_mask [B,T]`` 供下游清晰使用。padding 段的 section_bounds pad 为 [0,0]，
+    ``_pool_sections`` 天然将其 pool 成 0 向量（mask 0<=t<0 全 False），无需改 pool 逻辑。
     """
     import torch
 
-    audio_emb = torch.stack([b["audio_emb"] for b in batch])
-    difficulty = torch.stack([b["difficulty"] for b in batch])
-    section_bounds = torch.stack([b["section_bounds"] for b in batch])
+    b0 = batch[0]
+    feat = b0["audio_emb"].shape[-1]
+    dtype = b0["audio_emb"].dtype
+    b = len(batch)
+
+    # ── T_seq 填充（audio_emb）──
+    t_max = max(x["audio_emb"].shape[0] for x in batch)
+    audio_emb = torch.zeros(b, t_max, feat, dtype=dtype)
+    audio_mask = torch.zeros(b, t_max, dtype=torch.bool)
+    for i, x in enumerate(batch):
+        t = x["audio_emb"].shape[0]
+        audio_emb[i, :t] = x["audio_emb"]
+        audio_mask[i, :t] = True
+
+    # ── S 填充（section_bounds / target）──
+    s1_max = max(x["section_bounds"].shape[0] for x in batch)  # = S+1
+    s_max = s1_max - 1
+    section_bounds = torch.zeros(b, s1_max, dtype=torch.float32)
+    section_mask = torch.zeros(b, s_max, dtype=torch.bool)  # 真段=True
     target = {
-        k: torch.stack([b["target"][k] for b in batch])
+        k: torch.zeros(b, s_max, dtype=torch.long if k == "type" else torch.float32)
         for k in ("density", "energy", "rest", "type")
     }
+    for i, x in enumerate(batch):
+        s1 = x["section_bounds"].shape[0]
+        s = s1 - 1
+        section_bounds[i, :s1] = x["section_bounds"]
+        section_mask[i, :s] = True
+        for k in ("density", "energy", "rest", "type"):
+            target[k][i, :s] = x["target"][k]
+
+    difficulty = torch.stack([x["difficulty"] for x in batch])
     return {
         "audio_emb": audio_emb,
+        "audio_mask": audio_mask,
         "difficulty": difficulty,
         "section_bounds": section_bounds,
+        "section_mask": section_mask,
         "target": target,
     }
 

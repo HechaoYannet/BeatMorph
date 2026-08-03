@@ -4,7 +4,7 @@
 data:
   name: osu_50k
   parquet_dir: ${oc.env:BEATMORPH_DATA_DIR,data/processed}/osu_50k
-  embeddings_dir: ${oc.env:BEATMORPH_DATA_DIR,data/embeddings}/mert_v1_330m
+  embeddings_dir: ${oc.env:BEATMORPH_DATA_DIR,data/processed}/embeddings/mert_v1_330m
 
   # 质量过滤（奠基文档 §4.3）
   min_stars: 3.0

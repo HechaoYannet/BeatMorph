@@ -268,7 +268,7 @@ class OsuManiaReader(ChartReader):
                 continue
 
             bpm = 60000.0 / beat_length
-            time_s = time_ms / 1000.0  # ms→秒 (RFC-0001)
+            time_s = max(0.0, time_ms / 1000.0)  # ms→秒 (RFC-0001)，钳到 >= 0
             bpm_points.append(BpmPoint(time=time_s, bpm=bpm))
 
         # 按 time 升序（已由 osu! 规范保证，此处防御排序）

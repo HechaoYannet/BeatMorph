@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from beatmorph.core.contracts import BpmPoint, Chart, Note, NoteType
-from beatmorph.data.parsers.osu_path import compute_section_stats
+from beatmorph.data.parsers.osu_path import _compute_bar_boundaries, compute_section_stats
 
 
 def _make_chart(
@@ -129,3 +129,55 @@ class TestComputeSectionStats:
 
         for section in chart.sections:
             assert section.sections_type in ("intro", "verse", "chorus", "bridge", "outro")
+
+
+class TestBarBoundaryPhaseAlignment:
+    """RFC-0026：小节边界相位对齐（bpm_points[0].time 作节拍网格原点）。"""
+
+    def test_phase_zero_unchanged(self) -> None:
+        """phase=0（bpm_points[0].time=0）时边界与旧逻辑一致（零破坏）。"""
+        # 120bpm 4/4: bar=2s; dur=6s → [0, 2, 4, 6]
+        b = _compute_bar_boundaries([BpmPoint(time=0.0, bpm=120.0)], 6.0)
+        assert b[0] == 0.0
+        assert abs(b[1] - 2.0) < 1e-6
+        assert abs(b[-1] - 6.0) < 1e-6
+
+    def test_phase_positive_bar_starts_at_phase(self) -> None:
+        """phase>0：首段 [0, phase] 保留为 intro，首个音乐小节从 phase 起算。
+
+        真实 osu! 谱面音乐常从 timing point 时刻起拍（如 0.339s），bar 网格应
+        = phase + k*bar_dur，而非 0 + k*bar_dur（否则 Note 系统性错位，RFC-0026）。
+        """
+        # 120bpm bar=2s, phase=0.5 → [0, 0.5, 2.5, 4.5, ...]
+        b = _compute_bar_boundaries([BpmPoint(time=0.5, bpm=120.0)], 6.0)
+        assert b[0] == 0.0
+        assert abs(b[1] - 0.5) < 1e-6  # intro 段 [0, 0.5]
+        assert abs(b[2] - 2.5) < 1e-6  # 首个音乐小节起点 = phase + bar = 0.5 + 2.0
+        assert abs(b[3] - 4.5) < 1e-6
+        assert b[-1] >= 6.0 - 1e-6
+
+    def test_phase_alignment_lands_notes_on_beat(self) -> None:
+        """phase 对齐后，落在 bar 起点的 Note（=phase + k*bar）应属首个 bin。"""
+        from beatmorph.tokenizer.vqvae import rasterize_bar
+
+        # 120bpm bar=2s phase=0.5，Note 在 phase+2.0=2.5（首音乐 bar 起拍）
+        bps = [BpmPoint(time=0.5, bpm=120.0)]
+        bounds = _compute_bar_boundaries(bps, 10.0)
+        # 找首个音乐 bar（bounds[1]=0.5 → bounds[2]=2.5 是首音乐 bar）
+        bar_start = bounds[2]
+        bar_dur = bounds[3] - bounds[2]
+        # Note 精确在 bar 起点（downbeat），应落 bin 0
+        grid = rasterize_bar(
+            [Note(time=bar_start, lane=0, type=NoteType.TAP)],
+            bar_start,
+            bar_dur,
+            lane=4,
+            time_bins=64,
+        )
+        assert grid[0, 0, 0] == 1.0  # lane0, bin0, TAP
+
+    def test_phase_no_intro_when_phase_covers_all(self) -> None:
+        """total_duration < phase 时退化为 [0, phase]（不无限生成边界）。"""
+        b = _compute_bar_boundaries([BpmPoint(time=5.0, bpm=120.0)], 3.0)
+        assert b[0] == 0.0
+        assert abs(b[-1] - 3.0) < 1e-6 or b[-1] >= 3.0 - 1e-6

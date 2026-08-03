@@ -167,12 +167,22 @@ def _compute_bar_boundaries(bpm_points: list[BpmPoint], total_duration: float) -
     """按 bpm_points 分段推导所有小节边界时间点（秒）。
 
     返回 list[float]，长度 = 小节数 + 1（最后一个为 total_duration）。
+
+    **相位对齐（RFC-0026）**：osu! 非继承红线（uninherited timing point）的 ``time``
+    字段是节拍网格相位原点（downbeat 时刻）。小节网格 = ``phase + k × bar_dur``，
+    ``phase = bpm_points[0].time``，而非从 ``0.0`` 起算。``phase > 0`` 时首段
+    ``[0, phase]`` 为「网格前 intro 段」保留为独立边界（防丢该段 Note）；``phase == 0``
+    时等价旧行为。
     """
     if not bpm_points:
         return [0.0, total_duration]
 
+    phase = bpm_points[0].time
+    # 首边界恒为 0.0；phase>0 时次边界补 [0, phase] intro 段（防丢该段 Note）
     boundaries: list[float] = [0.0]
-    current_time = 0.0
+    if phase > 0:
+        boundaries.append(min(phase, total_duration))
+    current_time = phase
     bp_idx = 0
 
     while current_time < total_duration:

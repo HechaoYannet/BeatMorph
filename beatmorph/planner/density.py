@@ -312,12 +312,18 @@ def section_boundaries_from_bpm(
 
     返回 ``[t0, t1, ..., tN]``，长度 = Section 数 + 1，末点 >= duration_s。
     复用 plan 08 ``_compute_bar_boundaries`` 的小节边界思路，按 section_bars 步进取边界。
+
+    **相位对齐（RFC-0026）**：小节网格从 ``bpm_points[0].time``（节拍相位原点）起算，
+    非 ``0.0``。``phase > 0`` 时首段 ``[0, phase]`` 作独立 intro Section 保留。
     """
     if not bpm_points:
         return [0.0, float(duration_s)]
 
+    phase = bpm_points[0].time
     boundaries: list[float] = [0.0]
-    current = 0.0
+    if phase > 0:
+        boundaries.append(min(phase, duration_s))
+    current = phase
     bp_idx = 0
     bars_since_section = 0
 

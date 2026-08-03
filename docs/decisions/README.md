@@ -73,5 +73,8 @@
 | RFC-0023 | 检查点本地 vs 云（OSS/S3）存储 | 09 | 提案 |
 | RFC-0024 | sayobot 数据源与 §4.3 质量过滤激活 | 08 | [采纳](RFC-0024-sayobot-data-source.md) |
 | RFC-0025 | R-6 细化：多 K mania 数据诚实标记 + 训练层 4K 过滤 | 00/07/08 | [采纳](RFC-0025-multikey-data-r6.md) |
+| RFC-0026 | 小节边界相位对齐（修复栅格化系统性错位） | 02/03/08 | [采纳](RFC-0026-bar-boundary-phase-alignment.md) |
+| RFC-0027 | VQ-VAE encoder：栅格 1D-CNN → note 集合 set-transformer（评估） | 02 | 提案（待 50K M2 触发） |
+| RFC-0028 | 修宪议案：tokenizer 范式 VQ-VAE 小节粒度 → BPE/event（范式级 Plan B） | 02/04/07（BasePlan §3.2） | 修宪议案（待 PoC） |
 
-> 下一个可用编号：**RFC-0026**。
+> 下一个可用编号：**RFC-0029**。

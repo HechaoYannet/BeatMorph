@@ -1,6 +1,6 @@
 """MERT.encode → DensityPlanner.plan 端到端集成测试。
 
-- 合成 audio_emb 路径（不需 MERT 权重）：直接喂随机 [B,T,768] 给 planner。
+- 合成 audio_emb 路径（不需 MERT 权重）：直接喂随机 [B,T,feat] 给 planner。
 - 真实 MERT 路径（需 GPU + 权重，标 ``@gpu``+``@slow``）：真实 wav → MERT.encode → plan。
 """
 
@@ -9,6 +9,7 @@ from __future__ import annotations
 import pytest
 import torch
 
+from beatmorph.core.contracts import MERT_DEFAULT_FEAT_DIM
 from beatmorph.planner.density import DensityPlanner
 
 
@@ -19,7 +20,7 @@ class TestPlannerOnSyntheticAudioEmb:
         planner = DensityPlanner(n_layers=2)
         dur = 32.0  # 120BPM 4/4 → bar=2s; section_bars=4 → 8s/section → 4 sections
         t_seq = round(dur * 25)
-        audio_emb = torch.randn(1, t_seq, 768)
+        audio_emb = torch.randn(1, t_seq, MERT_DEFAULT_FEAT_DIM)
 
         sections = planner.plan(
             audio_emb,
@@ -50,7 +51,7 @@ class TestPlannerOnSyntheticAudioEmb:
 
         for _ in range(2):
             B, S = 2, 4
-            audio_emb = torch.randn(B, 200, 768)
+            audio_emb = torch.randn(B, 200, MERT_DEFAULT_FEAT_DIM)
             difficulty = torch.tensor([5, 10])
             bounds = torch.linspace(0, 8, S + 1).unsqueeze(0).expand(B, -1).contiguous()
             pred = planner(audio_emb, difficulty, bounds)
@@ -87,8 +88,8 @@ class TestRealMertToPlanner:
         sr = 16000
         dur = 2.0
         wav = torch.randn(1, int(dur * sr))
-        emb = enc.encode(wav)  # [1, T_seq, 768]
-        assert emb.shape[-1] == 768
+        emb = enc.encode(wav)  # [1, T_seq, feat]
+        assert emb.shape[-1] == MERT_DEFAULT_FEAT_DIM
 
         planner = DensityPlanner(n_layers=2).cuda()
         secs = planner.plan(

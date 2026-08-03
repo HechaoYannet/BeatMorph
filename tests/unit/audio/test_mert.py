@@ -10,6 +10,8 @@ from __future__ import annotations
 import pytest
 import torch
 
+from beatmorph.core.contracts import MERT_DEFAULT_FEAT_DIM
+
 pytestmark = [pytest.mark.gpu]
 
 
@@ -68,23 +70,25 @@ class TestMERTAdapterStructure:
         """_MLPAdapter 结构与前向（不依赖主干，避免 1.3GB 下载）。"""
         from beatmorph.audio.encoder.mert import _MLPAdapter
 
-        mlp = _MLPAdapter(768)
-        x = torch.randn(2, 10, 768)
+        mlp = _MLPAdapter(MERT_DEFAULT_FEAT_DIM)
+        x = torch.randn(2, 10, MERT_DEFAULT_FEAT_DIM)
         out = mlp(x)
-        assert out.shape == (2, 10, 768)
+        assert out.shape == (2, 10, MERT_DEFAULT_FEAT_DIM)
 
     def test_merge_overlapping_shape(self) -> None:
-        from beatmorph.audio.encoder.mert import MERTAdapter
+        from beatmorph.audio.encoder.mert import _TARGET_SR, MERTAdapter
 
-        # 两段，每段 [B=1, T=125, 768]，70ms 后下一段（hop=4s 起）
-        seg1 = torch.ones(1, 125, 768)
-        seg2 = torch.ones(1, 125, 768) * 2.0
-        starts = [0, int(4.0 * 16000)]
-        merged = MERTAdapter._merge_overlapping([seg1, seg2], starts, int(4.0 * 16000))
-        # 总帧数 = 第二段尾 = 100帧(start) + 125 = 225
+        # 两段，每段 [B=1, T=125, feat]，第二段从 4s 处开始（hop=4s）
+        feat = MERT_DEFAULT_FEAT_DIM
+        seg1 = torch.ones(1, 125, feat)
+        seg2 = torch.ones(1, 125, feat) * 2.0
+        # starts/hop 用样本数表达 4s，必须用 _TARGET_SR（GPU 修复后 24kHz，见 TRAINING_LOG Bug1）
+        starts = [0, int(4.0 * _TARGET_SR)]
+        merged = MERTAdapter._merge_overlapping([seg1, seg2], starts, int(4.0 * _TARGET_SR))
+        # 总帧数 = 第二段尾 = 100帧(4s*25) + 125 = 225
         assert merged.shape[0] == 1
         assert merged.shape[1] == 225
-        assert merged.shape[-1] == 768
+        assert merged.shape[-1] == feat
 
 
 class TestMERTAdapterReal:
@@ -106,7 +110,7 @@ class TestMERTAdapterReal:
 
         assert emb.dim() == 3
         assert emb.shape[0] == 1
-        assert emb.shape[-1] == 768
+        assert emb.shape[-1] == MERT_DEFAULT_FEAT_DIM
         # 帧率 ≈ dur*25，允许 ±1 帧
         expected = round(dur_s * 25)
         assert abs(emb.shape[1] - expected) <= 1, f"T_seq={emb.shape[1]}, expected~{expected}"

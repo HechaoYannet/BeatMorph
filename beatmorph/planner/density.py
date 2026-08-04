@@ -311,33 +311,40 @@ def section_boundaries_from_bpm(
     """按 bpm_points + section_bars 推 Section 时间边界（秒）。
 
     返回 ``[t0, t1, ..., tN]``，长度 = Section 数 + 1，末点 >= duration_s。
-    复用 plan 08 ``_compute_bar_boundaries`` 的小节边界思路，按 section_bars 步进取边界。
+
+    RFC-0028：本函数委托 ``compute_bar_boundaries``（osu_path.py，已公开的 RFC-0026
+    phase 脊柱）推小节边界，再按 ``section_bars`` 步进收 Section 边界——避免此前手抄
+    副本与 ``compute_bar_boundaries`` 漂移。
 
     **相位对齐（RFC-0026）**：小节网格从 ``bpm_points[0].time``（节拍相位原点）起算，
     非 ``0.0``。``phase > 0`` 时首段 ``[0, phase]`` 作独立 intro Section 保留。
+
+    Args:
+        bpm_points: BPM 变速点（至少 1 个，按 time 升序）。
+        duration_s: 总时长秒。
+        section_bars: 每 Section 小节数（默认 4）。
+        meter: 拍号（默认 4，4/4）。
+    Returns:
+        Section 边界秒列表，长度 = Section 数 + 1。
     """
+    from beatmorph.data.parsers.osu_path import compute_bar_boundaries
+
     if not bpm_points:
         return [0.0, float(duration_s)]
 
-    phase = bpm_points[0].time
-    boundaries: list[float] = [0.0]
-    if phase > 0:
-        boundaries.append(min(phase, duration_s))
-    current = phase
-    bp_idx = 0
-    bars_since_section = 0
+    bar_bounds = compute_bar_boundaries(bpm_points, duration_s)
+    # bar_bounds[0]=0.0（首边界恒 0）；phase>0 时 bar_bounds[1]=phase（intro 段）
+    # 按 section_bars 步进收 Section 边界（含 intro 段作为首个 Section）
+    section_bounds: list[float] = [0.0]
+    n_bars = len(bar_bounds) - 1
+    i = 1  # 跳过首个 0.0
+    while i <= n_bars:
+        # 取 i 到 i+section_bars-1 的 bar 区间为一个 Section
+        end = min(i + section_bars - 1, n_bars)
+        section_end = bar_bounds[end]
+        section_bounds.append(min(section_end, duration_s))
+        i = end + 1
 
-    while current < duration_s:
-        while bp_idx + 1 < len(bpm_points) and bpm_points[bp_idx + 1].time <= current:
-            bp_idx += 1
-        bpm = max(bpm_points[bp_idx].bpm, 1e-6)
-        bar_dur = meter * 60.0 / bpm
-        current += bar_dur
-        bars_since_section += 1
-        if bars_since_section >= section_bars:
-            boundaries.append(min(current, duration_s))
-            bars_since_section = 0
-
-    if boundaries[-1] < duration_s:
-        boundaries.append(float(duration_s))
-    return boundaries
+    if section_bounds[-1] < duration_s:
+        section_bounds.append(float(duration_s))
+    return section_bounds

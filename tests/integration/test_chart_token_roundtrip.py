@@ -1,11 +1,9 @@
-"""Chart ↔ Token 往返集成测试（Plan 02 M1）。
+"""Chart ↔ Token 往返集成测试（Plan 02 M1，RFC-0028 后含 VQ + BPE 双往返）。
 
 真实 ``.osu`` → ``Chart``（parse_osu）→ ``encode`` → ``decode`` → 结构往返断言。
-提供可复用 :func:`measure_reconstruction_accuracy` 工具（Note time±20ms 且 lane 完全
-匹配比例），供 M2 训练后 ``@slow @gpu`` 测试用。
-
-未训练小模型不达 95% 重建，集成测试只验路径打通（同
-``tests/integration/test_audio_to_plan.py`` 的 CPU/gpu 分离模式）。
+``measure_reconstruction_accuracy`` 工具已提到 :mod:`beatmorph.core.eval`
+（RFC-0028），本文件保留 VQ 往返测（随 vqvae.py 留在 baseline 分支）+ 新增
+BPE/event 往返测（主路径，应 == 1.0 无损）。
 """
 
 from __future__ import annotations
@@ -15,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from beatmorph.core.contracts import BpmPoint, Chart, GameMode, Note, NoteType
+from beatmorph.core.eval import measure_reconstruction_accuracy
 from beatmorph.data.parsers.osu_path import parse_osu
 from beatmorph.tokenizer.vqvae import VQVAETokenizer
 
@@ -36,39 +35,6 @@ def _small_tok() -> VQVAETokenizer:
         transformer_heads=2,
         dead_code_steps=3,
     )
-
-
-def measure_reconstruction_accuracy(
-    orig: Chart,
-    recon: Chart,
-    tol_s: float = 0.02,
-) -> float:
-    """重建准确率：对 orig 每 Note 找 recon 中（lane 同、|时间差|<tol_s）的，贪心匹配比例。
-
-    奠基 §7 Phase1 / Plan 02 M2 验收口径：Note time±20ms 且 lane 完全匹配。
-
-    Args:
-        orig: 原始 Chart。
-        recon: 重建 Chart。
-        tol_s: 时间容差秒（默认 0.02=20ms）。
-    Returns:
-        匹配比例 [0,1]；orig 无 Note 时返回 1.0。
-    """
-    if not orig.notes:
-        return 1.0
-    orig_sorted = orig.sorted_notes()
-    recon_sorted = recon.sorted_notes()
-    used: list[bool] = [False] * len(recon_sorted)
-    matched = 0
-    for o in orig_sorted:
-        for j, r in enumerate(recon_sorted):
-            if used[j]:
-                continue
-            if o.lane == r.lane and abs(o.time - r.time) <= tol_s:
-                used[j] = True
-                matched += 1
-                break
-    return matched / len(orig_sorted)
 
 
 @pytest.mark.integration
@@ -161,3 +127,36 @@ def test_measure_reconstruction_accuracy_partial() -> None:
     )
     acc = measure_reconstruction_accuracy(orig, recon, tol_s=0.02)
     assert acc == pytest.approx(0.5)
+
+
+@pytest.mark.integration
+def test_bpe_chart_roundtrip(fixtures_dir: Path, tmp_path: Path) -> None:
+    """BPE/event tokenizer 真实 .osu → Chart → encode → decode 往返（RFC-0028）。
+
+    POS+NUDGE 设计无损，往返 measure == 1.0（lane 精确 + |Δt|≤20ms）。
+    """
+    pytest.importorskip("tokenizers")  # 需 train extra
+    osu_path = fixtures_dir / "sample_4k_mania.osu"
+    if not osu_path.exists():
+        pytest.skip(f"fixture 不存在: {osu_path}")
+
+    chart = parse_osu(osu_path)
+    assert chart.notes, "夹具谱面无 Note"
+
+    # 单曲训小词表（够覆盖该曲原子 event 即可）
+    from beatmorph.tokenizer import BPETokenizer
+
+    vocab_path = tmp_path / "bpe.json"
+    tok = BPETokenizer.train([chart], vocab_path, vocab_size=800, chart_id_key="beatmap_id")
+
+    tokens = tok.encode(chart)
+    assert tokens[0].id == 1  # BOS
+    assert tokens[-1].id == 2  # EOS
+    assert all(0 <= t.id < tok.vocab_size for t in tokens)
+
+    out = tok.decode(tokens, chart.bpm_points)
+    assert isinstance(out, Chart)
+    assert out.mode == GameMode.MANIA_4K
+    # POS+NUDGE 无损：往返 == 1.0
+    acc = measure_reconstruction_accuracy(chart, out, tol_s=0.02)
+    assert acc == 1.0, f"BPE 往返应无损，实际 {acc}"

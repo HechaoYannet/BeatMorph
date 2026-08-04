@@ -7,14 +7,14 @@
 
 ### 交付
 - 数据源策略与质量过滤：osu! 100 万+ / StepMania 5 万+ / BMS / 合成数据 / DPO 偏好百万级（奠基 §4.1），筛选 `≥3 星且 play_count > 500`（§4.3）。
-- 4 步自动化预处理流水线 `PreprocessPipeline(raw_dir, out_dir, cache_format='parquet').run()`（§4.2）：解析 `.osu`→NoteEvent[] 清理乱码 → 自动统计量做 Stage1 伪标签 → 音频切片 & MERT 离线预提取 Embedding → 构建 VQ-VAE 数据集，落 HF Datasets / Parquet。
+- 4 步自动化预处理流水线 `PreprocessPipeline(raw_dir, out_dir, cache_format='parquet').run()`（§4.2）：解析 `.osu`→NoteEvent[] 清理乱码 → 自动统计量做 Stage1 伪标签 → 音频切片 & MERT 离线预提取 Embedding → 构建 BPE/event 训练语料（Chart-IR，范式中立），落 HF Datasets / Parquet。
 - 解析器 `parse_osu(path) -> Chart` 与统计量 `compute_section_stats(chart, section_bars=4) -> Chart`。
 - MERT 离线提取 `extract_mert_embeddings(audio_dir)`，对接 Plan 01。
 - **Phase 1 里程碑**：10K 首 MERT Embedding 离线提取（奠基 §7）。
 
 ### 不交付
 - MERT 模型本体与 Adapter 训练（Plan 01；本模块仅离线批量调用其 `encode`）。
-- VQ-VAE 训练与 Stage1 伪标签回归训练（Plan 02 / Plan 03；本模块只产伪标签数据）。
+- BPE/event tokenizer 词表训练（Plan 02）与 Stage1 伪标签（Plan 03；本模块只产伪标签数据与 Chart-IR 语料）。
 - `.osu` 写入/导出（Plan 07 `Writer`；`Reader` 抽象归 io 层，本模块复用）。
 - DPO 偏好对齐算法（Plan 06）；本模块仅产偏好对原始数据。
 - 抓取与版权合规流程本身（§4.3 仅"学术研究"原则，工程外流程）。
@@ -31,13 +31,15 @@
 | Step1 解析 .osu → NoteEvent[] 清理乱码 | §4.2 | 微语义 | 骨架用 `parse_osu()` 返回 `Chart`（契约类型），非裸 list；NoteEvent 即 `Chart.notes` |
 | Step2 统计量 → Stage1 伪标签 | §4.2 | — | `compute_section_stats()` 回填 `Chart.sections` |
 | Step3 音频切片 & MERT 离线预提取 | §4.2 | — | 节省训练算力，与 Plan 01 MERT 接口对齐 |
-| Step4 构建 VQ-VAE 数据集存 HF/Parquet | §4.2 | — | `cache_format='parquet'` 默认 |
+| Step4 构建 BPE/event 训练语料存 HF/Parquet | §4.2 | — | `cache_format='parquet'` 默认，落 Chart-IR（范式中立，不绑 tokenizer） |
 | 质量过滤 ≥3 星且 play_count>500 | §4.3 | — | 常量 `MIN_STARS=3.0`/`MIN_PLAY_COUNT=500` |
 | 去重（同曲不同谱面为独立样本） | §4.3 | — | 按谱面级去重，非曲目级 |
 | 版权仅学术研究 | §4.3 | — | 流程约束，非代码逻辑 |
 
 **偏离 1**：奠基 §4.2 Step1 用「NoteEvent[]」与契约 `Chart` 术语不一致。本计划规定解析产出 `Chart`，NoteEvent 即 `Chart.notes`（契约 `Note` 列表），统一到核心契约 IR。记入 RFC-0020。
 **偏离 2**：奠基 §4.2 未指定 `section_bars`。本计划固定 `section_bars=4`（与契约 `PlanOutput.section_bars=4`、Plan 03 一致），保证伪标签与 Stage1 输出同构。记入 RFC-0021。
+
+> **RFC-0028 影响说明**：tokenizer 由 VQ-VAE 改 BPE/event 后，`PreprocessPipeline` 产物（Chart-IR、离线 MERT emb、段落统计量）**范式中立、无需重跑**——BPE 词表训练在 Plan 02 内部直接消费 `Chart.notes` 序列；`compute_bar_boundaries` 已公开供 BPE 的 `Bar`/`Position` event 复用；on-disk 10K MERT embedding 与 planner 正交，不受影响。
 
 ## 3. 接口契约
 
@@ -67,15 +69,15 @@ class PreprocessPipeline:
 | `Chart.notes`（IR） | `(N_notes,)` per `(time,lane,type,duration)` | §4.2 Step1 产物 |
 | MERT Emb（预提取） | `(sample, time_seq, 768)` | §4.2 Step3，`time_seq=秒数×25`，引用契约 `AudioEmbedding` |
 | Sections 伪标签 | `(num_sections, 3+1)` | density/energy/rest + type，§4.2 Step2 |
-| VQ-VAE 训练样本 | `(batch, audio_emb, chart_ir)` | §4.2 Step4 组装 |
-| `TokenSeq`（产物后） | — | 经 Plan 02 encode 得到，引契约 `TokenSeq` |
+| BPE 训练样本 | `(batch, audio_emb, chart_ir)` | §4.2 Step4 组装，范式中立 Chart-IR |
+| `EventSeq`（产物后） | — | 经 Plan 02 BPE encode 得到，引契约 `EventSeq` |
 
 ## 4. 内部设计
 
 - **Step1 解析**：`parse_osu(path)` → `OsuManiaReader.read` 得 `Chart`；清理规则——丢弃负时间 Note、`lane` 越界丢弃、同名文件 0 字节跳过、编码乱码以 cp936/utf-8 兜底重试。StepMania 走 `SmReader` 同构。
 - **Step2 统计量（伪标签）**：`compute_section_stats(chart, section_bars=4)` 按 `Chart.bpm_points`（RFC-0005，变速曲分段推小节）切每 4 小节一个 `Section`；density = 段内 NPS / 全曲峰值 NPS；energy = Note 密度加权×HOLD 比例；rest = 间隔 > 阈值比例；sections_type = 启发式（intro/outro/低谷规则）。回填 `Chart.sections`，供 Plan 03 直接读作监督信号。与 Plan 03 伪标签生成器共口径，避免语义漂移。
 - **Step3 MERT 离线提取**：音频按切片策略切段 → Plan 01 MERT `encode`（FP16）→ `(time_seq, 768)` 写盘；切片对齐到 `Section` 边界便于下游。`extract_mert_embeddings(audio_dir)` 批量产出，单次产出多次训练复用（§4.2「节省训练时算力」）。
-- **Step4 构建 VQ-VAE 数据集**：`(audio_emb, Chart, sections, 偏好对?)` 序列化为 HF `Dataset`，`cache_format='parquet'` 落地，支持流式 / 随机访问。
+- **Step4 构建 BPE/event 训练语料**：`(audio_emb, Chart, sections, 偏好对?)` 序列化为 HF `Dataset`，`cache_format='parquet'` 落地，支持流式 / 随机访问。产 Chart-IR，范式中立，不绑 tokenizer（VQ-VAE baseline 旧产物迁出由 RFC-0028 archive 分支处理，无需本流水线重跑）。
 - **质量过滤（§4.3）**：`difficulty_rating` ≥ `MIN_STARS=3.0` 且 `playcount > 500`；同曲目不同谱面为独立样本保留；DPO 偏好对取 `≥4.5星高Pass` vs `≤2星` 构造（§3.6 数据来源）。
 - **版权**：训练数据仅学术研究用途；元数据记录来源与许可，生成产物不含原音频拷贝（§4.3）。
 - **去重口径**：谱面级（chart_id）去重，曲目级保留多谱面以保多样性（§4.3）。
@@ -83,7 +85,7 @@ class PreprocessPipeline:
 ## 5. 依赖关系
 
 - **上游**：外部数据源（osu! / StepMania / BMS / 合成）；Plan 01 MERT `encode`（Step3 复用提取）；Plan 07 `OsuManiaReader`/`SmReader` 抽象（解析复用）。
-- **下游**：Plan 01（MERT Emb 验证）、Plan 02（VQ-VAE 训练数据，50K+ @ §3.2.1）、Plan 03（Stage1 伪标签，§4.2 Step2 直接对接）、Plan 04（AR 训练 50K→扩展至 §4.1 量级）、Plan 06（DPO 偏好对）。
+- **下游**：Plan 01（MERT Emb 验证）、Plan 02（BPE/event tokenizer 词表训练数据，50K+ @ §3.2.1）、Plan 03（Stage1 伪标签，§4.2 Step2 直接对接）、Plan 04（AR 训练 50K→扩展至 §4.1 量级）、Plan 06（DPO 偏好对）。
 - **外部库**：`datasets`(HuggingFace)、`pyarrow`、`librosa`（音频切片/重采样）、`transformers`（MERT 加载）、`pydantic>=2.5`（契约）。
 
 ## 6. 里程碑与验收标准
@@ -95,12 +97,12 @@ class PreprocessPipeline:
 | M1 `.osu` 解析 | 1K 样本 `parse_osu` 成功率 > 98%（失败仅因文件损坏），`Chart.notes` 无负时间/越界 |
 | M2 段落统计量 | `compute_section_stats` 输出 Section 无重叠覆盖时长，密度/能量分布直方图入 W&B，无 NaN |
 | M3 **10K MERT 离线提取** | 基奠 §7 Phase1 里程碑：10K 首 Embedding 落盘，`(sample, T_seq, 768)` shape 一致，耗时与显存记录入档 |
-| M4 质量过滤与数据集 | `≥3星且play_count>500` 过滤后样本量与分布入档；VQ-VAE 训练集（audio_emb+Chart）以 Parquet 落地，可被 Plan 02 直接 `load_dataset` |
+| M4 质量过滤与数据集 | `≥3星且play_count>500` 过滤后样本量与分布入档；BPE 训练语料（audio_emb+Chart-IR）以 Parquet 落地，范式中立，可被 Plan 02 直接 `load_dataset` |
 
 ### 数据源分工（奠基 §4.1 表落细）
 | 数据源 | 量级 | 接入 | 用途 |
 |--------|------|------|------|
-| osu! 官方/社区 | 100 万+ | `OsuManiaReader`（主） | VQ-VAE + AR 主训练；DPO 评分隐式标签 |
+| osu! 官方/社区 | 100 万+ | `OsuManiaReader`（主） | BPE 词表 + AR 主训练；DPO 评分隐式标签 |
 | StepMania/Etterna | 5 万+ | `SmReader` | VSRG 变体补充 |
 | BMS | 大量 | 待封装 Reader（Phase 2+） | 复杂谱面逻辑验证 |
 | 合成数据(DAW) | 无限 | 内部生成器 | 长尾拍号覆盖 |

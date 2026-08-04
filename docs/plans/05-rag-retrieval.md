@@ -49,8 +49,8 @@ class RAGRetriever:
         query_emb: Tensor,        # (time_seq, 768)  来自 Stage0，单条查询
         difficulty: int,          # 1-15，元数据过滤
         bpm: float,               # 元数据过滤/加权
-    ) -> list[list[PatternToken]]:  # 长度 = top_k，每条为参考序列
-    def build_context(self, refs: list[list[PatternToken]],
+    ) -> list[list[EventToken]]:  # 长度 = top_k，每条为参考序列
+    def build_context(self, refs: list[list[EventToken]],
                       style_embs: Tensor) -> RAGContext: ...
 ```
 
@@ -61,15 +61,15 @@ class RAGRetriever:
 | `query_emb` | `(time_seq, 768)` | 查询音频 MERT 输出，帧率 `MERT_FRAME_RATE_HZ=25` |
 | 检索库向量 | `(num_corpus, 768+density_dim)` | 音频 pooled 768d ⊕ 密度曲线 64d，L2 归一化 |
 | 查询向量 | `(768+density_dim,)` | 同上构造 |
-| `RAGContext.token_prefix` | `(batch, top_k, ref_seq_len)` | 检索到的参考 Token 序列，`ref_seq_len≤AR_CONTEXT_TOKENS=256` |
+| `RAGContext.token_prefix` | `(batch, top_k, ref_seq_len)` | 检索到的参考 event 序列，`ref_seq_len≤AR_CONTEXT_TOKENS=1024` |
 | `RAGContext.style_emb` | `(batch, top_k, feat)` | 各参考谱面风格向量，`feat=768` |
 
-- 输出 `list[list[PatternToken]]`（`PatternToken.code ∈ [0, CODEBOOK_BASE/FAINE)`），由 Decoder（Plan 07）消费索引语义。
+- 输出 `list[list[EventToken]]`（`EventToken.id ∈ [0, BPE_DEFAULT_VOCAB)`），由 Decoder（Plan 07）消费索引语义。
 - `RAGContext` 通过 `tensors.RAGContext`（`top_k=3, ref_seq_len=256, feat=768`）描述，与契约常量一致。
 
 ## 4. 内部设计
 
-- **索引构成**：`build_index` 遍历 `corpus_dir`，每条谱面读取①预提取的音频 MERT emb（Plan 01/08 产物）②密度曲线（Plan 03 统计量）；构造联合向量入库 FAISS `IndexFlatIP`（内积，配合 L2 归一化等价余弦）。并行维护结构化元数据表（BPM/流派/谱师/难度/`PatternToken` 序列）。
+- **索引构成**：`build_index` 遍历 `corpus_dir`，每条谱面读取①预提取的音频 MERT emb（Plan 01/08 产物）②密度曲线（Plan 03 统计量）；构造联合向量入库 FAISS `IndexFlatIP`（内积，配合 L2 归一化等价余弦）。并行维护结构化元数据表（BPM/流派/谱师/难度/`EventToken` 序列）。
 - **密度曲线重采样**：将原始 Section 密度序列插值到 `density_dim=64`，与音频时间轴解耦，保证不同时长曲目向量同维。
 - **检索流程**（`retrieve`）：查询 emb → pooling → 拼密度曲线 → L2 归一化 → FAISS Top-K（取 `top_k * 3` 候选）→ 元数据过滤（难度容差 ±2、BPM 容差 ±10%）→ 取前 `top_k`。
 - **注入**：
@@ -79,7 +79,7 @@ class RAGRetriever:
 
 ## 5. 依赖关系
 
-- **上游**：Plan 01 MERT 音频 emb（`AudioEmbedding`）、Plan 02 码本（`PatternToken.code` 范围）、Plan 03 密度曲线、Plan 08 预处理产物（离线 emb + 统计量）。
+- **上游**：Plan 01 MERT 音频 emb（`AudioEmbedding`）、Plan 02 BPE 词表（`EventToken.id` 范围）、Plan 03 密度曲线、Plan 08 预处理产物（离线 emb + 统计量）。
 - **下游**：Plan 04 `ARTransformer`（消费 `RAGContext`，可选注入）、Plan 09 CLI/API（暴露 `retrieve`）。
 - **外部库**：`faiss-cpu`（主索引）、`numpy`、`torch`（仅张量搬运，无训练）。MERT/Demucs 不在本模块。
 
@@ -100,7 +100,7 @@ class RAGRetriever:
 |------|---------|------|
 | 检索到低质谱面污染风格 | R-3 | 仅索引质量过滤后语料（star≥3、play_count>500，Plan 08 过滤）；Plan 06 DPO 兜底 |
 | Prefix 增加推理 token 数、拖慢 AR | R-4 | `ref_seq_len` 远小于 `AR_CONTEXT_TOKENS`；缓存常用曲风 prefix；必要时切 `cross_kv` |
-| 码本坍缩致参考 Token 多样性不足 | R-2 | 受 Plan 02 约束；监控检索结果码本覆盖率，<40% 报警 |
+| BPE 无坍缩风险（R-2 随 VQ 退役）；监控参考 event 多样性 | R-2 | 受 Plan 02 约束（BPE 词表）；监控检索结果 event token 熵，<40% 报警 |
 | 元数据缺失无法按流派/谱师过滤 | — | 元数据缺失项仅按 BPM+难度+向量相似度兜底（RFC-0012） |
 
 ## 8. 测试策略

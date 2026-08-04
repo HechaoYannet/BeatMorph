@@ -16,7 +16,7 @@
 |------|------|-------------|------|------|
 | 00 | [核心契约与张量形状](./00-core-contracts.md) | §2 / §3.7 | 🟡 草案 | Phase 1 |
 | 01 | [Stage 0 音频编码器](./01-audio-encoder.md) | §3.1 | 🟡 草案 | Phase 1 |
-| 02 | [VQ-VAE 谱面 Tokenizer](./02-tokenizer-vqvae.md) | §3.2 | 🟡 草案 | Phase 1 |
+| 02 | [BPE/event 谱面 Tokenizer](./02-tokenizer-bpe.md) | §3.2 | 🟡 草案 | Phase 1 |
 | 03 | [Stage 1 全局密度规划](./03-planner-density.md) | §3.3 | 🟡 草案 | Phase 1 |
 | 04 | [Stage 2 AR Pattern 生成](./04-generation.md) | §3.4 | 🟡 草案 | Phase 2 |
 | 05 | [RAG 风格检索](./05-rag-retrieval.md) | §3.5 | 🟡 草案 | Phase 2 |
@@ -44,4 +44,5 @@
 ## 变更管理
 
 - plan 的实质性变更须提交 RFC 至 [`docs/decisions/`](../decisions/) 并更新本索引状态。
-- plan 与代码同名编号便于追溯（如 `02-tokenizer-vqvae.md` ↔ `beatmorph/tokenizer/vqvae.py`）。
+- plan 与代码同名编号便于追溯（如 `02-tokenizer-bpe.md` ↔ `beatmorph/tokenizer/bpe.py`）。
+- **RFC-0028**：Tokenizer 范式由 VQ-VAE 改为 BPE/event，`02-tokenizer-vqvae.md` 已重命名为 `02-tokenizer-bpe.md`；旧 VQ-VAE 实现移至 `archive/vqvae-baseline` 分支，主路径不再维护。

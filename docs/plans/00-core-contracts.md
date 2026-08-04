@@ -6,9 +6,9 @@
 ## 1. 目标与范围
 
 ### 交付
-- 跨模块共享的数据类型（`Note`/`BpmPoint`/`Chart`/`Section`/`PatternToken` 等）。
-- 跨模块张量形状约定（`AudioEmbedding`/`PlanOutput`/`TokenSeq`/`RAGContext`）。
-- 关键常量（MERT 帧率 25Hz、码本 2048/4096、4K 键位、AR 上下文 256）。
+- 跨模块共享的数据类型（`Note`/`BpmPoint`/`Chart`/`Section`/`EventToken` 等；`PatternToken` 随 VQ-VAE 退役移 `archive/vqvae-baseline` 分支，见 §9）。
+- 跨模块张量形状约定（`AudioEmbedding`/`PlanOutput`/`EventSeq`/`RAGContext`；`TokenSeq` 随 VQ 退役移 baseline 分支）。
+- 关键常量（MERT 帧率 25Hz、BPE 词表 4096、4K 键位、AR 上下文 1024 event tokens）。
 - 统一日志入口。
 
 ### 不交付
@@ -23,11 +23,11 @@
 |------|---------|
 | `Note(time,lane,type,duration)` | §3.7「`(time, lane, type, duration)`」 |
 | `Section`（每 4 小节，density/energy/rest） | §3.3 Stage1 输出 |
-| `PatternToken`（单小节离散码本） | §3.2 / §3.4 |
+| `EventToken`（BPE event） | §3.2 / §3.4（RFC-0028） |
 | `Chart` IR 与格式解耦 | §3.7「IR JSON → .osu/.sm/.ma2」 |
 | `difficulty 1-15` | §1.2 / §2 用户输入层 |
 | MERT 25Hz、768d | §3.1 |
-| 码本 2048/4096、AR 256 tokens | §3.2 / §3.4.1 |
+| BPE 词表 4096、AR 1024 event tokens | §3.2 / §3.4.1（RFC-0028） |
 
 **偏离 1**：奠基文档未明确 Note 时间单位。本计划规定 `Note.time` 为**秒（float）**，理由：① 与音频时间轴天然对齐；② 内部统一浮点，写入各格式时由 Writer 转毫秒/Beat。已由 [RFC-0001](../decisions/RFC-0001-note-time-unit.md) 采纳定稿。
 
@@ -58,15 +58,15 @@ class Chart(BaseModel):
 ```
 方法：`primary_bpm()`（取首点 BPM，供标量场景）、`lane_count()`、`sorted_notes()`（按 (time,lane) 确定性排序）。`BpmPoint(time: 秒, bpm: float>0)`。
 
-### 3.3 Section / PatternToken
-见 `beatmorph/core/contracts/events.py`。`density_target`/`energy_level`/`rest_probability` 均 ∈[0,1]，由 pydantic `Field(ge=0,le=1)` 强制。
+### 3.3 Section / EventToken
+见 `beatmorph/core/contracts/events.py`。`density_target`/`energy_level`/`rest_probability` 均 ∈[0,1]，由 pydantic `Field(ge=0,le=1)` 强制。`EventToken(id, bar_index, start_time)` 为 BPE/event tokenizer 产物（RFC-0028）。
 
 ### 3.4 张量形状约定（einops 风格）
 | 名称 | 形状 | 含义 |
 |------|------|------|
 | `AudioEmbedding` | `(batch, time_seq, 768)` | Stage0 输出，25Hz |
 | `PlanOutput` | `(batch, num_sections)` ×3 | density/energy/rest |
-| `TokenSeq` | `(batch, seq_len)` long | Pattern ID ∈[0,2048) |
+| `EventSeq` | `(batch, seq_len)` long | event id ∈[0, `BPE_DEFAULT_VOCAB`=4096) |
 | `RAGContext` | `(batch, top_k, seq/feat)` | 检索参考 |
 
 ## 4. 内部设计
@@ -105,3 +105,4 @@ class Chart(BaseModel):
 - [x] RFC-0001：Note 时间单位秒 vs 毫秒 —— [采纳，秒](../decisions/RFC-0001-note-time-unit.md)。
 - [x] 多 BPM 变速曲目的 `bpm` 字段是否需扩为列表 + 时间点 —— [采纳 RFC-0005](../decisions/RFC-0005-bpm-timepoints.md)，`Chart.bpm_points: list[BpmPoint]`。
 - [ ] `GameMode.OSU_STD` 非键位模型，`lane_count()` 返回 0 的语义待 Phase 4 明确。
+- [x] RFC-0028：`PatternToken`/`TokenSeq`/`CODEBOOK_BASE` 退役迁移 —— 主路径改用 `EventToken`/`EventSeq`/`BPE_DEFAULT_VOCAB`；旧 VQ-VAE 类型在 `main` 暂留（`vqvae.py` 仍导入，供 `archive/vqvae-baseline` 分支沿用），Step9 archive 分支切走后可物理删除。

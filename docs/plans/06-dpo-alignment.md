@@ -61,12 +61,12 @@ class DPOTrainer:
 | 名称 | 形状 | 含义 |
 |------|------|------|
 | `*_logps` | `(batch,)` | 单条参考谱面序列的逐 token 对数似然之和 |
-| 参考谱面序列 | `(batch, seq_len)` long | `TokenSeq`，值 `∈[0, CODEBOOK_BASE)` |
+| 参考谱面序列 | `(batch, seq_len)` long | `EventSeq`，值 `∈[0, BPE_DEFAULT_VOCAB=4096)` |
 | AR 条件输入 | `(batch, time_seq, 768)` | `AudioEmbedding`，policy/ref 共用 |
-| 偏好对序列长度 | `seq_len ≤ AR_CONTEXT_TOKENS=256` | 受 Plan 04 上下文约束 |
+| 偏好对序列长度 | `seq_len ≤ AR_CONTEXT_TOKENS=1024` | 受 Plan 04 上下文约束 |
 | DPO 条件向量 | 注入 AR 的 difficulty/style | 复用 AdaLN（与 Plan 04 一致） |
 
-- 偏好对 schema：`PreferencePair(chart_id_c, chart_id_r, audio_emb_id, difficulty, chosen_pass_rate, rejected_rating)`，序列从 VQ-VAE 编码对应 `PatternToken` 而来。
+- 偏好对 schema：`PreferencePair(chart_id_c, chart_id_r, audio_emb_id, difficulty, chosen_pass_rate, rejected_rating)`，序列从 BPE/event tokenizer 编码对应 `EventToken` 而来。
 - 输出标量 loss 对齐 pydantic / torch 标量契约，供 Lightning 训练循环 `backward`。
 
 ## 4. 内部设计
@@ -81,11 +81,11 @@ class DPOTrainer:
   ```
   附加：监控 chosen/rejected 准确率与 reward margin `β·(policy_c−policy_r)−β·(ref_c−ref_r)`。
 - **为何不用 RLHF（§3.6.2）**：DPO 无需独立奖励模型、无需推理期 rollout，成本约 RLHF 1/3；osu! PlayCount/评分天然提供海量免费偏好数据；LeVo/MR-FlowDPO 已在音乐生成验证可行。
-- **训练控制**：早停于 reward margin 不再提升；β 敏感度扫描；防 reward hacking——监控码本坍缩指标（R-2）与生成多样性。
+- **训练控制**：早停于 reward margin 不再提升；β 敏感度扫描；防 reward hacking——监控 event 序列熵与生成多样性（R-2 随 VQ 退役）。
 
 ## 5. 依赖关系
 
-- **上游**：Plan 04 AR 预训练 checkpoint（policy/ref 基座）、Plan 02 VQ-VAE（编码参考序列为 `PatternToken`）、Plan 01 音频 emb、Plan 08 数据（osu! 评分库 `ratings_db`）。
+- **上游**：Plan 04 AR 预训练 checkpoint（policy/ref 基座）、Plan 02 BPE/event tokenizer（编码参考序列为 `EventToken`）、Plan 01 音频 emb、Plan 08 数据（osu! 评分库 `ratings_db`）。
 - **下游**：Plan 09 CLI/API（暴露微调与对齐后推理）、Plan 04 推理路径（替换基座权重为对齐后权重）。
 - **外部库**：`torch>=2.5`、`pytorch-lightning`、`einops`、`peft`（LoRA）、`wandb`。无 `transformers` 强化学习栈（DPO 自实现 loss）。
 
@@ -105,7 +105,7 @@ class DPOTrainer:
 | 风险 | 契基编号 | 缓解 |
 |------|---------|------|
 | osu! 谱面坏习惯被对齐强化 | R-3 | 本模块即 R-3 兜底；仅纳入质量过滤后评分对；chosen 设 Pass 率门槛 |
-| 对齐后多样性坍缩 / reward hacking | R-2 | 监控码本覆盖率与 token 熵；多样性下降 >5% 触发回滚；β 调小 |
+| 对齐后 reward hacking | R-2（随 VQ 退役） | 监控 event token 熵与多样性；多样性下降 >5% 触发回滚；β 调小 |
 | 评分布偏（高分段稀少）致 pair 失衡 | — | PlayCount 加权 + 难度档内分层采样；RFC-0016 |
 | 参考模型占用双倍显存 | — | LoRA 拓扑使 ref=基座本身，无需双副本；显存仍紧时降 batch（RFC-0015） |
 

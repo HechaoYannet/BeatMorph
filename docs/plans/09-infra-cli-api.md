@@ -8,7 +8,7 @@
 ### 交付
 - Hydra 配置体系（`configs/{model,train,data}`），组合式超参管理。
 - PyTorch Lightning 训练框架封装（FSDP 多卡 A100）。
-- W&B 实验管理（损失/生成样例/码本利用率）。
+- W&B 实验管理（损失/生成样例/BPE 词表利用率）。
 - 检查点与可复现性（`uv.lock` + 种子控制 + 配置快照）。
 - CLI：`beatmorph-generate`（端到端生成）；`beatmorph-train`（训练各 Stage）。
 - API：推理服务（Phase 3 Web Demo）。
@@ -46,10 +46,11 @@ beatmorph-train --config-name stage2_ar
 ### 配置（Hydra）
 ```
 configs/
-├── model/        ar_transformer.yaml, vqvae.yaml, planner.yaml, mert.yaml
-├── train/        stage2_ar.yaml, stage1_planner.yaml, stage0_tokenizer.yaml
+├── model/        ar_transformer.yaml, bpe.yaml, planner.yaml, mert.yaml
+├── train/        stage2_ar.yaml, stage1_planner.yaml, stage0_bpe.yaml
 └── data/         osu_50k.yaml, osu_1m.yaml
 ```
+> RFC-0028 后 tokenizer 改 BPE/event：`model/vqvae.yaml`、`stage_vqvae.yaml`、`_run_vqvae` 分发属 VQ-VAE baseline，将随 `archive/vqvae-baseline` 分支切走，主路径不再维护；新 BPE 训练对应 `model/bpe.yaml` / `train/stage0_bpe.yaml`（`ar_transformer.yaml` 已用 `vocab_size=4096`，RFC-0028）。
 环境变量约定：`BEATMORPH_DATA_DIR`、`BEATMORPH_RUNS_DIR`、`BEATMORPH_CACHE_DIR`。
 
 ### API
@@ -59,7 +60,7 @@ configs/
 
 - **infra/config**：Hydra ConfigGroup，OmegaConf 解析；运行时快照配置到 `runs/<exp>/config.yaml` 保证可复现。
 - **训练循环**：LightningModule 封装各 Stage；支持 `bf16-mixed`、梯度累积、梯度裁剪、FSDP 策略。
-- **实验管理**：W&B 记录 loss / lr / 码本利用率（R-2）/ 生成样例（每 N 步解码一张 `.osu` 预览）。
+- **实验管理**：W&B 记录 loss / lr / BPE 词表利用率（R-2 随 VQ 退役，词表利用率仅作多样性参照）/ 生成样例（每 N 步解码一张 `.osu` 预览）。
 - **检查点**：按 step 存档 + 保留 top-K；从 ckpt 续训接口。
 - **可复现**：`uv sync` 重建环境；`seed=42`；配置 + 代码 git tag 锁定。
 

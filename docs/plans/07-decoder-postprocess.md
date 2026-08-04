@@ -6,14 +6,14 @@
 ## 1. 目标与范围
 
 ### 交付
-- Stage 3 解码编排：调用 `VQVAETokenizer.decode(tokens) -> Chart`，将离散 Pattern Token 映射回精确 `(time, lane, type, duration)` Note（奠基 §3.7「轻量 MLP + 1D-CNN」反向映射）。
+- Stage 3 解码编排：调用 `BPETokenizer.decode(tokens, bpm_points) -> Chart`，将 BPE event 直接映射回精确 `(time, lane, type, duration)` Note（奠基 §3.7，RFC-0028 后 decode 为确定性直映射，无神经网络）。
 - Stage 4 物理约束引擎 `PostProcessor(mode)`：硬编码红线规则——4K 单帧最大按键 ≤ 2、同手最小间隔 ≥ 70ms、禁止越界、长条 duration 合法性。`apply(chart) -> Chart` 修正物理不可达项；`validate(chart) -> list[str]` 只报告不修正。
 - 格式导出层：`ChartWriter`/`ChartReader` 抽象基类（`io/formats/base.py`）+ `OsuManiaWriter`/`OsuManiaReader`（`.osu`）与 `SmWriter`/`SmReader`（`.sm`）。
 - 端到端通路：`Token -> decode -> PostProcessor.apply -> Writer.write -> .osu/.sm`。
 
 ### 不交付
-- VQ-VAE 训练与码本本体（Plan 02；`decode` 权重由 Plan 02 训练，本模块仅编排调用）。
-- AR Pattern 生成（Plan 04，产出上游 `TokenSeq`）。
+- BPE/event tokenizer 词表训练（Plan 02；BPE 是确定性统计，无 decode 权重，本模块仅编排调用）。
+- AR event 生成（Plan 04，产出上游 `EventSeq`）。
 - 数据预处理侧的大量 `.osu` 批量解析逻辑（Plan 08；`Reader` 抽象归 io 层供其复用，但解析增强与统计量在 `data/parsers`）。
 - 6K / osu!std / `.ma2`(maimai) 扩展格式（Phase 4，见 R-6、§9）。
 - DPO 偏好对齐（Plan 06）。
@@ -25,7 +25,7 @@
 
 | 本计划项 | 奠基依据 | 偏离 | 理由 |
 |----------|---------|------|------|
-| VQ-VAE Decoder（轻量 MLP+1D-CNN）映射回 `(time,lane,type,duration)` | §3.7 表 | — | 直接采用，重训在 Plan 02 |
+| event→Note 直映射（`decode_atomic`，无解码网络）映射回 `(time,lane,type,duration)` | §3.7 表 | 偏离 | RFC-0028 后 tokenizer 改 BPE/event，decode 为确定性状态机直映射，奠基「轻量 MLP+1D-CNN」随 VQ 退役 |
 | 物理约束引擎=规则系统硬编码 | §3.7 表 | — | 直接采用 |
 | 4K 单帧最大按键 ≤ 2 | §3.7 表 | — | 常量 `PostProcessor.MAX_SIMULTANEOUS_4K=2` |
 | 同手最小间隔 ≥ 70ms | §3.7 表 | — | 常量 `MIN_SAME_HAND_GAP_MS=70` |
@@ -38,12 +38,12 @@
 
 ## 3. 接口契约
 
-### 3.1 复用骨架（`beatmorph/tokenizer/vqvae.py`、`beatmorph/decoder/postprocess/constraints.py`、`beatmorph/io/formats/`）
+### 3.1 复用骨架（`beatmorph/tokenizer/bpe.py`、`beatmorph/decoder/postprocess/constraints.py`、`beatmorph/io/formats/`）
 ```python
-from beatmorph.core.contracts import Chart, Note, NoteType, GameMode
+from beatmorph.core.contracts import Chart, Note, NoteType, GameMode, BpmPoint, EventToken
 
-class VQVAETokenizer:                       # decode 属 Stage3 入口（Plan 02 训练）
-    def decode(self, tokens: list[PatternToken]) -> Chart: ...
+class BPETokenizer:                       # decode 属 Stage3 入口（Plan 02 词表产物，无权重）
+    def decode(self, tokens: list[EventToken], bpm_points: list[BpmPoint]) -> Chart: ...
 
 class PostProcessor:
     MAX_SIMULTANEOUS_4K: int = 2
@@ -67,15 +67,15 @@ class SmReader(ChartReader):
 ### 3.2 跨模块张量形状（einops 风格）
 | 名称 | 形状 | 含义 |
 |------|------|------|
-| Token 输入 | `(batch, seq_len)` long | Pattern ID，引用契约 `TokenSeq`，`codebook_size=2048` |
-| 解码前 latent | `(batch, bars, latent)` | 码本查表展开（decoder 内部） |
-| 解码 Note 概率 | `(batch, bars, lane, time_bins, note_type)` | decoder 输出，argmax→Note |
+| Token 输入 | `(batch, seq_len)` long | event id，引用契约 `EventSeq`，`vocab_size≈4096` |
+| 解码前 latent | — | BPE 直映射无 latent（删除，原 VQ 码本查表已退役） |
+| 解码 Note 概率 | — | BPE 直映射无概率输出（删除，原 decoder argmax 已退役） |
 | 还原 Note 流 | `(N_notes,)` per `(time,lane,type,duration)` | 组装为 `Chart.notes` |
 | `Chart` IR | — | 与格式解耦，契约 `Chart` |
 
 ## 4. 内部设计
 
-- **Stage 3 解码**：`decode(tokens)` 逐小节——码本查表 → 轻量 MLP+1D-CNN → 在 `(lane, time_bins)` 网格 argmax 还原 Note；时间 = `PatternToken.start_time` + 栅格偏移（秒）。`NoteType` 维 argmax 决定 TAP/HOLD/MINE/ROLL/FAKE；HOLD/ROLL 的 duration 由独立回归头给出。组装 `Chart(notes, mode=MANIA_4K, bpm_points=[BpmPoint(0, bpm)], sections=<可选>)`（RFC-0005）。解码权重与训练在 Plan 02，本模块只编排/调用。
+- **Stage 3 解码**：`decode(tokens, bpm_points)` 扫 `EventToken` 序列——`decode_atomic` 状态机：`POS` event 据当前小节 + `bpm_points` 反映射为秒、`NUDGE` 叠加残差毫秒 → `time`；`NOTEV` event → `lane`/`type`（TAP/HOLD/MINE/ROLL/FAKE）；`DUR` event → HOLD/ROLL 的 `duration`。组装 `Chart(notes, mode=MANIA_4K, bpm_points, sections=<可选>)`（RFC-0005）。无解码网络、无可训权重，BPE 直映射保证往返无损（measure==1.0）。
 - **红线规则集（apply）**——仅修物理不可达，不动键型排列语义（R-5）：
   - 越界：`lane ≥ lane_count()` 者——钳到合法区间内最近 lane（保密度优先于删除），记警示。
   - 单帧同按：同一 `time±10ms` 窗口按键数 > `MAX_SIMULTANEOUS_4K` → 按 lane 升序保留前 2，其余整体推迟到下一合法窗口（仅时间平移）。
@@ -87,11 +87,11 @@ class SmReader(ChartReader):
   - `.sm`：以 `#NOTES:` 段 + beat 网格（`beat = (time−section_start)*bpm/60`）描述；lane 映射 0/1 列。
 - **Reader 对称性**：`OsuManiaReader`/`SmReader` 反向解析回 `Chart`，时间统一归一为秒，供数据流水线 Plan 08 复用（解析现成谱面）；读写同 `mode` 往返须保 Note 不丢、时间误差可量化（M3）。
 - **模式扩展（R-6）**：新增模式仅需实现一对 `ChartWriter/ChartReader`（奠基 §1.1）；物理常量按模式覆写（如 7K 的 `MAX_SIMULTANEOUS` 待 Phase 4定义）。
-- **解码编排**：`AROut` → `VQVAETokenizer.decode(tokens)` → `Chart` → `PostProcessor(mode).apply(chart)` → `Validate==[]` 断言 → `Writer.write(chart, path)`。编排逻辑放在 `beatmorph/decoder` 顶层薄函数，避免后处理子包反向依赖 io 层。
+- **解码编排**：`AROut` → `BPETokenizer.decode(tokens, bpm_points)` → `Chart` → `PostProcessor(mode).apply(chart)` → `Validate==[]` 断言 → `Writer.write(chart, path)`。编排逻辑放在 `beatmorph/decoder` 顶层薄函数，避免后处理子包反向依赖 io 层。
 
 ## 5. 依赖关系
 
-- **上游**：Plan 02 `VQVAETokenizer.decode`、Plan 04 AR 产出 `TokenSeq`、Plan 03 `Section`/`bpm` 时间对齐。
+- **上游**：Plan 02 `BPETokenizer.decode`、Plan 04 AR 产出 `EventSeq`、Plan 03 `Section`/`bpm` 时间对齐。
 - **下游**：无（终端输出文件）；`Reader` 抽象被数据流水线 Plan 08 复用解析现成谱面。
 - **外部库**：`pydantic>=2.5`（契约）；`.osu`/`.sm` 文本写入纯标准库，无重型依赖。
 
@@ -101,7 +101,7 @@ class SmReader(ChartReader):
 
 | 里程碑 | 验收（可量化） |
 |--------|---------------|
-| M1 decode 往返 | `decode(tokens)` 还原 `Chart`，Note 形状合法（依赖 Plan 02 重建 > 95%） |
+| M1 decode 往返 | `decode(tokens, bpm_points)` 还原 `Chart`，Note 形状合法（BPE 无损往返，POS+NUDGE 保证 measure==1.0，无重建误差） |
 | M2 红线引擎 | `validate` 对人工构造的越界/同按>2/同手<70ms/坏长条样本 100% 检出；`apply` 修正后 `validate` 必返回空 |
 | M3 格式导出 | `OsuManiaWriter`/`SmWriter` 产出文件经对应 `Reader` 读回与原 `Chart` 等价（IR 不丢信息）；`.osu` 可被 osu! 客户端载入 |
 | M4 首版可玩 `.osu` | 真实 `audio_emb → AR → decode → apply → .osu`，内部盲测可玩率 100%（无可玩性违规） |
@@ -112,7 +112,7 @@ class SmReader(ChartReader):
 |------|---------|------|
 | 规则过度约束破坏 AI 创意 | R-5 | `apply` 仅做红线校验、不改键型逻辑；`validate` 产报告供人工 review；创意被规则阻断时记日志不自改 |
 | 模式扩展差异大（6K/osu!std/maimai） | R-6 | 4K 优先；扩展仅重写 Tokenizer + 新增 Writer/Reader，物理常量按模式覆写 |
-| decode 重建误差累积 | R-2 派生 | 依赖 Plan 02 重建 > 95%；本模块只兜底物理不可达，不兜底创意质量 |
+| decode 重建误差累积 | R-2 派生（随 VQ 退役） | BPE 无损往返（POS+NUDGE 保证 measure==1.0），无重建误差累积；本模块只兜底物理不可达，不兜底创意质量 |
 | 时间制转换精度（秒↔毫秒/beat） | 派生 | `.osu` 毫秒四舍五入、`.sm` beat 浮点；读写往返误差计入 Reader 兼容 |
 | HOLD 还原丢 duration | Plan 02 §9 派生 | `apply` 校验 `duration≤0` 降级 TAP，截断越界长条 |
 

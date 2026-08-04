@@ -48,6 +48,7 @@ train = [
     "datasets>=2.18",              # HuggingFace Datasets 存储
     "pyarrow>=15.0",               # Parquet
     "tensorboard>=2.16",
+    "tokenizers>=0.20",           # BPE/event tokenizer (RFC-0028)
 ]
 rag = [
     # RAG 检索
@@ -211,7 +212,7 @@ exclude = "(data|models|runs|outputs)/"
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
-module = ["torch.*", "torchaudio.*", "transformers.*", "librosa.*", "pyarrow.*"]
+module = ["torch.*", "torchaudio.*", "transformers.*", "librosa.*", "pyarrow.*", "tokenizers.*"]
 ignore_missing_imports = true
 
 # ─────────────────────────────────────────────────────────────

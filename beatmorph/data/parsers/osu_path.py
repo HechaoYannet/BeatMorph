@@ -163,7 +163,7 @@ def compute_section_stats(chart: Chart, section_bars: int = 4) -> Chart:
 # ── 辅助函数 ──────────────────────────────────────────────────
 
 
-def _compute_bar_boundaries(bpm_points: list[BpmPoint], total_duration: float) -> list[float]:
+def compute_bar_boundaries(bpm_points: list[BpmPoint], total_duration: float) -> list[float]:
     """按 bpm_points 分段推导所有小节边界时间点（秒）。
 
     返回 list[float]，长度 = 小节数 + 1（最后一个为 total_duration）。
@@ -173,6 +173,12 @@ def _compute_bar_boundaries(bpm_points: list[BpmPoint], total_duration: float) -
     ``phase = bpm_points[0].time``，而非从 ``0.0`` 起算。``phase > 0`` 时首段
     ``[0, phase]`` 为「网格前 intro 段」保留为独立边界（防丢该段 Note）；``phase == 0``
     时等价旧行为。
+
+    .. note::
+        RFC-0028 后为**公开 API**：BPE/event tokenizer 的 ``Bar`` event 边界、
+        ``Position`` event 的 POS→秒映射均复用本函数（与 ``compute_section_stats``
+        切 Section、planner ``section_boundaries_from_bpm`` 推边界同源口径）。
+        旧别名 :func:`_compute_bar_boundaries` 保留为薄 wrapper 供既有导入者过渡。
     """
     if not bpm_points:
         return [0.0, total_duration]
@@ -203,6 +209,15 @@ def _compute_bar_boundaries(bpm_points: list[BpmPoint], total_duration: float) -
         boundaries.append(total_duration)
 
     return boundaries
+
+
+def _compute_bar_boundaries(bpm_points: list[BpmPoint], total_duration: float) -> list[float]:
+    """旧别名（RFC-0026 起即为本逻辑），保留供既有导入者过渡。
+
+    新代码请用公开 :func:`compute_bar_boundaries`。``archive/vqvae-baseline`` 分支
+    的 vqvae.py 仍导入本私有名；主路径迁移到公开名后可逐步淘汰。
+    """
+    return compute_bar_boundaries(bpm_points, total_duration)
 
 
 def _compute_peak_nps(

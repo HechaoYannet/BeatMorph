@@ -1,7 +1,8 @@
 # 音游谱面自动生成系统 — 技术选型文档（奠基版）
 
-> **文档版本**：v2.0 (Modernized)  
-> **更新日期**：2026-07-30  
+> **文档版本**：v2.1 (RFC-0028 修宪：tokenizer VQ-VAE → BPE/event)
+> **更新日期**：2026-08-04
+> **核心设计哲学**：**自监督理解取代显式标注** —— 模型从百万级现成谱面数据中自主学习创作规律，人只需提供极简控制信号（难度 + 参考风格）。
 > **核心设计哲学**：**自监督理解取代显式标注** —— 模型从百万级现成谱面数据中自主学习创作规律，人只需提供极简控制信号（难度 + 参考风格）。
 
 ---
@@ -12,7 +13,7 @@
 - [2. 系统架构总览](#2-系统架构总览)
 - [3. 逐模块技术选型详解](#3-逐模块技术选型详解)
   - [3.1 Stage 0：多模态音频编码器](#31-stage-0多模态音频编码器)
-  - [3.2 谱面语义 Tokenizer（VQ-VAE）](#32-谱面语义-tokenizervq-vae)
+  - [3.2 谱面语义 Tokenizer（BPE/event）](#32-谱面语义-tokenizerbpeevent)
   - [3.3 Stage 1：全局密度规划模块](#33-stage-1全局密度规划模块)
   - [3.4 Stage 2：Pattern 序列生成主干](#34-stage-2pattern-序列生成主干)
   - [3.5 风格控制机制（RAG）](#35-风格控制机制rag)
@@ -40,7 +41,9 @@
 | **学习方式** | 有监督学习（标注→谱面） | **自监督预训练** + **RL/DPO 偏好对齐** |
 | **知识来源** | 专家规则 + 少量标注数据 | **百万级社区谱面**（osu!等）的海量隐式知识 |
 
-> **核心公式**：`音频 → MERT隐式理解 → VQ-VAE谱面分布学习 → RAG风格迁移 → DPO手感优化`
+> **核心公式**：`音频 → MERT隐式理解 → BPE/event谱面分布学习 → RAG风格迁移 → DPO手感优化`
+>
+> 注：tokenizer 范式经 [RFC-0028](decisions/RFC-0028-bpe-event-tokenizer-constitutional-amendment.md) 修宪（2026-08-04 采纳），由 VQ-VAE 小节码本改为 BPE/event 序列；VQ-VAE 实现移至 `archive/vqvae-baseline` 分支作对照基线，不在主路径。event tokenizer 仍是「自监督理解」哲学——从百万谱面学 event 分布，无显式标注。
 
 ---
 
@@ -76,19 +79,20 @@
 ┌─────────────────────────────────────────────────────────────────┐
 │  Stage 2: Pattern Token 生成层 (核心生成)                       │
 │  ┌───────────────────────────────────────────────────────────┐  │
-│  │  VQ-VAE Tokenizer (离散码本, 2048/4096)                  │  │
-│  │  + AR Transformer Decoder (自回归)                       │  │
+│  │  VQ-VAE Tokenizer (离散码本, 2048/4096) → 已退役 baseline │  │
+│  │  ⇨ BPE/event Tokenizer (REMI 式 event 序列, 词表 ~4096)  │  │
+│  │  + AR Transformer Decoder (自回归, 上下文 ~1024 分段)    │  │
 │  │  + [备选] Flow Matching (Rectified Flow, 未来加速)       │  │
 │  └───────────────────────────────────────────────────────────┘  │
 │  输入: audio_emb + Stage1输出 + RAG上下文 + DPO条件            │
-│  输出: Pattern Token 序列 (每小节/2小节 一个离散ID)            │
+│  输出: Pattern Token 序列 → event token 序列 (~4700 event/曲, BPE 合并后 ~2000-2500) │
 │  训练: 100K+ osu! 谱面 (自监督) + DPO微调 (偏好对齐)           │
 └─────────────────────────┬───────────────────────────────────────┘
                           │
                           ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │  Stage 3 & 4: 解码与导出层                                      │
-│  ① VQ-VAE Decoder → 原始 Note 序列 (time, lane, type, dur)   │
+│  ① event→Note 直映射 (无 VQ 解码网络; BPE event 解出 (time,lane,type,dur))│
 │  ② 规则后处理 (物理约束: 单手键距/最大密度/合法性校验)        │
 │  ③ 格式转换: IR JSON → .osu / .sm / .ma2                     │
 └─────────────────────────────────────────────────────────────────┘
@@ -127,27 +131,35 @@
 
 ---
 
-### 3.2 谱面语义 Tokenizer（VQ-VAE）
+### 3.2 谱面语义 Tokenizer（BPE/event）
 
-#### 3.2.1 选型：**标准 VQ-VAE**
+> **RFC-0028 修宪（2026-08-04 采纳）**：本节由「VQ-VAE + 小节码本」改写为「BPE/event 序列 tokenizer」。
+> VQ-VAE 把每小节映射到一个码本 code，本质是「小节级 nearest-neighbor 检索重组」——新曲节奏型是训练集未见过的精确组合时，只能落最近 code 造成不可逆量化失真；且栅格化稀疏（6.4% occupancy）、bin 冲突、精度/类平衡两难、code 语义承载过重。event tokenizer 把每个 note 原样离散化为 event 序列（`Bar/Position/Lane/NoteType/Duration[+Chord]`），BPE 合并高频共现组合为复合 token，**不量化掉任何信息**——未合并 note 仍以原子 event 出现，新曲可生成训练集没见过的 event 新组合。event LM 范式（GPT 式原生序列建模）在符号音乐生成是 SOTA（REMI/MIDI-Like/Octuple），BPE 在 LLM 已充分验证，扩展到 6K/osu!std/maimai 时 event 抽象与键位数/模式解耦，天然强于 VQ 码本重训。
+
+#### 3.2.1 选型：**BPE/event tokenizer（REMI 式 4K mania 变体）**
 
 | 属性 | 建议值 |
 |------|--------|
-| 时间粒度 | 1 小节 (4/4拍, 以 BPM 动态对齐) |
-| 码本大小 (Codebook) | **2048** (基础) / **4096** (精细) |
-| 编码器结构 | 1D-CNN + Transformer |
+| 时间粒度 | event 级（每 note 离散化为 event 组合，无小节栅格） |
+| 词表大小 (Vocab) | **~4096**（BPE 合并后；原子词表 ~253，详见 plan 02） |
+| 编码方式 | Chart→原子 event-name 序列 + HF `tokenizers` BPE 合并 |
 | 训练数据 | osu! 谱面 50K+ 首 (无标注) |
+| 上下文 | AR 消费 ~1024 event（分段生成，见 §3.4） |
 
-#### 3.2.2 码本语义设计
-每个 Code Index 表征该小节内的 **Note 集合模式**，包括：
-- 密度等级 (稀疏/中等/密集/超高)
-- 节奏型 (16分音阶 / 三连音 / 切分 / 重拍和弦)
-- 手型倾向 (阶梯/交互/双押/长条)
-- 键位空间分布 (左倾/右倾/居中/全键盘)
+#### 3.2.2 event schema 设计（4K mania 裁剪）
+event 序列原子类型（详见 `beatmorph/tokenizer/events.py`）：
+- **Bar**：每小节一个，边界由 `compute_bar_boundaries` 推（RFC-0026 phase 对齐 + RFC-0005 变速分段）。
+- **Position**：小节内 1/48 拍子拍网格定位（4/4 → 每 bar 192 格）；note 落点量化到最近 POS 格。
+- **Nudge**：残差毫秒桶（~12 桶），**仅当** note 偏离 POS 格超过噪声阈时发射——使原子流**可证明无损**（POS+Nudge 精确还原 time，最坏解码误差 5.6ms@120bpm ≪ ±20ms 容差），修复 RFC-0026 后仍 24% off-beat note 的量化硬伤（VQ 把这 24% 硬塞 bin 的缺陷不复现）。
+- **Noteevent (lane×type)**：4 lane × 5 NoteType (TAP/HOLD/MINE/ROLL/FAKE) = 20 种复合原子类型。
+- **Duration**：HOLD/ROLL 的长度桶（log-spaced，~24 桶）；TAP/MINE/FAKE duration=0 不发。
+- v1 **不含** Tempo event（BPM 仅作 planner/RAG 条件，AR 不生成绝对 tempo，遵守 planner-tokenizer 正交）。
+- v1 **不手编** Hand enum（让 BPE 从共现 Noteevent 自动发现手型——这正是 BPE 的数据驱动价值所在）。
 
-#### 3.2.3 为什么不用 FSQ？
-- FSQ (Finite Scalar Quantization) 主要用于超低比特率 **音频波形压缩**（如语音编解码）。
-- 谱面 Tokenizer 目标是 **语义模式抽象**，VQ-VAE 的离散码本天然对应“类型”概念，且 Transformer 自回归建模 VQ 离散索引的范式已是业界标准（如 VQ-VAE + GPT 用于图像生成）。
+#### 3.2.3 路径否决史（FSQ / VQ-VAE）
+- **FSQ**（Finite Scalar Quantization）主要用于超低比特率**音频波形压缩**（如语音编解码）——非谱面语义抽象所需，否决。
+- **VQ-VAE + 小节码本**：原 §3.2.1 主选，经 RFC-0028 修宪退役。VQ 为「连续信号压缩」设计，对「离散 note 事件序列生成」是错配：栅格稀疏/bin 冲突/精度-类平衡两难/扩模式需重训码本皆此偏差的表征。VQ-VAE 实现移至 `archive/vqvae-baseline` 分支仅作对照基线，**不在主路径**。
+- 选定 **BPE/event tokenizer**：业界验证充分（REMI/MIDI-Like/Octuple 在符号音乐生成是 SOTA，BPE 在 LLM 成熟），toolchain 顺（HF Transformers 直接套），未来蒸馏/对齐/DPO 复用 LLM 生态更顺。
 
 ---
 
@@ -175,12 +187,12 @@
 |------|------|
 | 层数 | 12-16层 |
 | 注意力头数 | 16 |
-| 上下文长度 | 256 tokens (约 256 小节，覆盖 4-5 分钟曲目) |
+| 上下文长度 | ~1024 event tokens（段落级；分段生成 + 衔接覆盖全曲，见 RFC-0008） |
 | 训练方式 | Teacher Forcing + Cross-Entropy Loss |
 | 条件注入 | Cross-Attention (audio_emb) + AdaLN (difficulty/style) |
 
 **选择理由**：
-- 与 VQ-VAE 构成完整的两阶段范式（离散化→自回归），业界验证最充分（如 VQ-VAE-2, DALL-E）。
+- 单阶段 event 序列自回归：直接建模 BPE/event token 序列（~4700 event/曲 → BPE 合并后 ~2000-2500），无需 VQ-VAE 预离散化阶段；event LM 范式业界验证最充分（REMI/MIDI-Like/Octuple 在符号音乐生成是 SOTA）。
 - 百万级 osu! 数据足以支撑 AR 模型学习长程依赖。
 - 调试工具链成熟（HuggingFace Transformers / Megatron-LM）。
 
@@ -238,7 +250,7 @@
 
 | 模块 | 技术方案 | 说明 |
 |------|---------|------|
-| Token → Notes | VQ-VAE Decoder (轻量 MLP + 1D-CNN) | 将离散 ID 映射回精确的 `(time, lane, type, duration)` |
+| Token → Notes | event→Note 直映射（无 VQ 解码网络） | BPE event 解出精确 `(time, lane, type, duration)`；POS→秒用谱面 `bpm_points`（变速分段） |
 | 物理约束引擎 | **规则系统** (硬编码) | 限制单帧最大按键数 ≤ 2 (4K标准)，同手最小间隔 ≥ 70ms，禁止越界等 |
 | 格式转换 | 自定义 Writer | `.osu` (osu!mania), `.sm` (StepMania), 未来扩展 `.ma2` |
 
@@ -297,8 +309,8 @@
 
 | 风险编号 | 风险描述 | 影响 | 缓解策略 |
 |:---:|---------|------|---------|
+> 注：R-2（VQ-VAE 码本坍缩）随 RFC-0028 退役删除，风险编号 R-1/R-3..R-6 **冻结不重排**（CLAUDE.md 红线 3/4 引用 R-5/R-6）。
 | R-1 | MERT 冻结可能导致对特定曲风（如重型电子）表征不佳 | 生成谱面适配度下降 | 保留 Adapter 可训练参数；如严重，考虑微调 MERT 后 6 层 |
-| R-2 | VQ-VAE 码本坍缩（Index Collapse） | 生成多样性丧失 | 采用 K-means 初始化；增加 Commitment Loss 权重；启用随机重启机制 |
 | R-3 | osu! 谱面质量参差不齐，模型学到坏习惯 | 输出手感差 | DPO 偏好微调兜底；在预处理阶段严格过滤低评分谱面 |
 | R-4 | AR 自回归推理速度慢（生成 1 首约 10-30秒） | 用户等待时间长 | 未来路径：蒸馏为 Flow Matching 模型（4步采样）；缓存常用曲风的 Prefix |
 | R-5 | 规则后处理过度约束导致破坏 AI 创意 | 谱面机械无趣 | 规则仅做“红线”校验（物理不可达），不改变 AI 的键型排列逻辑 |
@@ -310,7 +322,7 @@
 
 ### Phase 1：地基建设（0-3 个月）
 - 搭建数据预处理流水线，完成 10K 首 osu! 谱面的 MERT Embedding 离线提取。
-- 训练 **VQ-VAE Tokenizer** (码本 2048)，验证重建准确率 > 95%。
+- 训练 **BPE/event Tokenizer**（词表 ~4096），验证 event 往返无损 + PoC 词表扫参门禁（avg merged-events/note ≤ 1.8）。
 - 训练 **Stage 1 密度规划模块**，验证段落边界预测准确率。
 
 ### Phase 2：核心生成突破（3-8 个月）
@@ -337,7 +349,7 @@
 |------|--------|--------|--------|---------|---------|
 | **音频编码** | Qwen2-Audio (7B) | **MERT-330M (Adapter)** | CLAP | **MERT** | 音乐专用，轻量，层次表征好 |
 | **声部分离** | Demucs (必选) | **Demucs (可选)** | 跳过 | **可选** | 有增益但非必需，保留灵活性 |
-| **谱面压缩** | **VQ-VAE** | FSQ | VAE (连续) | **VQ-VAE** | 语义离散化，适配 AR 自回归 |
+| **谱面压缩** | BPE/event (主) | FSQ | VQ-VAE (baseline 分支) | **BPE/event** | event 序列无损、BPE 合并高频手型，适配 AR 自回归 |
 | **生成主干** | **AR Transformer** | Diffusion (DDPM) | **Flow Matching** | **AR (主), FM (备)** | AR 成熟稳定，FM 用于未来加速 |
 | **风格控制** | 对比学习 | **RAG 检索** | 自然语言 Prompt | **RAG** | 零训练，可解释，效果已验证 |
 | **偏好对齐** | RLHF (PPO) | **DPO** | 人工规则 | **DPO** | 轻量，适合离线数据，音乐领域已验证 |
@@ -349,7 +361,7 @@
 
 本技术选型文档确立了 **“自监督理解 + 离散化生成 + 检索增强 + 偏好对齐”** 的技术基座。
 
-- **对工程师**：明确了 MERT、VQ-VAE、AR Transformer、RAG、DPO 的具体集成方式，可立即着手搭建数据流水线和训练框架。
+- **对工程师**：明确了 MERT、BPE/event tokenizer、AR Transformer、RAG、DPO 的具体集成方式，可立即着手搭建数据流水线和训练框架。
 - **对决策者**：清晰的资源预估（标注成本 ≈ 0）和分阶段计划，降低了项目落地的不确定性。
 
 > **项目基石已定，一切开发以此文档为准。** 后续如有重大技术突破（如更优的音乐基础模型），将通过 RFC（征求意见稿）流程更新此文档。

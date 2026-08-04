@@ -9,7 +9,9 @@ BeatMorph 是**音游谱面端到端自动生成系统**：从原始音频（WAV
 
 **核心范式（不可动摇，见 BasePlan §1.2）**：
 ```
-音频 → MERT隐式理解 → VQ-VAE谱面分布学习 → RAG风格迁移 → DPO手感优化
+音频 → MERT隐式理解 → BPE/event谱面分布学习 → RAG风格迁移 → DPO手感优化
+# 注：tokenizer 范式经 RFC-0028 修宪，由 VQ-VAE 小节码本改为 BPE/event 序列；
+# VQ-VAE 实现移至 archive/vqvae-baseline 分支作对照基线，不在主路径。
 ```
 
 设计哲学：**自监督理解取代显式标注**。模型从百万级现成谱面自主学习，人只提供极简控制（难度+参考风格），标注成本≈0。
@@ -20,15 +22,15 @@ BeatMorph 是**音游谱面端到端自动生成系统**：从原始音频（WAV
 beatmorph/
 ├── audio/encoder/      Stage 0  MERT-v1-330M + Adapter（冻结主干，训 Adapter）
 ├── audio/separation/   Stage 0  Demucs(HTDemucs) 可选四轨分离
-├── tokenizer/          VQ-VAE   谱面语义 tokenizer（码本 2048/4096）
+├── tokenizer/          BPE/event 谱面语义 tokenizer（REMI 式 event 序列 + BPE，词表 ~4096；RFC-0028）
 ├── planner/            Stage 1  6层双向 Transformer 全局密度规划
 ├── generation/         Stage 2  AR Transformer Decoder（备选 Flow Matching）
 ├── rag/                风格检索  RAG，Top-K=3，零训练
 ├── alignment/          偏好对齐  DPO（非 RLHF/PPO）
-├── decoder/            Stage3&4 VQ-VAE Decoder + 规则后处理 + 格式导出
+├── decoder/            Stage3&4 event→Note 直映射 + 规则后处理 + 格式导出（无 VQ 解码网络）
 ├── data/               数据流水线 .osu 解析 + 统计量 + MERT 离线提取
 ├── io/formats/         IR ↔ .osu/.sm/.ma2 互转
-├── core/contracts/     跨模块数据契约（Note/Chart/Section/PatternToken）
+├── core/contracts/     跨模块数据契约（Note/Chart/Section/EventToken；PatternToken 随 VQ 退役归 baseline 分支）
 ├── core/               logging 等基础设施
 ├── infra/config/       Hydra 配置
 ├── cli/  api/          命令行与服务接口
@@ -38,7 +40,8 @@ beatmorph/
 
 ## 3. 不可违背的约束（红线）
 
-1. **技术选型锁定 BasePlan**：不得擅自替换 MERT→Qwen2-Audio、VQ-VAE→FSQ、AR→Diffusion(DDPM)、RAG→对比学习、DPO→RLHF/PPO、自监督回归→规则/LLM。任何变更须先开 RFC（[`docs/decisions/`](docs/decisions/README.md)）。
+1. **技术选型锁定 BasePlan**：不得擅自替换 MERT→Qwen2-Audio、AR→Diffusion(DDPM)、RAG→对比学习、DPO→RLHF/PPO、自监督回归→规则/LLM。任何变更须先开 RFC（[`docs/decisions/`](docs/decisions/README.md)）。
+   > **tokenizer 范式（RFC-0028 修宪，2026-08-04 采纳）**：主路径锁定 **BPE/event tokenizer**（REMI 式 event 序列 + BPE 合并，词表 ~4096）——原 VQ-VAE 小节码本范式解锁，VQ-VAE 实现移至 `archive/vqvae-baseline` 分支仅作对照基线，**不在主路径**。未来再换 tokenizer 范式（event→FSQ/规则/LLM 等）须先开 RFC。
 2. **模块间只通过 `core/contracts` 通信**：跨模块数据用 `Chart`/`Note`/`Section`/`PatternToken` 等已定义类型；张量形状遵循 `core/contracts/tensors.py`。**新增跨模块类型前先开 RFC**。
 3. **AI 与规则解耦**（BasePlan §3.7）：后处理规则引擎只做「物理红线」校验（4K 单帧≤2 键、同手间隔≥70ms、禁止越界），**不得改变 AI 的键型排列逻辑**（R-5）。
 4. **先攻 4K VSRG**（BasePlan §1.1/§6 R-6）：其它模式（6K/osu!std/maimai）视为独立适配工程，不得为它污染 4K 主路径。
@@ -70,7 +73,7 @@ beatmorph/
 - 仓库刚初始化：git main 分支已就绪，工程配置（pyproject/ruff/pre-commit/.gitattributes）已落地。
 - 仅有骨架代码（各模块 `__init__.py` + 接口占位）与核心契约实现（`core/contracts` 可用、测试可跑）。
 - 所有 plan 处于 🟡草案 状态，待评审。
-- **下一步**（BasePlan §7 Phase 1）：数据预处理流水线 + 10K 首 MERT Embedding 离线提取 + VQ-VAE 训练（重建>95%）。
+- **下一步**（BasePlan §7 Phase 1）：数据预处理流水线 + 10K 首 MERT Embedding 离线提取 + **BPE/event tokenizer 词表训练**（RFC-0028 采纳，~4700 event/曲、上下文 ~1024 分段）+ AR 生成主干。
 
 ## 7. 文档导航
 

@@ -11,10 +11,12 @@ from pydantic import ValidationError
 
 from beatmorph.core.contracts import (
     AR_CONTEXT_TOKENS,
+    BPE_DEFAULT_VOCAB,
     CODEBOOK_BASE,
     MERT_FRAME_RATE_HZ,
     BpmPoint,
     Chart,
+    EventToken,
     GameMode,
     Note,
     NoteType,
@@ -91,10 +93,14 @@ def test_chart_sorted_notes_deterministic() -> None:
 
 
 def test_constants_align_with_base_plan() -> None:
-    """常量与奠基文档约定一致。"""
+    """常量与奠基文档约定一致（RFC-0028 修宪后口径）。"""
     assert MERT_FRAME_RATE_HZ == 25.0
+    # VQ-VAE 码本常量保留（legacy/baseline 分支沿用），主路径不再消费
     assert CODEBOOK_BASE == 2048
-    assert AR_CONTEXT_TOKENS == 256
+    # RFC-0028：AR 上下文 256 小节(bar) → 1024 event（分段生成）
+    assert AR_CONTEXT_TOKENS == 1024
+    # RFC-0028：BPE 词表默认 4096
+    assert BPE_DEFAULT_VOCAB == 4096
 
 
 # ── bpm_points（RFC-0005）──
@@ -192,7 +198,17 @@ def test_chart_roundtrip_tempo_changes() -> None:
 
 
 def test_pattern_token_roundtrip() -> None:
-    """PatternToken 同样满足序列化往返。"""
+    """PatternToken 同样满足序列化往返（legacy/baseline 分支沿用）。"""
     t = PatternToken(code=1024, bar_index=3, start_time=5.5, duration_bars=1)
     recon = PatternToken.model_validate_json(t.model_dump_json())
     assert recon == t
+
+
+def test_event_token_roundtrip() -> None:
+    """EventToken（RFC-0028 BPE/event tokenizer 主路径）满足序列化往返。"""
+    t = EventToken(id=2048, bar_index=3, start_time=5.5)
+    recon = EventToken.model_validate_json(t.model_dump_json())
+    assert recon == t
+    # 默认值：bar_index/start_time 可缺省（未定小节 token）
+    assert EventToken(id=0).bar_index == 0
+    assert EventToken(id=0).start_time == 0.0

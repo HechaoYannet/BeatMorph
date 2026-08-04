@@ -154,7 +154,11 @@ class Chart(BaseModel):
 
 
 class PatternToken(BaseModel):
-    """VQ-VAE 编码后的离散 Pattern Token。
+    """VQ-VAE 编码后的离散 Pattern Token（**legacy / baseline 分支**，RFC-0028）。
+
+    一个 Token 对应一个小节内的 Note 集合模式。原奠基 §3.2 VQ-VAE 范式产物；
+    tokenizer 范式经 RFC-0028 修宪后主路径改用 :class:`EventToken`，本类型仅由
+    ``archive/vqvae-baseline`` 分支沿用。主路径保留定义仅为不破坏该分支导入链。
 
     一个 Token 对应一个小节内的 Note 集合模式（奠基文档 §3.2）。
     """
@@ -163,3 +167,23 @@ class PatternToken(BaseModel):
     bar_index: NonNegativeInt  # 所属小节序号
     start_time: NonNegativeFloat  # 该小节起点（秒）
     duration_bars: NonNegativeInt = 1  # 覆盖小节数（默认 1）
+
+
+class EventToken(BaseModel):
+    """BPE/event tokenizer 产出的单个 event token（RFC-0028）。
+
+    一个 ``EventToken`` 对应 BPE 词表中的一个 id，可能是原子 event
+    （Bar/Position/Nudge/Noteevent/Duration）或 BPE 合并的复合 event。
+    解码端只关心 :attr:`id`；event 语义由 BPE 词表的原子名决定，不在运行期
+    ``EventToken`` 上冗余存储。:attr:`bar_index` / :attr:`start_time` 仅作下游
+    AR 分段切片（RFC-0008）与解码期 ``POS→秒`` 映射的锚点，未定小节的 token 可为 0。
+
+    Attributes:
+        id: BPE 词表索引 ``[0, vocab_size)``（见契约 :data:`BPE_DEFAULT_VOCAB`）。
+        bar_index: 所属小节序号（基于 :func:`compute_bar_boundaries` 推边界）。
+        start_time: 所属小节起点（秒，POS→秒映射用；缺失由 bar_index 反查）。
+    """
+
+    id: NonNegativeInt
+    bar_index: NonNegativeInt = 0
+    start_time: NonNegativeFloat = 0.0

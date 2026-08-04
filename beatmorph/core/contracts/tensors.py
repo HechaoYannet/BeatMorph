@@ -22,7 +22,7 @@ class AudioEmbedding:
     """
 
     feat: int = 768
-    time_seq: int = 0          # 运行期确定
+    time_seq: int = 0  # 运行期确定
     hop_rate: float = 25.0
 
 
@@ -42,14 +42,32 @@ class PlanOutput:
 
 @dataclass(frozen=True)
 class TokenSeq:
-    """Stage2 Pattern Token 序列。
+    """Stage2 Pattern Token 序列（**legacy / baseline 分支**，RFC-0028）。
 
-    einops: ``(batch, seq_len)`` 的 long 张量，取值范围 [0, codebook_size)。
-    每个元素是一小节的离散 Pattern ID（奠基文档 §3.2 / §3.4）。
+    einops: ``(batch, seq_len)`` 的 long 张量，取值范围 ``[0, codebook_size)``。
+    每个元素是一小节的离散 Pattern ID。原 VQ-VAE 范式产物；主路径改用
+    :class:`EventSeq`，本类型仅由 ``archive/vqvae-baseline`` 分支沿用。
     """
 
     seq_len: int = 0
-    codebook_size: int = 2048   # 2048 基础 / 4096 精细
+    codebook_size: int = 2048  # 2048 基础 / 4096 精细
+
+
+@dataclass(frozen=True)
+class EventSeq:
+    """Stage2 event token 序列（RFC-0028，主路径）。
+
+    einops: ``(batch, seq_len)`` 的 long 张量，取值范围 ``[0, vocab_size)``。
+    每个元素是一个 BPE event id（原子或复合）。``seq_len`` 单位是 event 而非小节
+    （~4700 原子 event/曲 → BPE 合并后 ~2000-2500）。
+
+    Attributes:
+        seq_len: 序列长度（event 数）。
+        vocab_size: BPE 词表大小（默认 :data:`BPE_DEFAULT_VOCAB`=4096）。
+    """
+
+    seq_len: int = 0
+    vocab_size: int = 4096
 
 
 @dataclass(frozen=True)
@@ -66,9 +84,15 @@ class RAGContext:
 
 
 # ── 模块间约定的关键常量 ──
-MERT_FRAME_RATE_HZ: float = 25.0          # 奠基文档 §3.1
+MERT_FRAME_RATE_HZ: float = 25.0  # 奠基文档 §3.1
 MERT_DEFAULT_FEAT_DIM: int = 1024  # MERT-v1-330M hidden_size
-CODEBOOK_BASE: int = 2048                 # §3.2 基础码本
-CODEBOOK_FINE: int = 4096                 # §3.2 精细码本
-DEFAULT_LANE_COUNT: int = 4               # §1.1 先攻 4K
-AR_CONTEXT_TOKENS: int = 256              # §3.4.1 约 256 小节
+# ── 以下 VQ 码本常量为 RFC-0028 legacy：仅 archive/vqvae-baseline 分支沿用 ──
+CODEBOOK_BASE: int = 2048  # §3.2 基础码本（VQ-VAE, 已退役 baseline）
+CODEBOOK_FINE: int = 4096  # §3.2 精细码本（VQ-VAE, 已退役 baseline）
+DEFAULT_LANE_COUNT: int = 4  # §1.1 先攻 4K
+# ── RFC-0028 BPE/event tokenizer 常量（主路径）──
+BPE_DEFAULT_VOCAB: int = 4096  # §3.2.1 BPE 词表默认大小
+BPE_VOCAB_POC_SWEEP: tuple[int, ...] = (2048, 4096, 8192)  # PoC 词表扫参
+POS_DIVISIONS_PER_BEAT: int = 48  # §3.2.2 Position 子拍网格 1/48 拍
+NUDGE_BUCKETS: int = 12  # §3.2.2 残差毫秒桶数（PoC 不达标可升 16）
+AR_CONTEXT_TOKENS: int = 1024  # §3.4.1 ~1024 event 分段（原 256 小节）

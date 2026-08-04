@@ -1,8 +1,11 @@
 """PyTorch Lightning 训练封装（Plan 09 子集，Phase 1 最小可跑）。
 
-提供 :class:`PlannerLitModule`（Stage1 密度规划）、:class:`VQVAELitModule`（Stage2 前置
-VQ-VAE tokenizer）与 :func:`build_trainer`。MERT Adapter 训练 LitModule 留待 Phase 2；
-W&B/FSDP/ckpt top-K 留 Phase 2。
+提供 :class:`PlannerLitModule`（Stage1 密度规划）与 :func:`build_trainer`。
+MERT Adapter 训练 LitModule 留待 Phase 2；W&B/FSDP/ckpt top-K 留 Phase 2。
+
+RFC-0028：原 :class:`VQVAELitModule`（Stage2 前置 VQ-VAE tokenizer）已退役，
+随 VQ-VAE 实现移 ``archive/vqvae-baseline`` 分支。主路径 tokenizer 改为 BPE/event
+（``BPETokenizer`` 是确定性统计，无 nn.Module / 无训练 LightningModule）。
 
 奠基 §5：PyTorch Lightning + bf16-mixed + 梯度累积 + 梯度裁剪。
 """
@@ -18,7 +21,6 @@ from pytorch_lightning.loggers import TensorBoardLogger
 
 from beatmorph.core.logging import get_logger
 from beatmorph.planner.density import DensityPlanner
-from beatmorph.tokenizer.vqvae import VQVAETokenizer
 
 if TYPE_CHECKING:
     from omegaconf import DictConfig
@@ -87,68 +89,6 @@ class PlannerLitModule(LightningModule):
             weight_decay=self.weight_decay,
         )
         return opt
-
-
-class VQVAELitModule(LightningModule):
-    """Stage2 前置 VQ-VAE tokenizer LightningModule（Plan 02）。
-
-    纯谱面重建（不接 audio 条件），训练目标 = recon + commit + codebook + util
-    （见 :meth:`VQVAETokenizer.loss_fn`）。每 ``restart_every_n_steps`` 步触发死码重启（R-2）。
-
-    Args:
-        tokenizer: 已 K-means 初始化码本的 :class:`VQVAETokenizer`。
-        lr: 学习率。
-        weight_decay: 权重衰减。
-        restart_every_n_steps: 死码重启周期（步）。
-    """
-
-    def __init__(
-        self,
-        tokenizer: VQVAETokenizer,
-        lr: float = 3e-4,
-        weight_decay: float = 0.01,
-        restart_every_n_steps: int = 200,
-    ) -> None:
-        super().__init__()
-        self.tokenizer = tokenizer
-        self.lr = lr
-        self.weight_decay = weight_decay
-        self.restart_every_n_steps = restart_every_n_steps
-
-    def forward(self, *args: object, **kwargs: object) -> object:
-        return self.tokenizer(*args, **kwargs)
-
-    def training_step(self, batch: dict[str, Any], batch_idx: int) -> torch.Tensor:
-        pred = self.tokenizer(batch["bar_grid"], batch.get("bar_mask"))
-        loss = self.tokenizer.loss_fn(pred, batch)
-        self.log("train/loss", loss, prog_bar=True)
-        self.log("train/loss_recon", pred["loss_recon"])
-        self.log("train/loss_commit", pred["loss_commit"])
-        self.log("train/codebook_usage", self.tokenizer.codebook_usage())
-        # 死码随机重启（R-2）
-        if (
-            self.restart_every_n_steps > 0
-            and self.global_step > 0
-            and self.global_step % self.restart_every_n_steps == 0
-        ):
-            n_restart = self.tokenizer.restart_dead_codes(pred["z_e"])
-            if n_restart > 0:
-                self.log("train/dead_code_restarted", float(n_restart))
-        return loss
-
-    def validation_step(self, batch: dict[str, Any], batch_idx: int) -> torch.Tensor:
-        pred = self.tokenizer(batch["bar_grid"], batch.get("bar_mask"))
-        loss = self.tokenizer.loss_fn(pred, batch)
-        self.log("val/loss", loss, prog_bar=True)
-        self.log("val/codebook_usage", self.tokenizer.codebook_usage())
-        return loss
-
-    def configure_optimizers(self) -> torch.optim.Optimizer:
-        return torch.optim.AdamW(
-            self.tokenizer.parameters(),
-            lr=self.lr,
-            weight_decay=self.weight_decay,
-        )
 
 
 def _build_logger(infra: dict[str, Any], exp: dict[str, Any]) -> TensorBoardLogger | Literal[False]:

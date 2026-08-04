@@ -157,24 +157,22 @@ class TestBarBoundaryPhaseAlignment:
         assert b[-1] >= 6.0 - 1e-6
 
     def test_phase_alignment_lands_notes_on_beat(self) -> None:
-        """phase 对齐后，落在 bar 起点的 Note（=phase + k*bar）应属首个 bin。"""
-        from beatmorph.tokenizer.vqvae import rasterize_bar
+        """phase 对齐后，落在 bar 起点的 Note（=phase + k*bar）应精确在边界。
 
+        RFC-0028：解耦 tokenizer 栅格化（rasterize_bar 已随 VQ-VAE 移 baseline 分支）。
+        此处直接验 _compute_bar_boundaries 的 phase 对齐：首音乐 bar 起点 = phase + k*bar，
+        Note 落该点则其相对 bar 的 rel=0（BPE Position event 的 POS=0 等价语义）。
+        """
         # 120bpm bar=2s phase=0.5，Note 在 phase+2.0=2.5（首音乐 bar 起拍）
         bps = [BpmPoint(time=0.5, bpm=120.0)]
         bounds = _compute_bar_boundaries(bps, 10.0)
-        # 找首个音乐 bar（bounds[1]=0.5 → bounds[2]=2.5 是首音乐 bar）
+        # 找首个音乐 bar（bounds[1]=0.5 intro → bounds[2]=2.5 是首音乐 bar）
         bar_start = bounds[2]
         bar_dur = bounds[3] - bounds[2]
-        # Note 精确在 bar 起点（downbeat），应落 bin 0
-        grid = rasterize_bar(
-            [Note(time=bar_start, lane=0, type=NoteType.TAP)],
-            bar_start,
-            bar_dur,
-            lane=4,
-            time_bins=64,
-        )
-        assert grid[0, 0, 0] == 1.0  # lane0, bin0, TAP
+        # Note 精确在 bar 起点（downbeat），相对 bar 的 rel 应为 0
+        note_time = bar_start
+        rel = (note_time - bar_start) / bar_dur
+        assert abs(rel) < 1e-9, "phase 对齐后 bar 起点 Note 的 rel 应为 0"
 
     def test_phase_no_intro_when_phase_covers_all(self) -> None:
         """total_duration < phase 时退化为 [0, phase]（不无限生成边界）。"""

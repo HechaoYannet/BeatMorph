@@ -5,9 +5,10 @@
   ``Chart``（含 ``compute_section_stats`` 产出的 sections 伪标签），配对同
   ``beatmap_set_id`` 的离线 MERT embedding ``.pt``（同 set 多难度共享一份去冗余）。
 - :class:`MERTExtractionDataset`：离线提取用，yield ``(.osu_path, audio_path)``。
-- :class:`VQVAEDataset`：Stage2 前置 VQ-VAE tokenizer 训练数据。纯谱面重建，不依赖
-  audio_emb（奠基 §3.2 独立 tokenizer）；每样本 yield 栅格化 ``bar_grid``，由
-  :func:`beatmorph.tokenizer.vqvae.rasterize_chart` 产出。
+
+RFC-0028：原 :class:`VQVAEDataset`（Stage2 前置 VQ-VAE tokenizer 训练数据）已随
+VQ-VAE 退役，移 ``archive/vqvae-baseline`` 分支。主路径 BPE/event tokenizer 是
+确定性统计（``BPETokenizer.train`` 吃 ``list[Chart]``，无 Dataset 子类需求）。
 
 数据来源：PreprocessPipeline 的 jsonl/parquet 产出（含 sections）+
 ``extract_mert_embeddings`` 产的 ``{beatmap_set_id}.pt``（同 set 共享一份）。
@@ -16,15 +17,12 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from torch.utils.data import Dataset
 
 from beatmorph.core.contracts import Chart, GameMode
 from beatmorph.core.logging import get_logger
-
-if TYPE_CHECKING:
-    pass
 
 logger = get_logger(__name__)
 
@@ -151,103 +149,6 @@ class PlannerDataset(Dataset[Any]):
             n_non_4k,
         )
         return samples
-
-
-class VQVAEDataset(Dataset[Any]):
-    """Stage2 前置 VQ-VAE tokenizer 训练数据集（Plan 02）。
-
-    纯谱面重建：不读 audio_emb / embeddings_dir（奠基 §3.2 独立 tokenizer，AR 才接 audio）。
-    每样本栅格化整张谱面为 ``bar_grid``，由
-    :func:`beatmorph.tokenizer.vqvae.rasterize_chart` 产出（小节边界复用
-    ``_compute_bar_boundaries``，与 ``compute_section_stats`` 同源口径）。
-
-    Args:
-        charts_path: ``charts.jsonl``（PreprocessPipeline 产出，每行一个 Chart JSON）。
-        time_bins: 每 bar 时间栅格数（默认 64）。
-        lane: 键位数（默认 4，守 R-6 / RFC-0025，仅保留 4K）。
-
-    每样本：
-        - ``bar_grid``: ``(bars, lane, time_bins, 6)`` float（栅格化）
-        - ``bar_mask``: ``(bars,)`` bool 全 True
-        - ``bar_count``: int
-    跳过无 Note 的样本。
-    """
-
-    def __init__(
-        self,
-        charts_path: Path,
-        time_bins: int = 64,
-        lane: int = 4,
-    ) -> None:
-        from beatmorph.tokenizer.vqvae import rasterize_chart
-
-        self.charts_path = Path(charts_path)
-        self.time_bins = time_bins
-        self.lane = lane
-        self._rasterize_chart = rasterize_chart
-        self._charts: list[Chart] = self._load_charts()
-
-    def __len__(self) -> int:
-        return len(self._charts)
-
-    def __getitem__(self, idx: int) -> dict[str, Any]:
-        import torch
-
-        chart = self._charts[idx]
-        grids, _boundaries = self._rasterize_chart(chart, self.lane, self.time_bins)
-        if not grids:
-            # 兜底：rasterize_chart 对空谱面返回 ([], [])，构造单空小节避免 0 维
-            from beatmorph.tokenizer.vqvae import rasterize_bar
-
-            grid = rasterize_bar([], 0.0, 4 * 60.0 / 120.0, self.lane, self.time_bins)
-            grids = [grid]
-        bar_grid = torch.stack(grids)  # (bars, lane, time_bins, feat)
-        bar_count = bar_grid.shape[0]
-        return {
-            "bar_grid": bar_grid,
-            "bar_mask": torch.ones(bar_count, dtype=torch.bool),
-            "bar_count": bar_count,
-        }
-
-    # ── 索引构建 ──────────────────────────────────────────────
-
-    def _load_charts(self) -> list[Chart]:
-        charts: list[Chart] = []
-        if not self.charts_path.exists():
-            logger.warning("charts file not found: %s", self.charts_path)
-            return charts
-
-        n_non_4k = 0
-        n_empty = 0
-        with self.charts_path.open("r", encoding="utf-8") as f:
-            for ln, raw in enumerate(f, start=1):
-                line = raw.strip()
-                if not line:
-                    continue
-                try:
-                    chart = Chart.model_validate_json(line)
-                except Exception as exc:
-                    logger.debug("skip invalid chart line %d: %s", ln, exc)
-                    continue
-
-                # 守 R-6 / RFC-0025：仅 4K，多 K 数据虽落盘但在此过滤
-                if chart.mode != GameMode.MANIA_4K:
-                    n_non_4k += 1
-                    continue
-
-                if not chart.notes:
-                    n_empty += 1
-                    continue
-
-                charts.append(chart)
-
-        logger.info(
-            "VQVAEDataset: %d samples (skipped: %d empty, %d non-4K)",
-            len(charts),
-            n_empty,
-            n_non_4k,
-        )
-        return charts
 
 
 class MERTExtractionDataset(Dataset[Any]):

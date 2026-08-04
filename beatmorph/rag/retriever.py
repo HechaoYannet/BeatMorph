@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from beatmorph.core.contracts import PatternToken
+from beatmorph.core.contracts import EventToken
 
 if TYPE_CHECKING:
     import torch
@@ -34,14 +34,14 @@ class RAGRetriever:
         query_emb: torch.Tensor,
         difficulty: int,
         bpm: float,
-    ) -> list[list[PatternToken]]:
-        """检索 Top-K 参考谱面的 Token 序列。
+    ) -> list[list[EventToken]]:
+        """检索 Top-K 参考谱面的 event token 序列（RFC-0028，BPE/event）。
 
         Args:
             query_emb: 查询音频 embedding。
             difficulty: 目标难度，用于过滤。
             bpm: 目标 BPM，用于过滤/加权。
         Returns:
-            Top-K 条参考 Pattern Token 序列。
+            Top-K 条参考 event token 序列（:class:`EventToken`）。
         """
         raise NotImplementedError

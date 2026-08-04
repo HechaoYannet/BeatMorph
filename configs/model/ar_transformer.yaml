@@ -6,8 +6,8 @@ model:
   n_layers: 12              # 12-16
   n_heads: 16
   dim: 768                  # 与 MERT feat 对齐
-  context_tokens: 256       # 约 256 小节
-  codebook_size: 2048       # 2048 基础 / 4096 精细
+  context_tokens: 1024      # RFC-0028: ~1024 event（段落级，分段生成）
+  vocab_size: 4096          # RFC-0028: BPE 词表（原 codebook_size 2048）
   dropout: 0.1
 
   # 条件注入

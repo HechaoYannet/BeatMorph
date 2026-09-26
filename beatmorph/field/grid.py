@@ -39,8 +39,7 @@ from beatmorph.core.contracts.phigros import (
     Side,
 )
 from beatmorph.core.contracts.tensors import (
-    MERT_CONV_STRIDE_PRODUCT,
-    MERT_SAMPLE_RATE_HZ,
+    MERT_FRAME_RATE_HZ,
 )
 
 FloatArray = NDArray[np.float64]
@@ -62,7 +61,8 @@ BEAT_SUBDIVISION: Final[int] = SUBDIVISIONS_PER_BEAT
 SECONDS_PER_MINUTE: Final[float] = 60.0
 #: 音频帧率：派生量，不是超参（BasePlan §3.1 / POSTMORTEM-2026-08-05）。
 #: **它只服务 Stage 0 的音频帧轴**，不是场的时间轴；此处仅供 G4 门禁与对齐处引用。
-MERT_FRAME_RATE_HZ: Final[float] = MERT_SAMPLE_RATE_HZ / MERT_CONV_STRIDE_PRODUCT
+#: ⚠️ 本处**只做转出**（re-export），派生式本身仍只在 core/contracts/tensors.py 定义一次：
+#: 25 Hz 事故的根因正是同一常量被独立复制了三份（plan 07 §3.3 / M7.4 的全仓扫描会抓第二处定义）。
 #: tau 格索引的浮点护栏：仅用于抵消「恰好落在格界」的 1~2 ulp 误差。
 #: 它不是物理常量，量级（1e-9 格 = 1/48 拍的十亿分之一）远小于任何真实量化网格。
 TAU_INDEX_EPS: Final[float] = 1e-9

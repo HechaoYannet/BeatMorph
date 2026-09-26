@@ -1,7 +1,7 @@
 # Plan 02 — 数据流水线：Phira 谱面获取 + RPEJSON 解析 + 质检 + 特征离线提取
 
-> 状态：🔵 实施中（M1–M10 代码与默认 CI 测试已落地；逐条实施状态见 §6 里程碑表的「实施状态」列） ｜ 阶段：Phase 1 ｜ 负责：数据组（data-agent）
-> 对应代码：`beatmorph/data/`（`phira/client.py`、`phira/package.py`、`parsers/sniff.py`、`parsers/rpejson.py`、`qc.py`、`pipeline/embed.py`） ｜ 对应奠基章节：§4、§3.2.4、§9
+> 状态：🔵 实施中（M1–M11 代码与默认 CI 测试已落地；逐条实施状态见 §6 里程碑表的「实施状态」列。**残留**：把流水线串起来的驱动脚本与真实拉取尚未执行） ｜ 阶段：Phase 1 ｜ 负责：数据组（data-agent）
+> 对应代码：`beatmorph/data/`（`phira/client.py`、`phira/package.py`、`parsers/sniff.py`、`parsers/rpejson.py`、`qc.py`、`pipeline/embed.py`、**`tracks.py` / `dataset.py`**） ｜ 对应奠基章节：§4、§3.2.4、§9
 
 ## 1. 目标与范围
 
@@ -247,6 +247,8 @@ def dataset_stats(table: Path) -> DatasetStats:
 | **M9 特征离线提取** | 在**本地落盘（不入库，硬约束 ②）**的音频子集上：缓存文件数 == 音频数；抽样加载校验六项全过（plan 01 §3.3）；`meta.rate == MERT_FRAME_RATE_HZ`（派生量，非字面量）；篡改任一元数据字段后加载必须抛错；唯一曲目数（按音频 sha1）与同曲重复率写入 `dataset_stats` | ✅ `test_embed_features.py`（假编码器，六项校验各有负样本）；真实权重通路属 slow/e2e，未执行 |
 | **M10 配对与切分** | 同曲多谱进同一 split（用含同曲 2 张谱的样本断言）；产出 train/val/test 三份清单，**曲目集合两两不相交**；另产出一份「同曲跨谱泛化」评测集（同曲不同难度）；报告真实 (audio, chart) 对数（< 9649） | ✅ `test_pairs_split.py` + `tests/integration/test_pipeline_min.py`（同曲同 split、曲目集合两两不相交、同曲跨谱泛化集） |
 
+| **M11 训练数据通路** | 「谱面 + 特征缓存」→ `FieldBatch`：窗口化（每窗 `PairSample`）、`collate_field_batch` 通过 `FieldBatch.assert_shapes()`、网格身份不一致**抛错**（`GridMismatchError`）、**绝不发出 r == 1 的样本**、同 index 取两次逐位一致、窗口边界不切断 Hold、音频切片帧数由契约帧率派生 | ✅ `beatmorph/data/dataset.py` + `tracks.py`；`tests/unit/data/test_dataset.py`（27 项）+ `tests/integration/test_dataset_to_generation.py`（真实窗口 → 前向 → 反传）；主会话口径见 §9「实施期裁定」 |
+
 > **G1–G4 门禁义务说明**：本模块**不引入训练目标或损失**，故无 G1–G4 全绿义务；它是 **G4 的数据侧落点**——帧率、单位、形状三项派生断言在 M7/M9 内以**默认 CI 契约测试**形式落地。任何消费本模块数据的新训练目标（`field/` / `generation/` 的 plan）在扩大数据规模之前必须先跑通 G1–G4（`beatmorph/infra/sanity.py`，[BasePlan §9](BasePlan.md)）。
 
 ## 7. 风险与缓解
@@ -296,3 +298,26 @@ def dataset_stats(table: Path) -> DatasetStats:
    > **处置**：不静默二选一，而是把「首段必须起于 0 拍」提升为 `qc.py` 的 **schema 违约 → 隔离区**；
    > 首段起于 0 拍时两条路径在默认 CI 的 `tests/integration/test_time_conversion_seam.py` 中逐点一致（含多 BPM 段、段界、往返无损、改写 BPMList 必变）。
    > 仍需 RFC 决定的是**统一实现**（依赖方向 `data → field`？或把分段积分上提到 `core/contracts`）——在裁定前不得出现第三处换算。
+
+### 实施期裁定（主会话，2026-09-27）
+
+**M11 训练数据通路已落地**：`beatmorph/data/dataset.py`（窗口化 `ChartPairDataset` + `collate_field_batch`）
+与 `beatmorph/data/tracks.py`（事件轨在 τ 轴上求值）把「谱面 + 特征缓存」变成 generation 主干可直接消费的
+`FieldBatch`。三条口径由主会话裁定：
+
+1. **窗口局部网格**（实现方案，接受）：`PairSample.grid` 的 τ 轴是窗口局部的，`bpm_points` 收成单段
+   `[(0, bpm_eff)]`，`bpm_eff = 60 / J(τ_start)` 由 `field.grid.jacobian_at` 派生；绝对 τ 位置由
+   `PairSample.tau_start` 携带。好处：`FieldBatch` 只带一个 grid 的约束下，同批样本的逐格 J **必然相同**。
+   代价：跨 BPM 变更点的窗口被跳过并记账（不静默丢弃）。
+2. **绝不发出 r == 1 的样本**（接受）：`generation.losses.masked_poisson_loss` 在 r == 1 时**拒绝训练**，
+   因此数据集先排除「遮盖单位数 <= 1」的窗口（与种子无关），再对残余情形重掷种子（上限 8 次），
+   仍不行则以「无遮盖」发出并记账告警。
+3. **事件 token 数 == 1 的窗口跳过并记账**（接受）。另一种口径是以全 False 遮盖发出（不丢数据），
+   但当前选择与主会话指令一致，且不影响 M10 的记账纪律。
+
+**新登记（需 RFC 或契约变更）**：
+
+- **`FieldBatch` 缺 `time_mask`**：批内音频长度不一致时 `collate_field_batch` 只能补零，
+  补零帧是**伪造的静音特征**。由于默认 `batch_size=1`，当前不触发；但一旦要跨谱批训练，
+  必须给音频 padding 一个显式掩码（改 `generation/batch.py` 的契约）。
+- **跨谱 batching**：与 plan 07 §9-13 同一问题（按网格分组采样 vs per-sample 网格）。

@@ -2,7 +2,7 @@
 # 用法: make <target>   （需先安装 uv: https://docs.astral.sh/uv/）
 # Windows 下推荐在 PowerShell 直接用 uv 原生命令；Makefile 供类 Unix 环境使用。
 
-.PHONY: help install dev lint format typecheck test test-fast clean git-init
+.PHONY: help install dev lint format typecheck test test-fast clean git-init env-doctor gates-smoke
 
 help: ## 显示帮助
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2}'
@@ -28,6 +28,12 @@ test: ## 运行全部测试
 
 test-fast: ## 仅快测试（跳过 slow/gpu/e2e）
 	uv run pytest -m "not slow and not gpu and not e2e" -p no:cacheprovider
+
+env-doctor: ## 环境自检 E1-E5（退出码 0/1/2 = 全 PASS / 有 FAIL / 有 UNKNOWN，如未装 train extra）
+	uv run python -m beatmorph.infra.env_doctor
+
+gates-smoke: ## 门禁冒烟：合成数据跑通 G1-G4 并把六件套写进 runs/（无权重/无网络/无 GPU）
+	uv run beatmorph-train --config-name smoke --gates-only
 
 clean: ## 清理产物
 	rm -rf .pytest_cache .ruff_cache .mypy_cache htmlcov coverage.xml dist build *.egg-info

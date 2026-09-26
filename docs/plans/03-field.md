@@ -373,3 +373,12 @@ def render_field_png(lam, gt_counts, out_path, *, grid, **sel) -> Path
 14. **`T`（τ 轴长度）的终点口径未查证**：τ 格数需要「谱面终点换算到拍」，但终点取自哪个字段（`chartTime` / 最后一事件 / 音频时长）以及是否含 `META.offset`，本轮**未查证** → 不得凭猜实现；须先查 `phigros-format.md` 并由 plan 02 的 IR 明确给出。
 15. **τ 轴与音频帧轴的对齐方式未定**：`audio_emb` 在 75 Hz 帧轴上、场在 τ 格上，条件注入处的重采样（在 τ 格上取音频帧 / 在音频帧上取 τ）尚无结论；本计划只在**一处**实现该重采样（§4.2），具体形式待与 plan 04 联合定稿。
 16. **BPM 变更点不落在 1/48 拍格上时的 `J_j` 取值**：RPE 的 `BPMList` 起点是 beat 三元组 `i + n/d`，`d` 不保证整除 48 ⟹ 存在跨格变速。该格取左段、右段还是按格内时长加权，**未定**（直接影响 M3 多 BPM 段测试场的构造与 M12 的容差标定）。
+
+17. **【实施期实测，2026-09-27】全谱 build_target 的显存/内存标度不可用于真实语料**：全谱计数张量 = K x T_full x X x S x C；
+    实测 5 分钟谱、K=30、X=128 约 1.1e9 格 ≈ **2 GB / 样本** —— 训练不可用。
+    beatmorph/data/dataset.py（plan 02 M11）因此改为「**窗口子谱 + 窗口局部网格**」调用 build_target
+    （窗口落在单一 BPM 段内 ⟹ 窗内秒↔τ 线性 ⟹ 与「全谱建表后切窗」**逐格等价**，等价性由
+    tests/unit/data/test_dataset.py::test_window_counts_equal_full_chart_slice 锁定）。
+    这条**不改变** field/ 的任何语义（装箱仍只经 build_target），但它把「N 的取值」与「单样本内存」绑在了一起：
+    RPE_X_GRID_BINS 从 128 提到 256/512 时，全谱口径的内存会再翻 2-4 倍 → N 的消融（§9-7）
+    必须同时报告**窗口口径**的内存，否则曲线不可用。

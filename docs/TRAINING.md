@@ -272,6 +272,13 @@ PreprocessPipeline(Path('data/raw'), Path('data/processed')).extract_mert_embedd
 | **G3** 常数基线 | `constant_baseline_gate(model_loss, baseline_loss, min_improvement=0.1)` | 模型 loss `<= 基线 × 0.9` | 模型其实什么都没学到（停在均值地板上） |
 | **G4** 契约断言 | `frame_rate_gate(frames, duration_s, frame_rate, tol_frames=2)` | `frames ≈ duration_s × frame_rate`（`frame_rate` **必须由 config 派生**） | 单位/帧率/采样率漂移 |
 
+**两种跑法**：① **命令行（推荐，会落盘并强制 fail-closed）**：`uv run beatmorph-train --gates`
+（或 `--gates-only` 只跑门禁）；② 手工片段（下文），用于研究单个门禁的行为。
+
+`gates.txt` 里除了 `summarize()` 原文，还会写**本次生效的阈值**（例如 `g1_steps`、`g2_samples`、
+`g3_min_improvement`）与上下文（git rev / 数据来源 / 派生帧率）——因为门禁阈值对量纲敏感，
+「默认值」不等于「本次用的值」（plan 07 §3.1 / §9-2）。
+
 **操作步骤（在 1–4 个样本上跑，任一失败都不得扩数据）**：
 
 ```python
@@ -311,9 +318,17 @@ assert all(results), results  # 未全绿 → 停止，不要扩数据
 
 | 项 | 状态 |
 |----|------|
-| ✅ 现有入口 | `uv run beatmorph-train --config-name stage1_planner experiment.max_steps=10000` —— **这是 v2.x 的 planner stage，不可用于 v3.0 训练** |
-| 🟡 训练栈 | `infra/trainer.py`（Lightning + bf16-mixed + 梯度裁剪）与 Hydra 分发骨架**可复用** |
-| ⬜ 待建 | v3.0 的模型配置与训练 stage（掩码补全 Enc-Dec + 泊松 NLL + mask 通道），须由 infra-agent 在 `configs/` 落地（AGENTS.md §3.4） |
+| ✅ **门禁冒烟（今天就能跑）** | `uv run beatmorph-train --config-name smoke --gates-only` —— 合成谱、无权重、无网络、无 GPU，数秒跑完 G1-G4 并把六件套写进 `runs/smoke/<时间戳>/` |
+| ✅ **训练入口** | `uv run beatmorph-train --config-name phigros_masked --gates`（真实清单 + 特征缓存）。`--gates` 先跑 G1-G4，**任一 FAIL 即以退出码 5 中止**；不跑门禁而数据规模超过冒烟上限时 **fail-closed 拒绝启动** |
+| ✅ 训练栈 | `beatmorph/infra/train_loop.py`（torch 参考循环，默认 `run.backend=torch`）；`beatmorph/infra/lightning_module.py`（Lightning 目标栈，需 `uv sync --extra train`，缺失时给出安装命令而**不静默回落**） |
+| ✅ 环境自检 | `uv run python -m beatmorph.infra.env_doctor`（退出码 0/1/2 = 全 PASS / 有 FAIL / 有 UNKNOWN）；训练入口默认先跑它，可用 `--skip-env-doctor` 跳过（仅测试/容器） |
+| ⬜ 真实数据的清单与特征 | 仍待 plan 02 的 Phira 获取脚本 + 特征提取（§3–§5）：**没有它们就没有真实训练批次**，`data.source=manifest` 会在清单不存在时直接报错 |
+
+**退出码语义**（`beatmorph/cli/train.py`）：0 成功｜2 参数错误｜3 配置错误（含 provenance 为空）｜
+4 环境自检 FAIL｜5 门禁 FAIL / fail-closed 拒绝启动｜6 缺少可选依赖｜7 训练异常。
+
+**实验产物（六件套，缺一即视为实验不可信）**：`config.yaml` / `gates.txt`（含**生效阈值**与
+git/data rev）/ `data_provenance.json`（来源与用途）/ `checkpoints/` / `logs/` / `metrics.json`。
 
 **训练目标的硬约束**（实现时逐条对照，BasePlan §3.4 / RFC-0029 §3.2）：
 
@@ -398,7 +413,13 @@ uv run python scripts/verify_mert_frame_rate.py --model-dir models/pretrained/m-
 # 2. 契约级测试（不依赖权重/GPU，默认 CI 内跑）
 uv run pytest tests/unit/audio/test_frame_rate_contract.py tests/unit/infra/test_sanity.py -q
 
-# 3. 全仓快测试 + lint + 类型
+# 3. 环境自检（E1-E5；退出码 2 = 有 UNKNOWN，例如没装 train extra）
+uv run python -m beatmorph.infra.env_doctor
+
+# 4. 门禁冒烟：跑通 G1-G4 并落盘六件套（合成数据，数秒）
+uv run beatmorph-train --config-name smoke --gates-only
+
+# 5. 全仓快测试 + lint + 类型
 make test-fast
 uv run ruff check . ; uv run mypy beatmorph
 ```
@@ -416,9 +437,10 @@ uv run ruff check . ; uv run mypy beatmorph
    ↓
 [强度场构建]  field/：网格 + 两条 ∫λ 路径互校                          (⬜ 待建)
    ↓
-[门禁 G1-G4 全绿]  ← 🔴 门禁未绿不得扩数据                             (✅ 模块就绪，待接入新范式)
+[门禁 G1-G4 全绿]  ← 🔴 门禁未绿不得扩数据        (✅ beatmorph-train --gates 已接线，fail-closed)
    ↓
-[训练]  掩码补全 Enc-Dec + 泊松 NLL → B1-B6 对照 → 评估                (⬜ 待建)
+[训练]  掩码补全 Enc-Dec + 泊松 NLL → B1-B6 对照 → 评估                (🟡 训练栈与数据通路已通；
+        B1-B6 对照臂与评估仍待建；真实批次待 §3–§5 的脚本)
 ```
 
 ---

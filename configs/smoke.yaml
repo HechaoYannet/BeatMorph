@@ -1,0 +1,63 @@
+# 冒烟 / 门禁配置（plan 07 M7.2 / M7.3）
+#
+# 用途：无权重、无网络、无 GPU 地在数秒内跑通 G1-G4 与一次极短训练。
+# **它不是训练配置**：data.source=synthetic 明确声明用的是合成谱，
+# 因此不得用它冒充「真实数据通路已验证」（真实验证请用 phigros_masked.yaml）。
+run:
+  experiment: smoke
+  purpose: smoke
+  backend: torch
+  runs_dir: runs
+  log_level: INFO
+  save_every: 10
+
+data:
+  source: synthetic
+  # 合成模式下不读这三个路径，但字段仍保留（切到 manifest 时直接填）
+  manifest_path: data/processed/pairs.json
+  chart_dir: data/processed/charts
+  feature_dir: data/processed/features
+  provenance:
+    source: "beatmorph/infra/smoke.py（合成谱，无外部数据）"
+    query: "synthetic: beats=8, bpm=120, notes_per_beat=4"
+    fetched_at: "2026-09-27T00:00:00+00:00"
+    purpose: train
+    script: "beatmorph/infra/smoke.py"
+    script_version: "v1"
+  t_window: 32
+  x_bins: 8
+  k_max: 8
+  occlusion_ratio: 0.5
+  max_samples: 4
+
+model:
+  d_model: 32
+  n_heads: 2
+  n_layers: 2
+  window: 4
+  global_period: 2
+  k_max: 8
+  dropout: 0.0
+  head: factorized
+  audio_dim: 16
+
+optim:
+  lr: 0.05
+  weight_decay: 0.0
+  batch_size: 1
+  max_steps: 20
+  val_every: 0
+  precision: "32"
+  seed: 1
+
+gates:
+  required: true
+  smoke_max_samples: 8
+  overfit_steps: 120
+  overfit_target_ratio: 0.1
+  shuffle_steps: 100
+  initial_head_bias: 20.0
+
+# 说明：G1 的判据是 max(target_loss, target_ratio x 首步 loss)。泊松 NLL 的下界不是 0
+# （完美拟合时约为事件数 N），因此实际生效的是**相对**判据 target_ratio x 首步——
+# 这正是 plan 07 §9-2 要求的「点过程的相对判据」，生效阈值会原样落进 gates.txt。

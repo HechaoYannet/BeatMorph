@@ -10,9 +10,10 @@
 
 RFC-0029（2026-08-05 采纳）把目标游戏由 osu!mania 4K 改为 **Phigros**，生成范式改为
 **判定线局部系多线标记点过程 + 掩码补全 + 非齐次泊松 NLL**，主路径格式锁定 **RPEJSON**。
-**迁移自 2026-09-27 起已经开始**：`core/contracts`、`data/`、`field/`、`generation/`（主干 M1–M4/M6）、
-`decoder/` 与 `io/formats/rpejson/` **写侧**（plan 05 M5.1–M5.6）六块已按 v3.0 落地，
-其余模块（`eval/`、消融臂 / 离散扩散、`infra/` 训练栈）仍待建。
+**迁移自 2026-09-27 起已经开始**：`core/contracts`、`data/`（含 `dataset.py` / `tracks.py` 训练数据通路）、
+`field/`、`generation/`（主干 M1–M4/M6）、`decoder/` 与 `io/formats/rpejson/` **写侧**（plan 05 M5.1–M5.6）、
+以及 `infra/` **训练基础设施**（plan 07 M7.1–M7.8）与 `cli/train.py` 已按 v3.0 落地，
+其余（消融臂 / 离散扩散、评估指标的部分细化）仍待建。
 逐模块进度以 [plans/](plans/README.md) 各 plan 的里程碑状态列为准，本文件只描述结构。
 
 | 标记 | 含义 |
@@ -132,9 +133,11 @@ beatmorph/
 | ~~`decoder/postprocess/constraints.py`~~ | ✅ **已由 v3.0 形态取代** | 现为 `decoder/postprocess/legality.py`：Phigros 红线（越界**只统计**、同刻上限、Hold 区间、跨线几何冲突、重复事件），`EditKind` **无 clamp 成员**（红线 3 在类型层不可表达），口径见 [RFC-0030](decisions/RFC-0030-decoder-export-contract-ownership.md) |
 | `io/formats/osu.py` / `sm.py` / `base.py` | `.osu`（Reader/Writer 完整）、`.sm`、抽象基类 | `base.py` 可复用；`osu.py`/`sm.py` 归档；新增 `rpejson/` |
 | ~~`core/eval.py`~~ | ✅ **已删除**（v2.x tokenizer 往返度量，属退役范式） | `eval/`（plan 06）重建为事件级 F1 / 校准 / 合法性 |
-| `infra/trainer.py` | `PlannerLitModule` + `build_trainer`（Lightning/bf16/梯度裁剪） | `build_trainer` 可复用；LitModule 换成掩码补全 + 泊松 NLL |
-| `infra/config/` | 空目录（仅 `.gitkeep`） | Hydra 封装（待 infra-agent 落地） |
-| `cli/train.py` | `beatmorph-train --config-name stage1_planner`（按 `experiment.name` 分发） | 保留入口形态，新增 v3.0 stage（数据/特征/门禁/训练） |
+| `infra/train_loop.py` | ✅ **已交付**：torch 参考训练循环 + 门禁输入装配（G1-G4 的 step_fn 接线）+ 真实清单批次来源 | plan 07 §4.1/§4.3 |
+| `infra/lightning_module.py` | 🟡 **已交付但未实跑**：`build_trainer` + LightningModule 封装（可选依赖；缺失即抛可操作报错，不静默回落） | plan 07 §4.1 / §9-10 |
+| `infra/config/` | ✅ **已交付**：structured schema（缺字段/类型错启动即失败）+ OmegaConf 严格合并 + `data.provenance` 必填 | plan 07 §4.2 / M7.3 |
+| `infra/`（门禁执行 / 产物 / 恢复 / 自检 / 派生量） | ✅ **已交付**：`gates.py`（fail-closed）、`artifacts.py`（六件套）、`checkpoint.py`（恢复校验）、`feature_cache.py`、`env_doctor.py`（三态）、`derive.py`（派生量扫描）、`smoke.py`（合成批次） | plan 07 M7.1–M7.8 |
+| `cli/train.py` | ✅ **已交付**：`beatmorph-train --config-name <name> [overrides] [--gates|--gates-only]`，退出码语义见 TRAINING.md §7.2 | plan 07 §3.2 |
 | `cli/generate.py` / `api/app.py` | 占位（Phase 3） | 延后，不阻塞主路径 |
 | `configs/model/mert.yaml` | ✅ **已修正**：`feat: 1024`、`frame_rate: null`（派生量） | 无需再动；其余 v2.x 配置随迁移清理 |
 | `scripts/verify_mert_frame_rate.py` | ✅ 三条证据链复算帧率（config 推导 / torch 实搭 / checkpoint 交叉核对） | **保留**，作为 G4 自检工具（见 [TRAINING.md](TRAINING.md) §1） |
@@ -149,7 +152,7 @@ beatmorph/
 | `eval/` | 事件级 F1 / MAE / side 与 type 准确率 / 合法性 / NLL 校准 / 人评协议 | RFC-0029 §5.1 |
 | ~~`generation/`（掩码补全）~~ | ✅ **已交付**：Enc-Dec + 显式 mask 通道 + 按事件遮盖（plan 04 M1–M4/M6；G1–G4 门禁全绿） | BasePlan §3.3 |
 | ~~数据获取脚本~~ | ✅ **已交付**：Phira API 枚举 + Range 预筛 + 选择性下载 + RPEJSON 解析 + 质检（plan 02） | [survey](knowledges/phira-dataset-survey.md) §9 |
-| v3.0 配置 | 数据 / 特征 / 场 / 模型 / 训练 配置组 | CLAUDE.md §4（`configs/` 由 infra-agent 维护） |
+| ~~v3.0 配置~~ | ✅ **已交付**：`configs/smoke.yaml`（合成门禁冒烟）与 `configs/phigros_masked.yaml`（真实数据全量） | CLAUDE.md §4（`configs/` 由 infra-agent 维护） |
 
 ### 3.3 v2.x 退役资产（🗄️【归档】→ `archive/osu-mania` 分支）
 
@@ -213,35 +216,37 @@ tests/
 - ⚠️ **mock / fixture 不得固化物理常量**：若 mock 必须产生帧数/坐标，须引用契约常量
   （RFC-0029 §7 硬约束 6 —— 25 Hz 之所以存活到万级数据规模，正是 mock 把它洗成了绿灯）。
 - **已落地测试目录**：`tests/unit/{core,audio,data,field,generation,decoder,io,infra}/`、
-  `tests/integration/{test_field_pipeline,test_time_conversion_seam,test_decode_to_rpejson,generation/test_train_step}.py`；
-  **仍待建**：`tests/unit/eval/`。
+  `tests/integration/{test_field_pipeline,test_time_conversion_seam,test_decode_to_rpejson,test_train_entry,generation/test_train_step}.py`；
+  评估指标测试见 `tests/unit/eval/`（plan 06）。
   夹具按 [survey](knowledges/phira-dataset-survey.md) §9.3 建议取 **`chart/1000`（标准 RPE）** 与
   **`chart/7039`（伪装成 `.json` 的 PEC）**，但**必须裁成微缩样本**再入库（红线 5）。
 
 ## 6. 配置结构（`configs/`）
 
-Hydra 组合式配置，现状（v2.x）与实际文件一致：
+v3.0 的配置**不是** Hydra 的 group 组合目录，而是「一份完整的 structured config」：
 
 ```
 configs/
-├── stage0_mert.yaml          # Stage 0 MERT（提取 / Adapter）
-├── stage1_planner.yaml       # Stage 1 密度规划（v2.x 主路径，待归档）
-├── model/{mert,planner,ar_transformer}.yaml
-├── data/{download,osu_50k}.yaml
-├── train/stage2_ar.yaml
-└── archive/{stage_vqvae,vqvae}.yaml   # 已归档的 VQ-VAE 配置
+├── smoke.yaml            # 合成数据：门禁冒烟 / CI（无权重、无网络、无 GPU）
+├── phigros_masked.yaml   # 真实清单 + 特征缓存（max_samples: null = 全量 ⇒ 必须先有全绿 gates.txt）
+└── model/mert.yaml       # Stage 0 MERT 的 group 配置（plan 01；不走 --config-name）
 ```
 
-调用形态（现状，可执行）：
+调用形态（可执行）：
 
 ```powershell
-uv run beatmorph-train --config-name stage1_planner experiment.max_steps=10000
+uv run beatmorph-train --config-name smoke --gates-only          # 数秒跑通 G1-G4 并落盘六件套
+uv run beatmorph-train --config-name phigros_masked --gates      # 真实数据：先门禁，再训练
+uv run beatmorph-train --config-name smoke optim.lr=1e-3 --gates # 点号 override（合并后仍过校验）
 ```
 
-> ⬜ **待建**：v3.0 的配置组（数据获取 / 特征提取 / 强度场 / 掩码补全模型 / 泊松 NLL 训练 / 门禁运行）。
+**严格性**：缺字段 / 类型错 / 多余字段 / `data.provenance` 为空 → **启动期失败**（1 秒内，不进入训练循环）；
+配置里**不出现任何派生物理量**（帧率/桶宽只来自 `core/contracts`）。
+
+> ✅ **已交付**：v3.0 的配置（`configs/smoke.yaml` 冒烟门禁 / `configs/phigros_masked.yaml` 真实数据全量）。
 > `configs/` 由 infra-agent 维护，其它 agent 需新配置提需求（AGENTS.md §3.4）。
 > ✅ `configs/model/mert.yaml` 已于 2026-08-05 修正（`frame_rate` 改为派生量、`feat` → 1024）。
-> ⚠️ 但**其余 v2.x 配置组**（ar_transformer / planner / osu_50k / stage1_planner / stage2_ar / download）仍描述已退役模块，其中 `configs/model/ar_transformer.yaml` 与 `configs/data/osu_50k.yaml` 亦含过时数值 —— 随 `archive/osu-mania` 迁移一并清理。
+> ✅ **已清理**：v2.x 的配置组（ar_transformer / planner / osu_50k / stage1_planner / stage2_ar / download / archive）已随 `archive/osu-mania` 迁移删除，主路径只剩上面三个文件。
 
 ## 7. 环境变量
 

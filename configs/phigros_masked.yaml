@@ -1,0 +1,59 @@
+# 真实数据训练配置（plan 07 §3.2；plan 02 产出的清单 + 特征缓存）
+#
+# max_samples: null 表示**全量** ⇒ 属于「扩大数据规模」⇒ 必须先有全绿的 gates.txt，
+# 否则 beatmorph-train 会以退出码 5 拒绝启动（fail-closed）。
+run:
+  experiment: phigros_masked
+  purpose: train
+  backend: torch        # 目标栈见 run.backend=lightning（需要 uv sync --extra train）
+  runs_dir: runs
+  save_every: 1000
+
+data:
+  source: manifest
+  manifest_path: data/processed/pairs.json
+  chart_dir: data/processed/charts
+  feature_dir: data/processed/features
+  split_train: train
+  split_val: val
+  provenance:
+    # ⚠️ 合规硬约束③：来源与用途必须如实填写，缺一即启动失败
+    source: "https://api.phira.cn/chart（Phira 官方 API，见 docs/knowledges/phira-dataset-survey.md）"
+    query: "type=3 全量分页 pageNum<=30（322 页，实测 count=9649）"
+    fetched_at: "2026-09-27T00:00:00+00:00"
+    purpose: train
+    script: "scripts/fetch_phira.py"
+    script_version: "待落地"
+  t_window: 192
+  x_bins: 128
+  k_max: 128
+  occlusion_ratio: 0.5
+  max_samples: null
+
+model:
+  d_model: 256
+  n_heads: 4
+  n_layers: 6
+  window: 32
+  global_period: 4
+  k_max: 128
+  dropout: 0.1
+  head: factorized
+  audio_dim: 1024
+
+optim:
+  lr: 0.0003
+  weight_decay: 0.01
+  batch_size: 1        # 跨谱 batching 需要同一网格身份，见 beatmorph/data/dataset.py 的说明
+  max_steps: 20000
+  val_every: 500
+  precision: bf16-mixed
+  seed: 0
+
+gates:
+  required: true
+  smoke_max_samples: 8
+  overfit_steps: 300
+  overfit_target_ratio: 0.1
+  shuffle_steps: 100
+  initial_head_bias: 20.0

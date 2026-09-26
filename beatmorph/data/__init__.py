@@ -22,6 +22,16 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from beatmorph.data.dataset import (
+    ChartPairDataset,
+    DatasetConfig,
+    DatasetIndexStats,
+    DatasetManifestError,
+    GridMismatchError,
+    PairSample,
+    collate_field_batch,
+    load_pairs,
+)
 from beatmorph.data.parsers import (
     PRIMARY_FORMAT,
     PackageAnalysis,
@@ -91,6 +101,7 @@ from beatmorph.data.qc import (
     quality_check,
     unit_contract_violations,
 )
+from beatmorph.data.tracks import line_tracks_at, line_tracks_tensor
 
 __all__ = [
     "CACHE_META_KEYS",
@@ -102,17 +113,23 @@ __all__ = [
     "ChartInfo",
     "ChartPackage",
     "ChartPackageError",
+    "ChartPairDataset",
+    "DatasetConfig",
+    "DatasetIndexStats",
+    "DatasetManifestError",
     "DatasetStats",
     "DistributionStats",
     "FeatureCacheMeta",
     "FeatureCacheMismatchError",
     "GeneralizationPair",
+    "GridMismatchError",
     "LocalStorageError",
     "Manifest",
     "ManifestError",
     "ManifestPurpose",
     "PackageAnalysis",
     "PairRow",
+    "PairSample",
     "PairSplits",
     "PhiraApiError",
     "PhiraChartMeta",
@@ -134,13 +151,17 @@ __all__ = [
     "build_pairs",
     "chart_dest_path",
     "chart_row",
+    "collate_field_batch",
     "dataset_stats",
     "distribution_stats",
     "extract_features",
     "feature_cache_paths",
     "is_cover_masks",
     "is_ignored",
+    "line_tracks_at",
+    "line_tracks_tensor",
     "load_feature_cache",
+    "load_pairs",
     "max_simultaneous_onsets",
     "min_same_line_same_time_gap_x",
     "normalize_chart_filename",

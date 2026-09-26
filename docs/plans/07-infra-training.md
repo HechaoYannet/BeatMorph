@@ -1,4 +1,4 @@
-> 状态：🟡 草案 ｜ 阶段：Phase 1（环境自检）/ Phase 2（训练栈与门禁）｜ 负责：基础设施组
+> 状态：🔵 实施中（M7.1–M7.8 代码与默认 CI 测试已落地；逐条见 §6 的「实施状态」列，**Lightning 后端尚未在装齐 train extra 的环境实跑**）｜ 阶段：Phase 1（环境自检）/ Phase 2（训练栈与门禁）｜ 负责：基础设施组
 > 对应代码：`beatmorph/infra/`、`configs/`、`beatmorph/cli/train.py` ｜ 对应奠基章节：§5、§9
 
 # Plan 07 — 训练基础设施（Lightning / Hydra / G1-G4 门禁 / 环境自检）
@@ -100,6 +100,12 @@ FeatureCacheMeta:  # RFC-0029 §7-2 原文要求
 - `build_trainer(cfg)`：从 Hydra 配置构造 `Trainer`（precision `bf16-mixed`、gradient clipping、devices/strategy）；单卡起步，多卡转 FSDP（BasePlan §5）；
 - **损失与优化器不进基类**：各 Stage 自带，避免把某个范式的假设写进基础设施。
 
+**实施说明（2026-09-27）**：`beatmorph/infra/train_loop.py` 提供 **torch 参考循环**（默认后端
+`run.backend=torch`，无额外依赖、可在默认 CI 跑），`beatmorph/infra/lightning_module.py` 提供
+**Lightning 目标栈**（`run.backend=lightning`，缺依赖时抛 `MissingTrainingDependency` 并给出安装命令，
+**不静默回落**）。二者的损失与优化器都取自本仓实现（`generation` 的泊松 NLL + `AdamW`），
+基类里没有范式假设。
+
 ### 4.2 Hydra 配置
 
 - 组合式：`configs/{stage}/`、`configs/model/`、`configs/data/`、`configs/train/`、`configs/infra/`；入口以 `--config-name <stage>` 选择；
@@ -127,6 +133,12 @@ run_gates(*, step_fns: GateStepFns, out_path: Path, cfg) -> list[GateResult]
 | G4 契约断言 | 帧率/形状由 config 派生并断言 | 直接 `frame_rate_gate(frames, duration_s, frame_rate)`，`frame_rate` **由 config 派生传入**；并含**「场网格 ↔ 秒」往返无损**（多 BPM 段，Plan 03 M12）——该断言进默认 CI、不依赖权重 |
 
 **触发条件（写死，不靠记性）**：① 新增/修改任何训练目标或损失；② 任何一次把数据规模扩到超过冒烟规模。二者任一发生时，`gates.txt` 必须先存在且全绿。
+
+**实施说明**：「冒烟规模」的判据写进配置（`gates.smoke_max_samples`，默认 8），
+`data.max_samples` 为 `null`（全量）或超过它即视为扩大规模；未跑门禁的冒烟运行会在
+`gates.txt` 里留下**明确不可判定**的记录（不含 `[PASS]`/`[FAIL]` 行），因此「文件存在」
+永远不会被误读成「门禁通过」。合成批次来源 `infra/smoke.py` 走**同一条**目标构建路径
+（`PhigrosChart` → `build_target`），音频帧数由契约帧率派生，所以 G4 在冒烟路径上同样有内容。
 
 ### 4.4 环境自检（env doctor）
 
@@ -174,16 +186,16 @@ run_gates(*, step_fns: GateStepFns, out_path: Path, cfg) -> list[GateResult]
 
 > **门禁硬性要求（本 plan 的核心交付）**：**任何新增训练目标或损失**（B1 focal、B2 泊松 NLL、B3/B4 的交叉熵、B5 掩码离散扩散训练目标，以及任何后续新增），在**扩大数据规模之前**必须通过 **G1-G4**（`beatmorph/infra/sanity.py`）且 `summarize()` 输出**写入训练日志**；实现该门禁的强制接入是本 plan 的 M7.2。**门禁未绿不得扩大数据规模**（BasePlan §9、CLAUDE.md §5.8、RFC-0029 §7-3、AGENTS.md §4）。
 
-| # | 里程碑 | 可量化验收 |
-| --- | --- | --- |
-| **M7.1** | **环境自检**（最高优先，因历史事故） | 两个场景都必须可复现：① 正常环境 → E1-E5 全 PASS，退出码 0；② **人为把 `.venv/pyvenv.cfg` 的基础解释器指向不存在的路径** → E2 判 FAIL，退出码非 0，且诊断文本指出具体路径。检查本身**不依赖 GPU / 权重**，在默认 CI 中运行（不得被标记跳过） |
-| **M7.2** | **门禁执行器接线**（核心） | `beatmorph-train --gates` 产出 `gates.txt`，内容含四个 `GateResult` 的 name/passed/detail 与生效阈值；**负例回归测试**：用一个故意断梯度的 `step_fn`（如 `loss.detach()`）使 G1 FAIL，训练**被中止**且退出码非 0 |
-| **M7.3** | Hydra 配置骨架 | structured config 缺字段/类型错 → **启动即失败**（在 1 秒内，不进入训练循环）；**`data.provenance`（来源/用途/脚本版本/获取时间）缺失即视为缺字段 → 启动失败**；配置中的派生量断言在启动时执行；`config.yaml` 完整落盘（含 override） |
-| **M7.4** | 派生量单一事实源 | 全仓 grep 断言：字面量帧率只出现在 `core/contracts` 一处（可写成 CI 检查）；启动日志打印派生帧率与 `dx` |
-| **M7.5** | checkpoint 与恢复 | 正常恢复：loss 曲线连续；**篡改 `config.yaml` 后恢复被拒绝**并给出差异字段（负例测试） |
-| **M7.6** | 特征缓存元数据校验 | 构造两份缓存：`rate` 与 config 派生值一致 → 通过；不一致 → **报错**（不是 warning）；单测**不依赖权重**（用手写的迷你缓存文件） |
-| **M7.7** | 实验产物与日志 | `runs/<exp>/<ts>/` **六件套**齐全（§3.2，含 `data_provenance.json`）；TB 中可见 `gate/*` 标量；训练日志模板含 `summarize()` 原文与 provenance 摘要 |
-| **M7.8** | 复现性 | 固定 seed 下同配置两次运行的前 2 步 loss 逐位一致（断言）；`runs/` 路径不覆盖历史实验 |
+| # | 里程碑 | 可量化验收 | 实施状态 |
+| --- | --- | --- | --- |
+| **M7.1** | **环境自检**（最高优先，因历史事故） | 两个场景都必须可复现：① 正常环境 → E1-E5 全 PASS，退出码 0；② **人为把 `.venv/pyvenv.cfg` 的基础解释器指向不存在的路径** → E2 判 FAIL，退出码非 0，且诊断文本指出具体路径。检查本身**不依赖 GPU / 权重**，在默认 CI 中运行（不得被标记跳过） | ✅ `infra/env_doctor.py` + `tests/unit/infra/test_env_doctor.py`（含场景②故障注入）；CLI `python -m beatmorph.infra.env_doctor`，退出码 0/1/2 = 全 PASS / 有 FAIL / 有 UNKNOWN |
+| **M7.2** | **门禁执行器接线**（核心） | `beatmorph-train --gates` 产出 `gates.txt`，内容含四个 `GateResult` 的 name/passed/detail 与生效阈值；**负例回归测试**：用一个故意断梯度的 `step_fn`（如 `loss.detach()`）使 G1 FAIL，训练**被中止**且退出码非 0 | ✅ `infra/gates.py` + `cli/train.py`（`--gates` / `--gates-only`）；`tests/unit/infra/test_gates.py`、`tests/integration/test_train_entry.py`（退出码 5） |
+| **M7.3** | Hydra 配置骨架 | structured config 缺字段/类型错 → **启动即失败**（在 1 秒内，不进入训练循环）；**`data.provenance`（来源/用途/脚本版本/获取时间）缺失即视为缺字段 → 启动失败**；配置中的派生量断言在启动时执行；`config.yaml` 完整落盘（含 override） | ✅ `infra/config/`（schema + 严格加载）；`configs/smoke.yaml`、`configs/phigros_masked.yaml`；provenance 与 plan 02 的 `Provenance` 同 schema（§9-7 已定） |
+| **M7.4** | 派生量单一事实源 | 全仓 grep 断言：字面量帧率只出现在 `core/contracts` 一处（可写成 CI 检查）；启动日志打印派生帧率与 `dx` | ✅ `infra/derive.py`（`format_derived_banner` + `scan_derived_literals` 全仓扫描，进默认 CI） |
+| **M7.5** | checkpoint 与恢复 | 正常恢复：loss 曲线连续；**篡改 `config.yaml` 后恢复被拒绝**并给出差异字段（负例测试） | ✅ `infra/checkpoint.py`：配置指纹 + 逐字段 diff + 门禁全绿 + data_rev 三重校验 |
+| **M7.6** | 特征缓存元数据校验 | 构造两份缓存：`rate` 与 config 派生值一致 → 通过；不一致 → **报错**（不是 warning）；单测**不依赖权重**（用手写的迷你缓存文件） | ✅ `infra/feature_cache.py`：配置期望帧率必须等于契约派生值，否则直接报错 |
+| **M7.7** | 实验产物与日志 | `runs/<exp>/<ts>/` **六件套**齐全（§3.2，含 `data_provenance.json`）；TB 中可见 `gate/*` 标量；训练日志模板含 `summarize()` 原文与 provenance 摘要 | ✅ `infra/artifacts.py` 六件套 + `RunArtifacts.assert_complete()`；tensorboard 缺失时只告警（gates.txt 仍是权威记录） |
+| **M7.8** | 复现性 | 固定 seed 下同配置两次运行的前 2 步 loss 逐位一致（断言）；`runs/` 路径不覆盖历史实验 | ✅ 时间戳目录 + 后缀顺延；`tests/integration/test_train_entry.py` 另断言两次运行的前 2 步 loss 逐位一致 |
 
 ## 7. 风险与缓解
 
@@ -220,6 +232,22 @@ run_gates(*, step_fns: GateStepFns, out_path: Path, cfg) -> list[GateResult]
 4. **门禁样本数与步数**：G1 用 1-4 个样本（BasePlan §9），G2/G3 在同一批上跑还是用更大子集，未定。
 5. **多卡 FSDP 的引入时机**：单卡 ≥ 16 GB 起步（BasePlan §5），何时需要多卡未定。
 6. **是否把「环境可用性」补为 BasePlan §6 的 R-9**：本 plan 只能缓解，改风险表须走 RFC（建议由决策者裁定）。
-7. ~~**`data.allow_training` 守卫的具体形式**~~ **已随裁定落地（2026-08-05）**：合规不再是训练的前置闸门；守卫改为 **`data.provenance` 必填校验**（§3.2 / M7.3）。残留：`source` / `purpose` / `script_rev` / `acquired_at` 这一字段集是本 plan 的提案，是否与 Plan 02 数据侧 manifest 的 `provenance` 采用**同一 schema**，需与 data-agent 对齐。
+7. ~~**`data.allow_training` 守卫的具体形式**~~ **已随裁定落地（2026-08-05）**：合规不再是训练的前置闸门；守卫改为 **`data.provenance` 必填校验**（§3.2 / M7.3）。
+   **✅ 已定（实施期，2026-09-27）**：训练配置的 `data.provenance` **直接采用 plan 02 `beatmorph.data.phira.client.Provenance` 的 schema**（`source` / `query` / `fetched_at` / `purpose` / `script` / `script_version` / `chart_id_min` / `chart_id_max`），配置侧只做一个**字段逐字对应的镜像** `DataProvenanceConfig`，并由 `tests/unit/infra/test_config_schema.py::test_provenance_schema_matches_data_side` 断言两侧不漂移。此即本 plan §3.2 想要的 `source` / `purpose` / `script_rev`（= `script` + `script_version`）/ `acquired_at`（= `fetched_at`）。实验**运行**用途（train / ablation / smoke）另设 `run.purpose`，与数据**获取**用途（`ManifestPurpose`）是两层，两者都落盘。
 8. **训练日志的载体**：`docs/TRAINING_LOG_*.md`（入库的文档）与 `runs/*/gates.txt`（不入库的产物）二者关系——建议「产物为原始证据、文档为摘要 + 链接」，但需与仓库文档习惯对齐。
 9. **`configs/` 中 v2.x 旧配置的处置**（删除 vs 归档分支），属 infra-agent 职责范围，但需与 RFC-0029 §4.3 的归档策略一致。
+   **部分处置（实施期）**：新增 `configs/smoke.yaml`（合成数据 / 门禁冒烟）与 `configs/phigros_masked.yaml`（真实数据全量）；v2.x 的 `configs/model/mert.yaml` 仍保留（MERT Stage 0 配置本身没过时），但其字段是否要并入 structured schema 未定。
+
+**实施期新增（2026-09-27）**：
+
+10. **默认训练后端是 torch 参考循环，Lightning 是可选目标栈**：`run.backend=torch` 为默认，`lightning` 需要 `uv sync --extra train`。理由：门禁与契约级断言必须进默认 CI，而 `pytorch-lightning` 属可选依赖（CLAUDE.md §4）。代价：**Lightning 路径目前只有「缺依赖即给可操作报错」的行为被测试覆盖，真机未实跑**（本机未安装 train extra，见 §9-11）。是否把它提升为「门禁必须跑的后端」需决策者裁定。
+11. **train extra 的安装未完成（环境事实）**：本机 `uv sync --extra train` 因网络原因未完成，因此 env doctor 的 E4 恒为 **UNKNOWN**（缺 `pytorch-lightning` / `tensorboard`），TensorBoard 标量也只写不进去（代码只告警）。这不影响门禁结论（权威记录是 `gates.txt`），但意味着「TB 曲线」这条证据链尚未实跑过。
+12. **G2 的样本数是判据的一部分**：样本太少时打乱臂可以直接背样本、让对照退化成空转（实施期实测：1 个样本时打乱臂 loss **低于**真实臂）。已把 `gates.shuffle_samples`（默认 16）写进配置并落进 `gates.txt` 的生效阈值。真实数据上要多少样本才够，需要实测曲线。
+13. **跨谱批次受「一个 FieldBatch 只带一个 FieldGrid」约束**：不同 BPM 结构的窗口不能混批（否则测度 `J` 与积分项会静默错掉）。
+    当前 `collate_field_batch` 的做法是**不一致即抛**（fail-closed），训练配置默认 `batch_size=1`。
+    **已落地缓释（2026-09-27）**：`ManifestBatchSource` 按 `ChartPairDataset.grid_key(i)` 的网格身份**分桶并轮转组批**
+    （桶内同 `bpm_eff` ⟹ 同批逐格 J 相同），回归测试见
+    `tests/integration/test_train_entry.py::test_manifest_source_batches_by_grid_identity`（夹具自带 120/180 两段 BPM）。
+    仍**未解决**的是「同一批里混合不同 BPM 段」——那需要「给 `FieldBatch` 加 per-sample 网格」或「在 loss 里按样本取 J」，
+    属契约级问题，须开 RFC（plan 04 §9 相关）。
+14. **门禁预算在真实数据上是否够用未验证**：G1 的判据实际生效的是**相对**判据（`target_ratio × 首步`，因为泊松 NLL 的下界是事件数而不是 0，§9-2 的预判已被证实），但「真实数据上 120-300 步能否打穿」只能等 plan 02 的真实特征缓存就绪后实测。

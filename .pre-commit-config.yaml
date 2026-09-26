@@ -10,6 +10,9 @@ repos:
       - id: check-yaml
       - id: check-toml
       - id: check-json
+        # ⚠️ 该夹具**故意**伪装成 .json（内容是 PEC 文本），用于验证「格式必须按内容嗅探、
+        # 不能信后缀」（plan 02 M1）。check-json 必须显式放行，否则门禁与夹具互相打架。
+        exclude: ^tests/fixtures/phigros/pec_masquerade\.json$
       - id: check-merge-conflict
       - id: check-added-large-files
         args: ["--maxkb=1024"]           # 阻止大文件入库（模型/音频走 LFS/外部存储）

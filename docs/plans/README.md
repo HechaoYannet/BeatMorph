@@ -21,7 +21,7 @@
 | 02 | [数据流水线：Phira 获取 + RPEJSON 解析 + 质检 + 特征离线提取](./02-data-pipeline.md) | `beatmorph/data/`、`beatmorph/io/formats/rpejson/`（读） | §4、§3.2.4 | Phase 1 | 🔵 实施中 |
 | 03 | [强度场模块（判定线局部系多线标记点过程）](./03-field.md) | `beatmorph/field/` | §1.2、§2、§3.2、§3.4 | Phase 2 | 🔵 实施中 |
 | 04 | [生成主干：掩码补全 Encoder-Decoder](./04-generation.md) | `beatmorph/generation/` | §1.2、§2、§3.3、§3.4、§3.5 | Phase 2 | 🔵 实施中（M1–M4/M6；G1–G4 全绿） |
-| 05 | [解码与合法性后处理（强度场 → 离散事件 → RPEJSON）](./05-decoder-postprocess.md) | `beatmorph/decoder/`、`beatmorph/io/formats/rpejson/`（写） | §2、§3.6、§9 | Phase 2 | 🟡 草案 |
+| 05 | [解码与合法性后处理（强度场 → 离散事件 → RPEJSON）](./05-decoder-postprocess.md) | `beatmorph/decoder/`、`beatmorph/io/formats/rpejson/`（写） | §2、§3.6、§9 | Phase 2 | 🔵 实施中（M5.1–M5.6；M5.7 待模型） |
 | 06 | [评估与实验设计（指标 / 协议 / B1-B6 / 人评）](./06-eval.md) | `beatmorph/eval/` | §1.3、§3.2.2、§9 | Phase 2（人评 Phase 3） | 🟡 草案 |
 | 07 | [训练基础设施（Lightning / Hydra / G1-G4 门禁 / 环境自检）](./07-infra-training.md) | `beatmorph/infra/`、`configs/` | §5、§9 | Phase 1-2 | 🟡 草案 |
 | 08 | [CLI / API / 端到端入口](./08-cli-api.md) | `beatmorph/cli/`、`beatmorph/api/` | §2、§3.6、§7 | Phase 2（API Phase 3） | 🟡 草案 |
@@ -81,8 +81,8 @@
 | --- | --- | --- |
 | ✅ ~~数据合规未裁定（R-2，阻塞级）~~ **已裁定（2026-08-05）：训练可启动**（风险由决策者承担）。**硬约束 =** ① **最终不发布模型权重**（裁决成立的前提，属项目级承诺）② 谱面/音乐**可本地落盘但不得入库** ③ 获取/处理脚本**记录来源与用途** ④ **发布权重前必须重新裁定** | 训练侧阻塞解除（Plan 02 M8 / Plan 07 §3.2 已同步）；人评的原曲音频播放属**再分发**、裁决未逐字覆盖 → Plan 06 §9-9 | BasePlan §4.4、CLAUDE.md 红线 5 附注、RFC-0029 §7-7/§8.3 Q11b |
 | ✅ ~~Q15 时间网格未定~~ **已决（2026-08-05）：beat-aligned**，基本格 **1/48 拍**，网格随 BPM 变化；积分测度 `dt → J(τ)dτ`（`J(τ) = dt/dτ` 由 `BPMList` 精确给出） | **数学改写限定在 `field/` 内**；契约层 `PhigrosNote.t` 仍用秒；下游不得各自实现时间换算；须有「场网格 ↔ 秒」往返无损契约测试（多 BPM 段） | RFC-0029 §3.1/§7-8/§8.3 Q15、BasePlan §3.2.4、CLAUDE.md 红线 7；落地见 Plan 03 M12、Plan 04 §9-5 |
-| **同刻按键上限数值未查证** | 后处理该项只能统计、不能作红线 | Plan 05 §9-1 |
-| **网格桶数 N 未裁定** | 需先做 `N ∈ {64,128,256,512}` 消融与共格碰撞统计 | 单位文档 §7.3、Plan 05 §9-5 |
+| ✅ ~~同刻按键上限数值未查证~~ **已裁（RFC-0029 §8.4 R-e）：只统计、不作红线**；实现为 `LegalityConfig.same_instant_limit` 显式开关（默认关闭） | 后处理该项只统计；不阻断导出 | Plan 05 §9-1、RFC-0029 §8.4 R-e |
+| **网格桶数 N 未定值**（**已裁：默认 128，须先出消融**） | 需先做 `N ∈ {64,128,256,512}` 消融与共格碰撞统计；解码器对 N 已完全参数化 | 单位文档 §7.3、RFC-0029 §8.4 R-f、Plan 05 §9-5 |
 | ✅ ~~`|Ω|` 的口径~~ **已裁决**（RFC-0029 §8.4 R-a） | 统一为「全 K 线、格元总数」；跨谱汇总报 per-chart NLL 与 NLL/N 两栏 | Plan 00 §3.7、Plan 03 偏离 2 |
 | ✅ ~~`--lines` schema~~ **已裁决**：定义为 RPEJSON `judgeLineList` 子集的薄序列化，**复用 Plan 00 已有的 `JudgeLine` 契约**，不新开 RFC（RFC-0029 §8.4 R-d） | Plan 08 可直接实现 | Plan 08 §9-1 |
 | ✅ ~~`LegalityReport` 归属~~ **已裁决**：属跨模块类型 → 落 `core/contracts`（RFC-0029 §8.4 R-c） | 影响 Plan 06 合法性指标与 Plan 08 报告 schema | Plan 00 / Plan 05 §9-12 |

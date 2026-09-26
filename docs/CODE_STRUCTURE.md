@@ -10,8 +10,9 @@
 
 RFC-0029（2026-08-05 采纳）把目标游戏由 osu!mania 4K 改为 **Phigros**，生成范式改为
 **判定线局部系多线标记点过程 + 掩码补全 + 非齐次泊松 NLL**，主路径格式锁定 **RPEJSON**。
-**迁移自 2026-09-27 起已经开始**：`core/contracts`、`data/`、`field/`、`generation/`（主干 M1–M4/M6）
-四块已按 v3.0 落地，其余模块（`decoder/`、`io/formats/rpejson/` 写侧、`eval/`、`infra/` 训练栈）仍待建。
+**迁移自 2026-09-27 起已经开始**：`core/contracts`、`data/`、`field/`、`generation/`（主干 M1–M4/M6）、
+`decoder/` 与 `io/formats/rpejson/` **写侧**（plan 05 M5.1–M5.6）六块已按 v3.0 落地，
+其余模块（`eval/`、消融臂 / 离散扩散、`infra/` 训练栈）仍待建。
 逐模块进度以 [plans/](plans/README.md) 各 plan 的里程碑状态列为准，本文件只描述结构。
 
 | 标记 | 含义 |
@@ -26,8 +27,9 @@ RFC-0029（2026-08-05 采纳）把目标游戏由 osu!mania 4K 改为 **Phigros*
 1. ~~**契约里没有 Phigros**~~ ✅ **已解决**：`core/contracts/phigros.py` 定义了 `JudgeLine` / `PhigrosNote` /
    `PhigrosChart` / `BpmPoint` / `Side` / `NoteType`，`field.py` 定义了 `ChartFieldSpec` / `ChartField` /
    `ChartTargetField`，`tensors.py` 只留音频侧常量；`GameMode.PHIGROS` 已存在（plan 00 已交付）。
-2. ~~**三个目标模块整体不存在**~~ 🟡 **部分解决**：`field/`（plan 03）、`data/`（plan 02）与
-   `generation/`（plan 04 主干）已落地；`eval/` 与 `io/formats/rpejson/` **写侧**仍待建（plan 05 / plan 06）。
+2. ~~**三个目标模块整体不存在**~~ 🟡 **大部分解决**：`field/`（plan 03）、`data/`（plan 02）、
+   `generation/`（plan 04 主干）、`decoder/` + `io/formats/rpejson/` **写侧**（plan 05）已落地；
+   `eval/` 仍待建（plan 06）。
 3. ~~**生成主干尚未开始**~~ 🔵 **主路径已落地**：`generation/` 是掩码补全 Encoder-Decoder +
    非齐次泊松 NLL + 迭代并行解码（plan 04 M1–M4/M6，G1–G4 门禁实跑全绿）；
    消融臂 B1/B3/B4/B5 与离散 token 化待后续（plan 04 M7–M11）。
@@ -99,7 +101,7 @@ beatmorph/
 | `core/contracts` | **唯一**跨模块通信面：判定线/音符/谱面/强度场的数据契约与张量形状 | CLAUDE.md 红线 2 |
 | `field` | 强度场 λ 的网格定义、目标构建、两条 ∫λ 路径互校、可视化 | BasePlan §3.4、RFC-0029 §3.2 |
 | `generation` | 掩码补全 Enc-Dec 主选；absorbing-state 离散扩散作对照臂 | BasePlan §3.3、RFC-0029 §3.3 |
-| `decoder` | λ → 离散事件（`find_peaks` v0 / Ogata thinning 原则解）+ 红线校验与钳位 | BasePlan §3.6 |
+| `decoder` | λ → 离散事件（D1 `find_peaks` 基线 / D2 Ogata thinning 原则解）+ 红线校验与**留痕**钳位 | BasePlan §3.6、[RFC-0030](decisions/RFC-0030-decoder-export-contract-ownership.md) |
 | `io/formats/rpejson` | RPEJSON 读/写；不读 PEC（已淘汰），官谱 JSON 不在主路径 | RFC-0029 §8.1 Q3 |
 | `eval` | 事件级 F1（±20ms / ±50ms 双报）、type/side 指标、跨线合法性、NLL 校准、人评 | RFC-0029 §5 |
 | `infra` | 训练栈（Lightning / Hydra / ckpt）+ **G1-G4 门禁** | BasePlan §9 |
@@ -127,7 +129,7 @@ beatmorph/
 | `generation/losses.py` | ✅ **已交付**：`full_poisson_loss` / `masked_poisson_loss`（HT 重标定）、排列敏感性与「无 line 分类损失」契约、B1/B5 的目标函数 | plan 04 §3.3/§4.3 |
 | `generation/model.py` | ✅ **已交付**：掩码补全 Enc-Dec（滑动窗口 + 周期全局层、难度 AdaLN、轨道/音频 cross-attention、可变 K、因子化 λ 头 + **直连 skip**） | plan 04 §4.1/§4.2 |
 | `generation/sampling.py` | ✅ **已交付**：迭代并行解码（`steps >= 2` 契约、单调 schedule、三种连续场置信度） | plan 04 §4.4 |
-| `decoder/postprocess/constraints.py` | osu 语汇的物理红线校验（lane 相关） | 换成 Phigros 红线：同刻按键上限、Hold 区间、越界、**跨线几何冲突**（红线 3：只校验/钳位，不改落点分配） |
+| ~~`decoder/postprocess/constraints.py`~~ | ✅ **已由 v3.0 形态取代** | 现为 `decoder/postprocess/legality.py`：Phigros 红线（越界**只统计**、同刻上限、Hold 区间、跨线几何冲突、重复事件），`EditKind` **无 clamp 成员**（红线 3 在类型层不可表达），口径见 [RFC-0030](decisions/RFC-0030-decoder-export-contract-ownership.md) |
 | `io/formats/osu.py` / `sm.py` / `base.py` | `.osu`（Reader/Writer 完整）、`.sm`、抽象基类 | `base.py` 可复用；`osu.py`/`sm.py` 归档；新增 `rpejson/` |
 | ~~`core/eval.py`~~ | ✅ **已删除**（v2.x tokenizer 往返度量，属退役范式） | `eval/`（plan 06）重建为事件级 F1 / 校准 / 合法性 |
 | `infra/trainer.py` | `PlannerLitModule` + `build_trainer`（Lightning/bf16/梯度裁剪） | `build_trainer` 可复用；LitModule 换成掩码补全 + 泊松 NLL |
@@ -142,7 +144,7 @@ beatmorph/
 | 路径 | 要交付什么 | 依据 |
 |------|-----------|------|
 | ~~`core/contracts/`（Phigros 部分）~~ | ✅ **已交付**：`phigros.py` + `field.py` + 不变量断言（plan 00） | RFC-0029 §2.3/§3.1 |
-| `io/formats/rpejson/` | RPEJSON Reader/Writer（独立实现，**只读 prpr/phichain 行为规范，不逐行移植**） | RFC-0029 §4.2（GPL-3.0 / LGPL-3.0 风险） |
+| ~~`io/formats/rpejson/`~~ | ✅ **写侧已交付**（`writer.py`：秒→beat 三元组、导出门禁、字节幂等）；**读侧在 `beatmorph/data/parsers/rpejson.py`**（plan 02，独立实现，只读 prpr/phichain 行为规范） | RFC-0029 §4.2、plan 05 §4.4 |
 | ~~`field/`~~ | ✅ **已交付**：网格 / 目标构建 / 两条 ∫λ 路径互校 / 共格碰撞 / 可视化（plan 03） | BasePlan §3.4 |
 | `eval/` | 事件级 F1 / MAE / side 与 type 准确率 / 合法性 / NLL 校准 / 人评协议 | RFC-0029 §5.1 |
 | ~~`generation/`（掩码补全）~~ | ✅ **已交付**：Enc-Dec + 显式 mask 通道 + 按事件遮盖（plan 04 M1–M4/M6；G1–G4 门禁全绿） | BasePlan §3.3 |
@@ -210,7 +212,9 @@ tests/
 - ⚠️ **契约级测试不得依赖权重或 GPU**（CLAUDE.md §4）：凡"只有拿到权重才能跑"的断言等于没有断言。
 - ⚠️ **mock / fixture 不得固化物理常量**：若 mock 必须产生帧数/坐标，须引用契约常量
   （RFC-0029 §7 硬约束 6 —— 25 Hz 之所以存活到万级数据规模，正是 mock 把它洗成了绿灯）。
-- **目标测试目录（待建）**：`tests/unit/field/`、`tests/unit/eval/`、`tests/unit/io/test_rpejson_*.py`；
+- **已落地测试目录**：`tests/unit/{core,audio,data,field,generation,decoder,io,infra}/`、
+  `tests/integration/{test_field_pipeline,test_time_conversion_seam,test_decode_to_rpejson,generation/test_train_step}.py`；
+  **仍待建**：`tests/unit/eval/`。
   夹具按 [survey](knowledges/phira-dataset-survey.md) §9.3 建议取 **`chart/1000`（标准 RPE）** 与
   **`chart/7039`（伪装成 `.json` 的 PEC）**，但**必须裁成微缩样本**再入库（红线 5）。
 
@@ -258,12 +262,13 @@ uv run beatmorph-train --config-name stage1_planner experiment.max_steps=10000
 
 1. ~~裁定数据合规~~ ✅ **已裁定（2026-08-05）**：风险由决策者承担，**硬约束 = 最终不发布权重**；训练可启动（CLAUDE.md 红线 5 附注）；
 2. `core/contracts` 增 Phigros 契约 → 全模块以此为准（AGENTS.md §3.1）；
-3. `io/formats/rpejson/` 独立实现 + 契约断言测试；
+3. ~~`io/formats/rpejson/` 独立实现 + 契约断言测试~~ ✅ **读路径**（plan 02，落在 `data/parsers/rpejson.py`）+ **写路径**（plan 05，`io/formats/rpejson/writer.py`）；
 4. 数据获取（Phira API 枚举 / Range 预筛 / 选择性下载）+ 质检；
 5. MERT 特征离线提取（元数据随缓存落盘并在加载时校验）；
 6. `field/` 两条 ∫λ 路径 + 一致性测试；
 7. `generation/` 掩码补全骨架 + **G1-G4 全绿后才扩数据**；
-8. `decoder/` 双解码臂 + 合法性后处理；`eval/` 指标落地；首版可玩 RPEJSON。
+8. ~~`decoder/` 双解码臂 + 合法性后处理~~ ✅（plan 05 M5.1–M5.6：D1 峰值 / D2 thinning / 合法性后处理 / RPEJSON 写路径，608 项默认 CI 内）；
+   ⬜ 剩余：`eval/` 指标落地（plan 06）、真实模型 → 首版可玩 RPEJSON（M5.7 与 plan 08 联合验收）。
 
 ## 相关文档
 

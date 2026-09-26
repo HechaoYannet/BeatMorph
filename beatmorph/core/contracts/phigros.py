@@ -135,12 +135,41 @@ def side_from_above(above: int) -> Side:
     return Side.FRONT if above == 1 else Side.BACK
 
 
+#: 侧别在场通道轴上的**唯一**顺序（`side_index` / `side_from_index` 的共同依据）。
+#: 用元组而非两个字面量，是为了让"索引 ↔ Side"成为一份数据而不是两处映射。
+SIDE_ORDER: tuple[Side, ...] = (Side.FRONT, Side.BACK)
+
+
 def side_index(side: Side) -> int:
     """场通道索引：FRONT → 0，BACK → 1。
 
     索引与枚举值**不同**（枚举值是 ±1），必须用本函数。
     """
-    return 0 if side is Side.FRONT else 1
+    return SIDE_ORDER.index(side)
+
+
+def side_from_index(index: int) -> Side:
+    """场通道索引 → `Side`（`side_index` 的**严格逆**：0 → FRONT，1 → BACK）。
+
+    解码器把场通道还原成标记时**必须**走本函数：在别处写 `Side.FRONT if s == 0 else
+    Side.BACK` 就是第二套映射（RFC-0030 §3）。
+    """
+    if not isinstance(index, int) or isinstance(index, bool) or not 0 <= index < len(SIDE_ORDER):
+        raise ValueError(f"侧别索引必须是 0..{len(SIDE_ORDER) - 1} 的整数，得到 {index!r}")
+    return SIDE_ORDER[index]
+
+
+def above_from_side(side: Side) -> int:
+    """`Side` → `above` 的**规范代表值**（FRONT → 1，BACK → 0）。
+
+    该映射是**多对一**的逆：`side_from_above` 把 0 与 2 都映到 BACK，因此导出侧
+    必须选一个代表值。选 0 作为背面的规范写法（实测出现且是文档默认取值域的自然写法），
+    于是 `side_from_above(above_from_side(s)) is s` 对两个成员恒成立。
+
+    **禁止**任何模块自行写 `1 if side is Side.FRONT else 0`——那是第二套映射，
+    正是红线 7 要挡的漂移形态（RFC-0030 §3 记录该函数的引入）。
+    """
+    return 1 if side is Side.FRONT else 0
 
 
 def note_type_from_rpe(raw: int) -> NoteType:

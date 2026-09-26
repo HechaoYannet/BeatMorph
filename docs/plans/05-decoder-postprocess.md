@@ -1,5 +1,6 @@
-> 状态：🟡 草案 ｜ 阶段：Phase 2 ｜ 负责：解码与后处理组
+> 状态：🔵 **实施中**（M5.1–M5.6 落地并进默认 CI，2026-09-27；M5.7 待已训练模型）｜ 阶段：Phase 2 ｜ 负责：解码与后处理组
 > 对应代码：`beatmorph/decoder/`、`beatmorph/io/formats/rpejson/`（写路径）｜ 对应奠基章节：§2、§3.2、§3.6、§9
+> 口径裁定：[RFC-0030](../decisions/RFC-0030-decoder-export-contract-ownership.md)（类型归属 + 六项实现口径，**提案状态**，实现已按该提案落地）
 
 # Plan 05 — 解码与合法性后处理（强度场 → 离散事件 → RPEJSON）
 
@@ -167,15 +168,15 @@ LegalityReport:
 
 > **门禁硬性要求**：本 plan 不新增训练目标/损失。**若**在任一里程碑引入可学习解码器或任何新损失（含「置信度头」监督），必须先通过 **G1-G4**（`beatmorph/infra/sanity.py`）并把 `summarize()` 输出写入训练日志，**门禁未绿不得扩大数据规模**（BasePlan §9、CLAUDE.md §5.8）。
 
-| # | 里程碑 | 可量化验收 |
-| --- | --- | --- |
-| **M5.1** | 网格与契约断言 | 直接复用 `ChartFieldSpec.assert_grid()` 与 Plan 00 §3.8 的 I1/I2（`dx * x_bins == RPE_STAGE_WIDTH`；`d_tau * BEAT_SUBDIVISION == 1`（拍，Q15）；`x_min/x_max == ∓RPE_STAGE_HALF_WIDTH`）——**本 plan 不新增第二套网格断言**；「场网格 ↔ 秒」往返无损契约测试归 Plan 03 M12，本模块只消费。测试**不依赖权重/GPU**，进默认 CI |
-| **M5.2** | D1 峰值解码 | 在**合成场**（已知事件的窄高斯叠加强度场）上：`±20ms` 与 `±50ms` 的 timing-F1 **均 = 1.000**，`positionX` MAE ≤ `dx/2`（量化上界）。失败即通路坏 |
-| **M5.3** | D2 thinning 正确性 | 对解析可算的 `λ(t) = a + b·t`：KS 检验 `p > 0.05`（n ≥ 10^4 次采样），且采样总数相对 `∫λ` 的相对误差 < 1%；seed 固定后可复现（同 seed 两次运行逐元素一致） |
-| **M5.4** | 后处理红线正确性 | 夹具（`chart/1000` 标准 RPE + `chart/7039` 伪装后缀 PEC）零违规；注入式合成非法谱（越界 / 反向 Hold / 重复事件）检出率 **100%**；**`positionX` 钳位次数恒为 0**（断言）；`edits` 可完整重建「后处理前」状态 |
-| **M5.5** | RPEJSON 写路径往返 | 与 Plan 02 reader 联合：`read(write(chart))` 在**秒域**上 `max abs(Δt) ≤ 一个 beat 量化步长`、标记（`line_id/positionX/side/type/is_fake`）**全等**；写入→读回→再写入字节级稳定（幂等） |
-| **M5.6** | 越界只统计的端到端证据 | 在含越界 note 的夹具上跑完整管线：输出文件中越界 note **仍然存在**，且 `stats.out_of_range` 计数与输入一致（防回归到「偷偷钳位」） |
-| **M5.7** | 双解码臂对照（B6）出数 | 同一模型同一谱面下 D1/D2 各跑 ≥ 5 个 seed，报告 timing-F1 双容差 + 事件数分布；结论必须写明「差异来自解码而非模型」（RFC-0029 §5.2 B6 的对照层级要求） |
+| # | 里程碑 | 可量化验收 | 状态 |
+| --- | --- | --- | --- |
+| **M5.1** | 网格与契约断言 | 直接复用 `ChartFieldSpec.assert_grid()` 与 Plan 00 §3.8 的 I1/I2（`dx * x_bins == RPE_STAGE_WIDTH`；`d_tau * BEAT_SUBDIVISION == 1`（拍，Q15）；`x_min/x_max == ∓RPE_STAGE_HALF_WIDTH`）——**本 plan 不新增第二套网格断言**；「场网格 ↔ 秒」往返无损契约测试归 Plan 03 M12，本模块只消费。测试**不依赖权重/GPU**，进默认 CI | ✅ `tests/unit/decoder/test_grid_and_scaling.py`（含 τ 边缘强度的**测度一致性**与 AST 扫描：解码器内不得出现第二套 BPM 积分） |
+| **M5.2** | D1 峰值解码 | 在**合成场**（已知事件的窄高斯叠加强度场）上：`±20ms` 与 `±50ms` 的 timing-F1 **均 = 1.000**，`positionX` MAE ≤ `dx/2`（量化上界）。失败即通路坏 | ✅ `tests/unit/decoder/test_peaks.py`（F1 = 1.000 @ 两档容差；MAE = 0 ≤ dx/2；另含 NMS / 阈值 α·λ0 / 窗宽奇数 / 高原确定性） |
+| **M5.3** | D2 thinning 正确性 | 对解析可算的 `λ(t) = a + b·t`：KS 检验 `p > 0.05`（n ≥ 10^4 次采样），且采样总数相对 `∫λ` 的相对误差 < 1%；seed 固定后可复现（同 seed 两次运行逐元素一致） | ✅ `tests/unit/decoder/test_thinning.py`。⚠️ **"< 1%" 口径细化**（RFC-0030 §8）：单次计数偏差本身是 `1/√Λ` 量级（Λ=1e4 时恰 1%），故拆为「多 seed 均值 < 1%（无偏）」+「单次 ≤ 4σ」两条统计上成立的断言 |
+| **M5.4** | 后处理红线正确性 | 夹具（`chart/1000` 标准 RPE + `chart/7039` 伪装后缀 PEC）零违规；注入式合成非法谱（越界 / 反向 Hold / 重复事件）检出率 **100%**；**`positionX` 钳位次数恒为 0**（断言）；`edits` 可完整重建「后处理前」状态 | ✅ `tests/unit/decoder/test_legality.py`。⚠️ 夹具口径修正：仓库内可用夹具是 `tests/fixtures/phigros/rpe_min.json`（标准 RPE，零违规）；PEC 伪装夹具**不是 RPE 谱**，"零违规"对它不适用（其拒收由 plan 02 的嗅探测试覆盖） |
+| **M5.5** | RPEJSON 写路径往返 | 与 Plan 02 reader 联合：`read(write(chart))` 在**秒域**上 `max abs(Δt) ≤ 一个 beat 量化步长`、标记（`line_id/positionX/side/type/is_fake`）**全等**；写入→读回→再写入字节级稳定（幂等） | ✅ `tests/integration/test_decode_to_rpejson.py` + `tests/unit/io/test_rpejson_writer.py`（含 `type` 的 RPE 表、`above` 三值、`speedEvents` 无贝塞尔、导出门禁） |
+| **M5.6** | 越界只统计的端到端证据 | 在含越界 note 的夹具上跑完整管线：输出文件中越界 note **仍然存在**，且 `stats.out_of_range` 计数与输入一致（防回归到「偷偷钳位」） | ✅ `tests/integration/test_decode_to_rpejson.py::test_out_of_range_notes_survive_the_export_and_the_stats_agree`（夹具 `rpe_min.json` 本身即含一个 `positionX = 720` 的越界 note） |
+| **M5.7** | 双解码臂对照（B6）出数 | 同一模型同一谱面下 D1/D2 各跑 ≥ 5 个 seed，报告 timing-F1 双容差 + 事件数分布；结论必须写明「差异来自解码而非模型」（RFC-0029 §5.2 B6 的对照层级要求） | 🔵 **未完成（缺已训练模型）**：出数工具 `decode_both_arms(lam, grid, seeds=(0..4))` 已就绪并保证两臂同网格 / 同秒域输出 / seed 可复现；实验本身待 plan 07 训练栈与首个 checkpoint |
 
 ## 7. 风险与缓解
 
@@ -209,17 +210,25 @@ LegalityReport:
 
 ## 9. 开放问题
 
-1. **同刻按键上限的具体数值未查证**。BasePlan §3.6-2 与 RFC-0029 §5.1 都要求该项检查存在，但两份文献都**没给数值**。裁定前该项**只统计不阻断**。
-2. **跨线几何冲突的判据阈值未定义**（两线最近距离 / 夹角 / 是否计入 alpha=0 的隐藏线）。需先做数据统计再定；在此之前只报告计数，不做任何自动处置。
-3. **RPE 下「Hold 期间判定线速度变化」是否硬约束未确证**：格式文档原文限定「PEC 和官谱 JSON 中」（§7.4）。当前按 warning 处理，需 RFC 或数据统计裁定。
-4. **标记采样的分解方式**：`(x, side, type)` 是联合归一化后一次采样，还是逐轴条件采样后组合？两者产生不同的边缘分布；需在 Plan 04 的迭代解码定稿时一并决定。
-5. **网格 X（桶数 N）的最终值**：`N ∈ {64,128,256,512}` 消融与「同线同刻同侧最小 `|ΔpositionX|`」共格碰撞统计**尚未做**（单位文档 §7.3 明确要求先统计再定 N）。本 plan 的解码器必须对 N 参数化，不得假定 128。
-6. **`scipy` 依赖**：`scipy` 当前不在 `pyproject.toml`；是否引入（或用 `numpy` 自实现峰值检测）待定。
-7. **beat 三元组的分母策略**：秒 → beat 的量化误差上界尚未推导。若分母取固定值（如 480 分音符细分）会产生与 BPM 无关的误差；若按 BPM 自适应则体积膨胀。须给出误差上界公式并写入契约断言。
-8. **`META.offset` 的符号解释**在格式文档中自相缠绕（§7.2），且 prpr 未在该处使用它。生成侧应写 0 还是解析输入音频的偏移，未定。
-9. **`beatmorph/io/formats/rpejson/` 的读写归属**：AGENTS.md 划给 data-agent，本 plan 需要写路径。属于协作边界而非技术未决，需在实现前排期确认。
-10. **`is_fake` 是否作为生成目标**：RFC-0029 §2.3 把 `is_fake` 列入标记，但 BasePlan §3.2.2 未说明生成侧是否预测它。假音符不计物量（格式文档 §5.4），其占比与语义价值**未统计**。
-11. **与 Plan 00 的一处实质分歧（需裁定）**：Plan 00 §3.5 的注记把「Hold 期间判定线不得发生速度变化」声明为**格式硬合法性约束**；但依据 `phigros-format.md` §7.4，该约束的原文限定为「**PEC 和官谱 JSON 中**」，**RPE 侧未确证**。本 plan 暂按 **warning** 处理（§4.3）。若裁定为硬约束，则该项在 §4.3 的处置须由 warning 升级为 `violations`（会改变退出码 3 的触发面）。建议由 contracts-agent 与决策者统一口径。
-12. **`LegalityReport` / `Violation` / `Edit` 的类型归属**：这三个类型被 Plan 06 与 Plan 08 消费，属跨模块数据，按红线 2 应落 `core/contracts`；也可界定为「模块公开 API 返回类型」而非跨模块数据契约。**实现前必须裁决**，否则 Plan 08 的 `report/legality.json` schema 没有权威来源。
-13. **编号一致性（跨文档）**：Plan 00 §3.5/§5 两处以「plan 07」指代后处理与导出，与本索引（后处理 = plan 05、infra = plan 07）不一致。本 plan 按 AGENTS.md v3.0 与 `docs/plans/README.md` 的编号（05）为准，建议 Plan 00 同步修正。属文档一致性问题，非技术未决。
+> 状态截至 **2026-09-27**（plan 05 实现落地）。每条的写法：**已裁决** → 结论 + 落点；
+> **未决** → 现在的默认口径 + 定它还需要什么。裁定汇总见 [RFC-0030](../decisions/RFC-0030-decoder-export-contract-ownership.md)。
+
+1. ~~**同刻按键上限的具体数值未查证**~~ ✅ **已裁：未查证 → 只统计、不作红线**（[RFC-0029 §8.4 R-e](../decisions/RFC-0029-phigros-continuous-chart-generation.md)）。本轮把它落成**显式开关**：默认只统计分布（`chart_same_instant_max/mean/groups`），只有调用方显式给出 `LegalityConfig.same_instant_limit` 时才升级为违规。要把「未查证」变成「已查证」，需要全库同刻按键数分布（依赖 plan 02 的真实数据通路）。
+2. ~~**跨线几何冲突的判据阈值未定义**~~ 🟡 **给出显式默认判据，仍只报告**：同一 τ 格内、不同判定线的 note 在**舞台系**（经契约 `local_to_stage`，含 father）距离 <= `cross_line_tolerance_bins * dx`（默认 1.0 个桶宽，以网格分辨率为单位）。判据文本随报告落盘（`LegalityReport.criterion`）。**未做**：两线夹角判据、`alpha = 0` 隐藏线是否计入 —— 都要先做数据统计。
+3. ~~**RPE 下「Hold 期间判定线速度变化」是否硬约束未确证**~~ ✅ **已裁：降级为 warning**（[RFC-0029 §8.4 R-b](../decisions/RFC-0029-phigros-continuous-chart-generation.md)：格式文档原文只对 PEC 与官谱成立，**未确证不得当红线**）。实现按关键帧判定（与 Hold 区间有交且 `start != end` 的关键帧即算变化），只报 `chart_hold_line_speed_change` 计数，不阻断导出。
+4. ~~**标记采样的分解方式**~~ ✅ **已定**：`mark_mode="joint"`（默认）为正式口径——它与"在乘积空间 `(x, side, type)` 上直接 thinning"严格等价（条件分布的正确形式）；`"factorized"`（逐轴独立边缘）保留为**对照臂**，测试用"标记完全相关"的构造证明两者确实不同。
+5. ~~**网格 X（桶数 N）的最终值**~~ ✅ **已裁：维持 N = 128 为默认，但必须先出消融与共格碰撞统计**（[RFC-0029 §8.4 R-f](../decisions/RFC-0029-phigros-continuous-chart-generation.md)）。解码器对 N **完全参数化**：`x_bins` 只从 `ChartFieldSpec` / `FieldGrid` 取，源码中无硬编码（AST 扫描测试兜底）；最终取值待 plan 02/03 的统计曲线。
+6. ~~**`scipy` 依赖**~~ ✅ **裁定不引入**（RFC-0030 §5）：峰值检测（局部极大 + 阈值 + 贪心 NMS）与 KS 检验（渐近 Kolmogorov 分布）自实现，两处都进默认 CI。
+7. ~~**beat 三元组的分母策略**~~ ✅ **已定**（RFC-0030 §3）：分母固定 `SUBDIVISIONS_PER_BEAT`（τ 网格的基本格），量化只发生在 `writer.beat_from_tau` **一处**，误差上界 = `TAU_GRID_DT / 2` 拍 = 半个时间基本格，并由单元测试在格点上钉死（生成 → 读回 → 再生成的字节幂等）。
+8. **`META.offset` 的符号解释**：仍未决。本轮口径 = **原样写出 `ChartMeta.offset_ms`**；解码路径不产生 offset（写 0）。定它需要音频侧的对齐语义（plan 01）与端到端试听，属 plan 08 的范围。
+9. ~~**`beatmorph/io/formats/rpejson/` 的读写归属**~~ ✅ **已闭环**：读在 `beatmorph/data/parsers/rpejson.py`（plan 02），写在 `beatmorph/io/formats/rpejson/writer.py`（plan 05），共用契约常量；`tests/integration/test_decode_to_rpejson.py` 钉住两者一致（标记全等 + 时间 <= 一个量化步长 + 字节幂等）。
+10. **`is_fake` 是否作为生成目标**：仍未决。解码路径一律 `is_fake=False`（写 `isFake: 0`）；其占比与语义价值仍**未统计**（需要真实数据）。
+11. **与 Plan 00 的一处实质分歧（Hold 期间线速度变化）**：见第 3 条，维持 warning；若裁定为硬约束，只需把 `LegalityConfig` 的该项升级为 violation（触发面已隔离在一处）。
+12. ~~**`LegalityReport` / `Violation` / `Edit` 的类型归属**~~ ✅ **已裁**（归属由 [RFC-0029 §8.4 R-c](../decisions/RFC-0029-phigros-continuous-chart-generation.md) 定，schema 由 [RFC-0030 §1](../decisions/RFC-0030-decoder-export-contract-ownership.md) 定）：落 `beatmorph/core/contracts/legality.py`；`violations` 为空 == 可导出是**唯一**判据，修复动作在 `edits`（每条带 `resolved`），修复前的发现在 `findings`。
+13. **编号一致性（跨文档）**：Plan 00 §3.5/§5 仍以「plan 07」指代后处理与导出；本 plan 按 AGENTS.md v3.0 与 `docs/plans/README.md` 的编号（05）为准，待 Plan 00 同步修正。属文档一致性问题。
 14. ~~**Plan 00 §3.7 的 `ChartFieldSpec` 时间轴口径待同步（Q15 遗留）**~~ ✅ **已解决（2026-08-05）**：Plan 00 §3.7 已改为 τ 口径（`t_bins` / `d_tau` / `bpm_points`），并新增不变量 I13（τ→秒→τ 往返 ≤1e-9，须覆盖多 BPM 段）。字段名以 Plan 00 为准，换算函数由 `field/` 提供（RFC-0029 §8.4 R-g）。
+
+### 9.1 本轮实现中发现的两项（已如实记录，**未擅自改契约**）
+
+15. **契约的父线位置合成与 A 级证据不一致**：`JudgeLine.pose_at` 用的是"沿父线链**求和** `move_x/move_y`"，而 [units 文档 §2.6](../knowledges/phigros-units-and-geometry.md)（prpr 源码，A 级）给出的是 `parent_pos + R(parent_rot) · child_translation`——**父线的旋转应当作用在子线的平移上**。实测 26% 的谱面含嵌套线，因此**跨线几何冲突计数在含父线的谱面上是近似值**。由于该项只报告计数、从不改动谱面（红线 3），本轮不改契约，把修正建议写进 RFC-0030 §后果-2（改 `pose_at` 会改变契约语义，应由 contracts-agent 处理）。
+16. **§4.2-1 的 τ 边缘强度算式漏了 `J(τ)`**：原文写作 `λ_k(τ) = Σ_{x,s,c} λ · dx`，正确式是 `λ_k(τ_t) = J(τ_t) · dx · Σ_{x,s,c} λ`（RFC-0030 §6）。原文自己写的"**同 `J(τ)dτ` 测度**"与"量纲 = 计数/拍"两点只有加上 J 才同时成立，故按**算式笔误修正**处理并在此登记——漏掉 J 会让 `∫λ_k dτ` 与路径 (a) 相差一个与 BPM 有关的因子（与 [POSTMORTEM](../POSTMORTEM-2026-08-05-frame-rate-misalignment.md) 同类错误）。

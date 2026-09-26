@@ -83,15 +83,18 @@ beatmorph/
 7. **大文件**：写代码前确认产物不在 `.gitignore` 黑名单（权重/音频/parquet）。
 8. **【v3.0 新增】门禁先行**：新增训练目标或损失函数时，**先把 G1-G4 跑通再谈扩数据**。
 
-## 6. 当前状态（2026-09-26）
+## 6. 当前状态（2026-09-27）
 
 - ✅ **范式已定**：RFC-0029 采纳（Phigros + 多线标记点过程 + 掩码补全 + 泊松 NLL），Q1/Q2/Q4/Q6/Q7/Q8 已由决策者批复。
 - ✅ **根因已清**：MERT 帧率 25Hz→75Hz 修复落地（三条独立证据链），G1-G4 门禁与 G4 契约测试入库并通过。
 - ✅ **格式事实已就绪**：`docs/knowledges/phigros-format.md`（RPEJSON 逐字段、坐标几何、来源分级 A/B/C）。
 - ✅ **信息准备已完成（四项全齐）**：[phigros-format.md](docs/knowledges/phigros-format.md)（格式，含勘误横幅）、[phigros-units-and-geometry.md](docs/knowledges/phigros-units-and-geometry.md)（单位/几何，prpr 源码 A 级）、[phira-dataset-survey.md](docs/knowledges/phira-dataset-survey.md)（数据源实测：9649 张、K 中位 30、音频 100% 捆绑）、[chart-generation-literature.md](docs/knowledges/chart-generation-literature.md)（文献与评估协议）。
 - ✅ **两项阻塞已清（2026-08-05）**：① **数据合规已裁定**（风险由决策者承担，硬约束 = 最终不发布权重，见红线 5 附注）；② **Q15 时间网格定为 beat-aligned**（数学改写限定在 `field/` 内，见 BasePlan §3.2.4）。
-- 🔵 **施工进行中**：plan 00 / 02 / 03 与 plan 04 主干（M1–M4/M6）已落地并通过默认 CI（545 项）；**field 与 generation 两套 G1-G4 门禁均在真实主干上实跑全绿**；plan 04 的消融臂（M7–M11）与 plan 05/06/07/08 待建。
-- ⚠️ **待 RFC 裁定（2026-09-26 落地时发现）**：遮盖通道的信息泄漏（plan 04 §9-18）与遮盖重标定系数 `1/r` vs 文档 `1/(1-r)`（plan 04 §9-6）——两者都已在实现里给出默认口径并如实记录，详见交接件。
+- 🔵 **施工进行中**：plan 00 / 02 / 03、plan 04 主干（M1–M4/M6）与 **plan 05 解码与导出（M5.1–M5.6）**已落地并通过默认 CI（608 项）；**field 与 generation 两套 G1-G4 门禁均在真实主干上实跑全绿**；plan 04 的消融臂（M7–M11）与 plan 06/07/08 待建；plan 05 的 M5.7（双解码臂 B6 出数）待已训练模型。
+- ⚠️ **待 RFC 裁定**：
+  - **遮盖通道的信息泄漏**（plan 04 §9-18）与**遮盖重标定系数** `1/r` vs 文档 `1/(1-r)`（plan 04 §9-6）——两者都已给出默认口径并如实记录；
+  - **[RFC-0030](docs/decisions/RFC-0030-decoder-export-contract-ownership.md)**（解码/导出契约归属 + 六项实现口径，2026-09-27 提出）：实现已按提案落地，待裁定；
+  - RFC-0030 登记的两项**新发现**：① `JudgeLine.pose_at` 的父线位置合成与 prpr A 级证据不一致（父线旋转未作用在子线平移上 ⇒ 含父线谱面的跨线几何计数是**近似值**）；② plan 05 §4.2-1 的 τ 边缘强度算式漏了 `J(τ)`（已按算式笔误修正并登记，见 RFC-0030 §6）。
 
 
 ## 7. 文档导航

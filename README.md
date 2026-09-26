@@ -14,6 +14,53 @@ BeatMorph 从原始音频（WAV/MP3）+ 难度（+ 可选判定线事件轨）�
 
 ---
 
+## 当前状态与下一步（**跨 session 交接件**）
+
+> 本节读者是**下一个 session 的 agent**，不是历史记录。
+> **每次交接必须整节重写，不得追加**（规则见 [AGENTS.md](AGENTS.md) §6）。
+> 上次交接：**2026-08-05** ｜ 交接人：主会话
+
+### 当前状态
+
+**已就绪**
+
+- **范式**：[RFC-0029](docs/decisions/RFC-0029-phigros-continuous-chart-generation.md) 已采纳（Phigros + 判定线局部系多线标记点过程 + 掩码补全 + 非齐次泊松 NLL）；beat-aligned 时间网格与数据合规两项裁决已落 RFC/BasePlan/CLAUDE。
+- **文档库**：[BasePlan v3.0](docs/BasePlan.md)（397 行）、[CLAUDE.md v3.0](CLAUDE.md)、[plans 00-08](docs/plans/README.md)（2538 行）、[知识库 4 份](docs/knowledges/)（格式 / 单位几何 / 数据集 / 文献）、[POSTMORTEM](docs/POSTMORTEM-2026-08-05-frame-rate-misalignment.md)。
+- **门禁**：`beatmorph/infra/sanity.py`（G1-G4，纯 Python，无 torch 依赖）；帧率契约测试进默认 CI。
+- **仓库**：`main` 已快进至 `67c7299`；osu!mania 实现在 **`archive/osu-mania`** 分支完整保留；主路径已删除 retired 模块。
+
+**代码实况（重要：不要被文档的完备度误导）**
+
+| 区域 | 实况 |
+|------|------|
+| `beatmorph/core/contracts/` | **仍是 v2.x**（`Note/Chart/Section/EventToken` + 常量）——**待重写为 Phigros 契约** |
+| `beatmorph/audio/encoder/mert.py` | ✅ 可用（帧率已改为派生量 75Hz） |
+| `beatmorph/infra/sanity.py` | ✅ 可用（G1-G4） |
+| `beatmorph/field/`、`eval/`、`io/formats/rpejson/` | ⬜ **不存在，待建** |
+| `beatmorph/generation/`、`decoder/` | 空包壳 |
+| `configs/` | 仅剩 `model/mert.yaml`（已修正） |
+| 测试 | 仅 3 份存活（契约 / 门禁 / 帧率契约）→ `36 passed, 1 skipped` |
+
+### 下一步
+
+1. **写 Phigros 基座契约**（[plan 00](docs/plans/00-core-contracts.md)，393→400 行，8 条里程碑）——这是后面 8 份 plan 的共同依赖，必须先做。
+   - 首要：把 v2.x 的 `core/contracts/` 换成 `JudgeLine` / `PhigrosNote` / `PhigrosChart` / `ChartFieldSpec` / `ChartField` / `ChartTargetField`（形状 `(B,K,T,X,S,C)`，τ 时间轴，不变量 I1–I13）。
+2. 按 [plan 02](docs/plans/02-data-pipeline.md) 建 RPEJSON 解析器（**独立实现**，只读 prpr/phichain 行为规范；夹具 `chart/1000` + `chart/7039`）。
+3. 按 [plan 03](docs/plans/03-field.md) 建 `field/`（两条积分路径 + 一致性门禁 + τ↔秒往返测试）。
+4. 数据获取按 plan 02 执行（合规已裁定；**脚本须记录来源与用途**）。
+
+### 未决项（不阻塞第 1–3 步）
+
+| 未决 | 出处 |
+|------|------|
+| 网格桶数 N 的最终值（需 N 消融 + 共格碰撞统计） | RFC §8.4 R-f、plan 03 M6/M7 |
+| RPE 同刻按键上限数值（未查证 → 只统计不作红线） | plan 05 §9-1 |
+| 旋转正方向的屏幕含义（存疑 D1） | plan 00 §9-8、单位文档 §9 |
+| 官谱侧 `1X` 75 vs 75.94、v1 y 分母 520/530 冲突 | 单位文档 §9 |
+| `bpmfactor` 参考实现未实现 | 单位文档 §9 |
+
+---
+
 ## 为什么是 Phigros
 
 | 维度 | 4K 下落式（osu!mania / DDR） | **Phigros** |

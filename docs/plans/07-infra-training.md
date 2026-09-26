@@ -251,3 +251,16 @@ run_gates(*, step_fns: GateStepFns, out_path: Path, cfg) -> list[GateResult]
     仍**未解决**的是「同一批里混合不同 BPM 段」——那需要「给 `FieldBatch` 加 per-sample 网格」或「在 loss 里按样本取 J」，
     属契约级问题，须开 RFC（plan 04 §9 相关）。
 14. **门禁预算在真实数据上是否够用未验证**：G1 的判据实际生效的是**相对**判据（`target_ratio × 首步`，因为泊松 NLL 的下界是事件数而不是 0，§9-2 的预判已被证实），但「真实数据上 120-300 步能否打穿」只能等 plan 02 的真实特征缓存就绪后实测。
+15. **真实数据上的门禁内存墙（本轮实测，2026-09-27）**：G2 的对照臂一次要 collate `shuffle_samples` 个窗口，
+    而真实窗口的每批元素数 ≈ `samples × K × T × X × S × C`（本配置 `x_bins=128`、`t_window=192`；
+    实测批次 K=63）。`shuffle_samples=16`（合成数据下的默认值）时，门禁装配在 model forward 上申请
+    **5.4 GB 连续内存**直接失败（`DefaultCPUAllocator: not enough memory`，本机 31 GB RAM）。
+    处置：`configs/phigros_masked.yaml` 显式写 `shuffle_samples: 4` 并注明代价——
+    G2 的样本数变少 ⇒「打乱臂直接背样本」的风险回升（§9-12）。
+    **待复核**：真实数据上 G2 需要多少样本才够、以及门禁是否应支持把 G2 分批（而不是一次性 collate 全部样本）。
+16. **train extra 已装齐（本轮更新 §9-11）**：`uv sync --extra audio --extra train --extra data --extra viz` 在走代理后完成，
+    env doctor 的 **E4 由 UNKNOWN 变为 PASS**（`pytorch_lightning` / `tensorboard` 可导入）。
+    仍未做的是**Lightning 后端真机实跑**（`run.backend=lightning`）与 TB 标量真实写入；权威记录仍是 `gates.txt`。
+17. **装齐 train extra 之后 `mypy --strict` 才暴露的 3 处第三方无类型调用**（`mert.py`：`AutoFeatureExtractor.from_pretrained` ×2、
+    `get_peft_model` ×1）：此前依赖未安装 ⇒ mypy 视为 Any ⇒ 静默通过。已按「窄 `type: ignore` + 理由注释」处理。
+    教训：**「类型检查全绿」依赖环境快照**——CI 与本地必须装同一组 extras，否则门禁是环境相关的。

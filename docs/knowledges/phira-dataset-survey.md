@@ -294,6 +294,22 @@ tags: [art, ornament, fun, gimmicky, regular]
 > **【推断】** 社区谱面的格式构成大致为 **RPE ≫ PEC ≫ 官谱 JSON/PBC**，RPE 占比在 95%+ 量级。依据：两轮抽样一致指向 98%+；且 A 级 `info.yml` 文档已注明「**RPE 生成的谱面通常为 chart.json，PE 生成的谱面通常为 xxx.pec**」，PEC 属旧工具链产物。
 > **但要强调：全库精确占比未查证。** 要拿到精确数字需要枚举 9649 条并把每张谱面文件完整下载解析（每个谱面文件解压后中位 3.7 MB，累计数十 GB）。
 
+> **实测更新（2026-09-27，全库拉取）**：`scripts/fetch_phira.py` 已完成 322 页枚举 + 逐张选择性下载，
+> 全库口径的数字见 [docs/plans/02-data-pipeline.md](../plans/02-data-pipeline.md) §9 与 `data/processed/stats.json`。
+> **三条与本节抽样结论冲突的修正**（都在实测后有据）：
+>
+> 1. **PEC 占 9.0%（872/9651），不是 2.5%**。本节 §5.2 的 200 张抽样偏「近期上传」，而 PEC 集中在旧谱面
+>    （本轮按 id 升序处理时低 id 段拒收率一度接近 20%）。**「PEC 占比被低估」的担忧成立，且低估幅度比原先估计更大。**
+> 2. **PEC 的行语法比调研样例宽**：实测出现 `&` / `cf` / `cr` 三种符号命令
+>    （未识别行首频次 80198 / 49280 / 41644）。调研样例里的 10 个命令不足以判型 ⇒
+>    `beatmorph/data/parsers/sniff.py` 的 `PEC_COMMANDS` 已按实测扩表。
+> 3. **官谱 JSON 不是 0**：全库 14 张（0.15%）；另有 `numOfNotes` / `floorPosition` 类键的
+>    JSON 样本（PBC 候选，结构仍未查证）一律归 `UNKNOWN` 并记账（§9-Q9 纪律不变）。
+>
+> 另外两条**数据事实**（会影响建模口径，不是格式问题）：`info.yml` 的文本字段实测常为 `null` 或数字/布尔；
+> 全库唯一曲目 6807（同曲重复率 20.4%）、唯一音频 8084（音频层重复率 5.5%）。
+
+
 ### 5.3 解析侧必须注意的混用陷阱（含实测证据）
 
 | # | 陷阱 | 证据 |
@@ -596,102 +612,3 @@ tags: [art, ornament, fun, gimmicky, regular]
 **[6] 音频**
 - 音频**随包分发且 100% 存在**（实测 196/196），所以「音频缺失」不是主要问题；**主要问题是版权**（§6）。
 - **按 sha1 去重**：同一首歌会有多张谱面，重复下载音频是纯浪费。
-- 建议把音频与谱面**分开存放**（`audio/<sha1>` ↔ `chart → audio_sha1` 外键），这样「只训练谱面结构、不碰音频」与「音频+谱面联合训练」两种模式可以自由切换，也便于在授权不明时**只保留谱面、不落音频**。
-- ⚠️ **音频文件名无语义**，只能读 `info.yml.music`。
-
-**[7] 特征提取**
-- MERT-v1-330M 帧率 **75 Hz**，由 config 派生并断言（CLAUDE.md 红线 7 / RFC-0029 §7）。
-- 缓存必须带 `{rate, sample_rate, layer, model_rev, duration_s}` 元数据并在加载时校验。
-- 音频采样率实测多样（`.mp3`/`.ogg`/`.wav`），**统一重采样到模型要求的采样率**，并在缓存元数据里记录**原始**采样率与时长。
-
-**[8] 配对与切分**
-- ⚠️ **切分必须按「曲目」而不是按「谱面」**：同一首歌的多张谱面进同一个 split，否则 val 会泄漏。
-- 建议同时保留一个「**同曲跨谱泛化**」的评测集（train 用某曲的 IN 谱、test 用同曲的 AT 谱）——这比随机切分更能反映模型是否学到了音乐↔谱面的真关系。
-- **本次调研未查证同曲重复率**，建议在 [0]/[6] 阶段顺手统计（见 §7.6 思路 C）。
-
-### 9.3 最该先做的三件事（按 ROI 排序）
-
-1. **跑一次全库预筛**（§9.2 [0]-[2]）：322 页元数据 + 9649 次「尾部 200 KB + 谱面前缀 24 KB」的 Range 抓取。产出全库的**格式分布、大小分布、音频存在率、判定线数量分布**——这正是本文最大的空白（§3.4 / §5.2 / §7）。
-2. **写 RPEJSON 解析器 + beat→秒换算，并用 `chart/1000` 与 `chart/7039` 两个实测样本做夹具**：前者是标准 RPE（71 线 / 1659 note / 4 类 type / `above` 含 2），后者是**伪装成 `.json` 的 PEC**（完美的负样本夹具）。
-   - ⚠️ 按 CLAUDE.md §3.5，夹具只能是**微缩**的；把这两张谱裁成极小样本再入库，别把 6.5 MB 的 JSON 提交上去。
-3. **把 §7 的实测基线写成契约测试**：`above ∈ {0,1,2}`、`type ∈ {1,2,3,4}`、`|positionX| ≤ 675`、`1 ≤ len(eventLayers) ≤ 5`。这几条正是「能挡住静默错位」的断言（CLAUDE.md 红线 7：物理常量必须派生 + 断言）。
-
----
-
-## 10. 存疑清单
-
-> 与 [phigros-format.md §12](phigros-format.md) 的 19 项互补；编号前缀 `Q-` 为本篇新增。
-
-| # | 问题 | 目前证据状态 |
-| :-- | :-- | :-- |
-| **Q-1** | Phira 全库的**精确格式占比**（RPE / PEC / 官谱 JSON / PBC）？ | 仅有 200 张抽样的 **RPE 190 / PEC 3**（实测）。全库需枚举 9649 张并逐个嗅探；**未查证**。抽样偏向近期更新，PEC 占比可能被低估。 |
-| **Q-2** | Phira 是否对 API 有**限流**？批量抓取的安全速率？ | 未观测到限流响应头，官方文档也未记载；**未查证**。批量脚本必须自行限速。 |
-| **Q-3** | 全库**唯一曲目数**与同曲多谱的重复率？ | **完全未统计**。可通过音频 sha1 去重得到（§7.6 思路 C）。这个数字直接决定「真实 (audio, chart) 对数」远小于 9649 的哪一档。 |
-| **Q-4** | `positionX` 单位与 `info.yml.lineLength`（默认 6.0）的换算？1350 与屏幕宽度的关系？ | **✅ 已由姊妹文档裁定（A 级）**：prpr 源码常量 `RPE_WIDTH = 1350.0`，`positionX` 单位 = RPE 舞台 x 坐标（1 单位 = 舞台宽 1/1350），范围 [−675, 675] —— 见 [phigros-units-and-geometry.md](phigros-units-and-geometry.md) §3。本文**独立**由数据实测得到同一区间（n=12674，§7.4），两条证据链吻合。**仍未查证**的是 `lineLength=6.0` 与 1350 的换算（该文另有讨论）。 |
-| **Q-6** | 若在 [−675, 675] 上开 128 桶，桶宽是否合适？ | **未裁定（属 RFC-0029 §8.2-Q8，建模选择）**。单位已定（Q-4）；数值上 128 桶 → 10.55 单位/桶，**细于**手工谱实测的 22.5 网格（§7.4.1）→ 【推断】不会在手工谱上引入系统性冲突；对任意浮点谱则等价于连续化。**桶宽选定属决策者职权。** |
-| **Q-5** | `positionX` 的真实量化粒度（编辑器网格）？ | **部分查证（实测 n=3）**：手工谱落在 1350/60（间隔 22.5）或 1350/120（间隔 11.25）级别的**粗网格**上，存在只用 24 个不同取值承载 1449 个 note 的谱面；但也存在携带**任意浮点**（最小相邻间隔 0.32）的谱面。**不存在全库统一的固定网格** → 只能做区间校验，不能做「整除」校验。详见 §7.4.1。 |
-| **Q-6** | 若在 [−675, 675] 上开 128 桶，桶宽是否合适？ | **未裁定（属 RFC-0029 §8.2-Q8）**。数值上 128 桶 → 10.55 单位/桶，**细于**手工谱实测的 22.5 网格（§7.4.1）→ 【推断】不会在手工谱上引入系统性冲突；对任意浮点谱则等价于连续化。**仍需 A 级单位定义后才能定案。** |
-| **Q-7** | 官谱 JSON 的 note `type` 映射（2=Drag/3=Hold/4=Flick）？ | 仍只有 **C 级来源**（Lchzh Docs）；RPE 侧由 A+B 双重确认。若将来要混入官谱数据，**必须先验证**。 |
-| **Q-8** | `eventLayers` 的 5 层到底是「5 普通」还是「4 普通 + 1 特殊」？ | 实测出现长度为 5 的 `eventLayers`（**实测** 23 张中 60 条线），且 `extended` 是**独立字段**、23/23 张非空 → 支持「**5 普通层 + `extended` 独立**」的读法，但 A/B 级文档互相矛盾（[phigros-format.md §12-Q18](phigros-format.md)）。**未最终裁定。** |
-| **Q-9** | PBC 格式的结构？Phira 文档只写「文档待完善」 | **完全未查证**。抽样中 0 例，可暂时直接拒收。 |
-| **Q-10** | PEC 格式在 Phira 的现存数量？ | 抽样 200 张中 3 张（**实测**）；**全库未查证**。本次另在 24 张全量样本中遇到 1 张「`.json` 后缀、PEC 内容」的样本（id 7039）——说明 PEC 无法靠后缀识别。 |
-| **Q-11** | Phira 站内内容可否用于**机器学习训练**？ | **未查证到任何明确许可或明确禁止条款。** 条款有「禁止未获授权使用站内内容 / 创建衍生作品」的措辞（§6.1），DMCA 承认存在未授权上传（§6.2）。**需决策者判断**，本文不给结论。 |
-| **Q-12** | 谱面捆绑的**音频/曲绘**的版权状态？ | 归曲师/画师/厂牌，与谱面作者授权是**两层**，且平台不保证上传者有权分发（§6.1）。**逐张不可判定，未查证。** |
-| **Q-13** | PhiZone 等其它 Phigros 社区平台是否有可批量拉取的谱面 API？ | **未查证**。仅确认 [PhiZone/player](https://github.com/PhiZone/player) 存在且活跃。 |
-| **Q-14** | 「Phigros 自制谱论坛」这一说法对应哪个具体站点？ | **未查证**。本次检索未找到可作批量来源的论坛；社区分发似以 QQ 群/B 站/Phira 站内为主。 |
-| **Q-15** | `father`/`rotateWithFather` 的字段名与默认值？ | 实测 26% 的谱面存在非 `-1` 的 `father` 引用（证明该字段真实在用），但字段名三处写法不一（[phigros-format.md §12-Q4](phigros-format.md)）。**未查证。** |
-| **Q-16** | 同一时刻跨多条线的 note 并发上限？ | **未统计**。这是 RFC-0029 要求的「跨线合法性」规则的输入（[RFC-0029 §5](../decisions/RFC-0029-phigros-continuous-chart-generation.md)）。统计方法见 §7.6 思路 B 第 4 步。 |
-
-### 10.1 本次调研**没有**做到的事（诚实边界）
-
-1. **没有全库统计**。判定线数量分布（§7.1，n=23）、每线 note 分配（§7.2，n=23+10）、type/above 比例（§7.3，n=24+10）、格式占比（§5.2，n=283）、`positionX` 分布（§7.4，n=10 张 / 12674 note；§7.4.1，n=3 张）**全部是抽样结果**。**没有任何一个是全库数字。**
-2. **没有统计唯一曲目数与同曲重复率**（Q-3）——这直接影响「真实 (audio, chart) 对有多少」。
-3. **没有验证 PBC 格式**（Q-9）、**没有查到 Phira 的限流策略**（Q-2）、**没有找到任何训练授权声明**（Q-11）。
-4. **没有做法律判断**。§6 只复述公开声明。
-5. 抽样脚本临时存放于本机 `%TEMP%`，**未入库**（遵守 CLAUDE.md §3.5 大文件不入库）；复现方法见 §7.6。
-
----
-
-## 11. 来源清单
-
-### A 级（官方文档 / 官方源码 / 官方 API）
-
-| 标题 | URL | 本次是否直接访问 |
-| :-- | :-- | :-- |
-| Phira 谱面文件格式（RPE / PEC / PBC） | <https://teamflos.github.io/phira-docs/chart-standard/chart-format/index.html> | ✅ |
-| Phira 谱面信息（ChartInfo / info.yml） | <https://teamflos.github.io/phira-docs/chart-standard/chartinfo.html> | 转引 [phigros-format.md](phigros-format.md) |
-| Phira 官方 API（谱面列表/详情/多取） | <https://api.phira.cn/chart>、`/chart/{id}`、`/chart/multi-get` | ✅ **实测** |
-| Phira CDN 谱面包托管 | <https://phira.5wyxi.com/files/> | ✅ **实测**（含 Range 支持） |
-| Phira Web 前端 OpenAPI 生成类型（端点与参数权威） | <https://github.com/TeamFlos/phira-web/blob/main/src/api/schema.d.ts> | ✅ |
-| Phira 使用条款 | <https://github.com/TeamFlos/phira-web/blob/main/src/TermsOfUse.vue> | ✅ |
-| Phira DMCA 政策 | <https://github.com/TeamFlos/phira-web/blob/main/src/DMCA.vue> | ✅ |
-| Phira 客户端源码（`prpr` 解析器三分：rpe/pgr/pec） | <https://github.com/TeamFlos/phira>、<https://github.com/TeamFlos/phira/tree/main/prpr/src/parse> | ✅ |
-| Phira 多人服务端库 | <https://github.com/TeamFlos/phira-mp> | ✅（元数据） |
-| phichain 工具链（`phichain-format` 仅 rpe + official） | <https://github.com/Ivan-1F/phichain> | ✅（元数据 + 目录树） |
-| PhiZone 播放器 | <https://github.com/PhiZone/player> | ✅（元数据） |
-
-### C 级（二手 / 非官方）
-
-| 标题 | URL | 备注 |
-| :-- | :-- | :-- |
-| Phira API 非官方文档（大松） | <https://www.xuziyao.com/posts/9/> | 端点清单与字段说明大体可用；**响应键 `result` 与实测 `results` 不符**，且未覆盖官方 schema 中的 `/chart/{id}/versions`、`/collection`、`type` 等 |
-| Lchzh Docs·Phigros 谱面格式说明 | <https://docs.lchzh.top/learning/phigros/> | 官谱 note `type` 映射的唯一来源（Q-7） |
-| GitHub `topic:phigros` 检索 | <https://github.com/topics/phigros> | 69 个仓库（**实测**） |
-
-### B 级（社区 wiki）
-
-沿用 [phigros-format.md §13](phigros-format.md) 的 `pgrfm.miraheze.org`（Phigros 自制谱 wiki）系列条目，本篇不重复列出。
-
-### 实测数据（本 agent 于 2026-09-26 生成）
-
-| 数据 | n | 说明 |
-| :-- | --: | :-- |
-| `GET /chart` 的 `count` 与筛选分项 | 12 次查询 | §3.1 |
-| 全量解包统计（线数 / note / type / above / eventLayers / father / 包结构） | 24 张 | §4、§5、§7 |
-| 格式扫描（Range + 部分解压嗅探） | 第一轮 200 张（193 成功）+ 第二轮 90 张 | §5.2 |
-| 逐线 note 数与 `positionX` 分布 | 10 张 / 12674 note | §7.2、§7.4 |
-| `positionX` 去重取值与量化粒度 | 3 张 / 3473 note | §7.4.1 |
-| 格式扫描第二轮（最旧端，2024 年谱面） | 90 张 | §5.2 偏差检验 |
-| 两个完整谱面包的目录清单 | 2 张（id 1000、7039） | §4.1、§5.3 |
-
-> 原始脚本与 JSONL 输出留存于本机临时目录（未入库，遵守 CLAUDE.md §3.5）；如需复现，按 §7.6 的思路重跑即可。

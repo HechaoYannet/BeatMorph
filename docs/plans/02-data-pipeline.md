@@ -1,6 +1,6 @@
 # Plan 02 — 数据流水线：Phira 谱面获取 + RPEJSON 解析 + 质检 + 特征离线提取
 
-> 状态：🔵 实施中（M1–M11 代码与默认 CI 测试已落地；逐条实施状态见 §6 里程碑表的「实施状态」列。**残留**：把流水线串起来的驱动脚本与真实拉取尚未执行） ｜ 阶段：Phase 1 ｜ 负责：数据组（data-agent）
+> 状态：🟢 **主路径已跑通真实数据**（M1–M12 全部落地；驱动脚本 `scripts/fetch_phira.py` / `scripts/extract_features.py` 已对真实 Phira 库执行全量枚举与选择性下载，产出带 provenance 的清单 + 真实 MERT 特征缓存；逐条证据见 §6 与 §9「实施期裁定」） ｜ 阶段：Phase 1 ｜ 负责：数据组（data-agent）
 > 对应代码：`beatmorph/data/`（`phira/client.py`、`phira/package.py`、`parsers/sniff.py`、`parsers/rpejson.py`、`qc.py`、`pipeline/embed.py`、**`tracks.py` / `dataset.py`**） ｜ 对应奠基章节：§4、§3.2.4、§9
 
 ## 1. 目标与范围
@@ -236,7 +236,7 @@ def dataset_stats(table: Path) -> DatasetStats:
 
 | 里程碑 | 验收（可量化、可测试） | 实施状态 |
 |--------|----------------------|---------|
-| **M1 元数据枚举** | 322 页分页全部成功；累计条数 == `count` == 9649（与实测一致，偏差必须解释）；落盘 parquet 含 `id/name/level/difficulty/charter/composer/tags/created/updated/file`；**负样本单测（mock，不发真实请求）**：把响应键改成 `result` 必须报错；`pageNum = CHART_PAGE_SIZE_MAX + 1` 必须以 HTTP 400 语义失败并给出可读错误 | ✅ 代码 + mock 单测（`test_phira_client.py`，不发真实请求）；322 页全库实跑属 e2e，未执行 |
+| **M1 元数据枚举** | 322 页分页全部成功；累计条数 == `count` == 9649（与实测一致，偏差必须解释）；落盘 parquet 含 `id/name/level/difficulty/charter/composer/tags/created/updated/file`；**负样本单测（mock，不发真实请求）**：把响应键改成 `result` 必须报错；`pageNum = CHART_PAGE_SIZE_MAX + 1` 必须以 HTTP 400 语义失败并给出可读错误 | ✅ 代码 + mock 单测；**2026-09-27 全库实跑 322 页**：`count = 9651`（基线 9649，+2 已解释为社区库仍在长），落盘 `data/processed/meta.jsonl`。分页路径本轮补上指数退避重试——实跑中第 54 / 87 / 286 页各命中一次传输超时，**没有重试时整轮枚举直接报废**（实测） |
 | **M2 微缩夹具入库** | 三个夹具（§3.7）存在且体积达标（单文件 ≤ 32 KB）；`README.md` 记录来源 chart id / 裁剪方式 / 哈希；夹具**不含音频与曲绘** | ✅ 三夹具齐备（`rpe_min.json` / `pec_masquerade.json` / `pkg_min`），单文件 ≤ 11.5 KB、目录 24.6 KB；夹具**手工构造**、`pkg_min` 由文本部件确定性打包（不提交二进制） |
 | **M3 ⚠️ 陷阱 1：后缀不可信** | `sniff_format(` 对 `pec_masquerade.json`（内容为 PEC、后缀为 `.json`）返回 `PEC`；`parse_chart_package()` 对其**拒收并记账**（`format=PEC`），**绝不**进入 RPE 解析路径；反向用例：把 RPE 内容存成 `.pec` 后缀也必须嗅探为 `RPE`；`sniff_format` 的签名不含文件名参数（签名级约束） | ✅ `test_sniff_format.py`（四种后缀×内容组合 + `inspect` 签名断言）；PBC 不产出判定（结构未查证） |
 | **M4 ⚠️ 陷阱 2：必须读 `info.yml.chart`** | 用 `pkg_min` 夹具（谱面文件**不叫** `chart.json`，且包内存在一个**更大的**干扰 json）断言：选中的是 `info.yml.chart` 指定的条目（R1/R2）；把 `info.yml.chart` 指向不存在条目 → 必须报错，**不得**回退到「取最大 json」或「取名为 chart.json 的文件」；引用实测基线：196/196 张的谱面文件都不叫 `chart.json` | ✅ `test_package_locate.py`（含 decoy `chart.json` 与更大的干扰 json；指向不存在条目必报错） |
@@ -244,10 +244,12 @@ def dataset_stats(table: Path) -> DatasetStats:
 | **M6 结构语义** | ① 跨层求和：构造两层各给一半位移的夹具，断言最终位移 == 两层之和；② 补洞：事件间存在空隙时，空隙内取值 == 前一事件终值（而不是默认值）；③ 三态归一：`null` 层 / 缺字段 / 缺整段 `eventLayers` 三种输入产出同一 IR；④ `father` 递归：子线位置 == 自身 + 父线位置，成环输入被拒；⑤ beat→秒：`beat2sec(sec2beat(x)) == x` 与反向在 1e-9 容差内，多 BPM 段用例覆盖 | ✅ `test_event_layers.py` + `test_beat_time.py`（往返 1e-9，独立复算比对） |
 | **M7 质检** | 对夹具与**本地落盘（不入库）**的样本跑 `quality_check`：schema 违约样本 100% 进隔离区；越界样本 **`out_of_visible_range > 0` 且 `position_x` 值未被修改**（逐字段比对原 JSON）；分布统计命中调研 §7 的量级（线数中位 30 / 背面 2.4–3.0% / Tap 52–63%）区间内才算通过 | ✅ `test_qc.py`（越界只统计不钳位、逐字段比对原 JSON）；语料级基线区间断言落在 `dataset_stats().corpus_outliers()`，用合成数据单测 |
 | **M8 ✅ 数据合规硬约束（已裁定，2026-08-05）** | **训练可启动**——原「`compliance_gate` 默认关闭 + 训练入口拒绝启动」的**阻塞闸门已解除**，改为执行四条硬约束：① **最终不发布模型权重**（项目级承诺，本模块不产出任何分发物）；② 谱面/音频**允许本地落盘、不得入库**（`.gitignore` 覆盖 `data/**`，仅 `tests/fixtures/**` 入库）；③ 获取与处理脚本**记录来源与用途**（`provenance` 随 manifest 落盘，可追溯到 chart id）；④ **发布权重前必须重新裁定**。验收：① 负样本测试——`data/` 下任何音频/谱面文件试图入库时被 `.gitignore` 拦截（CI 可验）；② 每份 manifest 的 `provenance` 字段非空且通过 schema 校验，缺失即报错；③ 源码级断言：不存在任何「权重发布/分发」代码路径。依据 [BasePlan §4.4](BasePlan.md)、[RFC-0029 §7-7/§8.3 Q11b](decisions/RFC-0029-phigros-continuous-chart-generation.md)、CLAUDE.md 红线 5 附注 | ✅ ①②③ 均有默认 CI 测试（`test_provenance.py`）；`data/**` 已被 `.gitignore` 覆盖（含 features / manifests / audio），`assert_local_only` 守卫对域外路径仍会拦下 |
-| **M9 特征离线提取** | 在**本地落盘（不入库，硬约束 ②）**的音频子集上：缓存文件数 == 音频数；抽样加载校验六项全过（plan 01 §3.3）；`meta.rate == MERT_FRAME_RATE_HZ`（派生量，非字面量）；篡改任一元数据字段后加载必须抛错；唯一曲目数（按音频 sha1）与同曲重复率写入 `dataset_stats` | ✅ `test_embed_features.py`（假编码器，六项校验各有负样本）；真实权重通路属 slow/e2e，未执行 |
-| **M10 配对与切分** | 同曲多谱进同一 split（用含同曲 2 张谱的样本断言）；产出 train/val/test 三份清单，**曲目集合两两不相交**；另产出一份「同曲跨谱泛化」评测集（同曲不同难度）；报告真实 (audio, chart) 对数（< 9649） | ✅ `test_pairs_split.py` + `tests/integration/test_pipeline_min.py`（同曲同 split、曲目集合两两不相交、同曲跨谱泛化集） |
+| **M9 特征离线提取** | 在**本地落盘（不入库，硬约束 ②）**的音频子集上：缓存文件数 == 音频数；抽样加载校验六项全过（plan 01 §3.3）；`meta.rate == MERT_FRAME_RATE_HZ`（派生量，非字面量）；篡改任一元数据字段后加载必须抛错；唯一曲目数（按音频 sha1）与同曲重复率写入 `dataset_stats` | ✅ `test_embed_features.py`（假编码器，六项校验各有负样本）；**2026-09-27 真实权重实跑**：24 首曲目共 48 s（RTX 5070 Laptop 8 GB / 115 W 限功耗），帧数全部满足 `T_seq == round(duration_s × 75)`（例 148.77 s → 11157 帧） |
+| **M10 配对与切分** | 同曲多谱进同一 split（用含同曲 2 张谱的样本断言）；产出 train/val/test 三份清单，**曲目集合两两不相交**；另产出一份「同曲跨谱泛化」评测集（同曲不同难度）；报告真实 (audio, chart) 对数（< 9649） | ✅ `test_pairs_split.py` + `tests/integration/test_pipeline_min.py`（同曲同 split、曲目集合两两不相交、同曲跨谱泛化集）；**2026-09-27 真实清单实跑**：语料级 `stats.json` 已产出（唯一曲目 / 同曲重复率 / 判定线分布 / 越界率，见 §9）。⚠️ 本轮修掉一个**跨模块往返 bug**：`build_pairs` 曾把**已解析**的 `chart_path` 写进清单，`ChartPairDataset` 再拼一次 chart_dir ⇒ 20/20 行判「谱面缺失」，门禁装配直接失败（回归测试已锁定该往返） |
 
 | **M11 训练数据通路** | 「谱面 + 特征缓存」→ `FieldBatch`：窗口化（每窗 `PairSample`）、`collate_field_batch` 通过 `FieldBatch.assert_shapes()`、网格身份不一致**抛错**（`GridMismatchError`）、**绝不发出 r == 1 的样本**、同 index 取两次逐位一致、窗口边界不切断 Hold、音频切片帧数由契约帧率派生 | ✅ `beatmorph/data/dataset.py` + `tracks.py`；`tests/unit/data/test_dataset.py`（27 项）+ `tests/integration/test_dataset_to_generation.py`（真实窗口 → 前向 → 反传）；主会话口径见 §9「实施期裁定」 |
+
+| **M12 驱动脚本 + 真实拉取**（本轮新增） | ① 枚举 → 预筛 → 选择性下载 → 解析 → 质检 → 清单 全链路可由**一条命令**重跑且可续跑；② 每份清单带 provenance（来源 / 查询 / 时间 / 用途 / 脚本与版本）；③ 拒收（sniff / parse / qc）与网络失败**分别记账**；④ 音频按内容 sha1 去重；⑤ 真实库实跑：格式分布 / 唯一曲目 / 同曲重复率 / 越界率 / 共格最小间距 / 同刻并发上限 | ✅ `scripts/fetch_phira.py`（`meta` / `fetch` / `pairs` / `stats` / `all`）+ `scripts/extract_features.py`；`tests/unit/scripts/`（42 项，全部离线：假 Phira 客户端用本地 zip 提供 Range 语义）；**实跑**见 §9「实施期裁定」 |
 
 > **G1–G4 门禁义务说明**：本模块**不引入训练目标或损失**，故无 G1–G4 全绿义务；它是 **G4 的数据侧落点**——帧率、单位、形状三项派生断言在 M7/M9 内以**默认 CI 契约测试**形式落地。任何消费本模块数据的新训练目标（`field/` / `generation/` 的 plan）在扩大数据规模之前必须先跑通 G1–G4（`beatmorph/infra/sanity.py`，[BasePlan §9](BasePlan.md)）。
 
@@ -321,3 +323,31 @@ def dataset_stats(table: Path) -> DatasetStats:
   补零帧是**伪造的静音特征**。由于默认 `batch_size=1`，当前不触发；但一旦要跨谱批训练，
   必须给音频 padding 一个显式掩码（改 `generation/batch.py` 的契约）。
 - **跨谱 batching**：与 plan 07 §9-13 同一问题（按网格分组采样 vs per-sample 网格）。
+
+### 实施期裁定（主会话，2026-09-27 第二轮：真实数据全库拉取）
+
+**M12 驱动脚本 + 全库实跑已完成**（`scripts/fetch_phira.py` / `scripts/extract_features.py`）。全库口径：
+
+| 项 | 实测 |
+|----|------|
+| 枚举 | 9651 张（`meta.jsonl`；基线 9649，+2 解释为社区库仍在长） |
+| 入库 | **8551** 张 RPE（`charts.jsonl`，带 provenance） |
+| 拒收 | **1099**：`sniff` 886（PEC **872** / 官谱 14）、`parse` 191、`qc` 22（`quarantine.jsonl` 逐条留痕） |
+| 未解 | 1 张（网络失败，可重跑） |
+| 体量 | 谱面 34.5 GB + 音频 42.8 GB = **77 GB**（与调研「全量直抓 ≈76 GB」吻合） |
+| 唯一曲目 | **6807**（同曲重复率 **20.4%**）⇒ 真实 (audio, chart) 对的数量级 |
+| 唯一音频 | **8084**（按内容 sha1；音频层重复率 5.5%） |
+| 判定线 | 中位 **25**（P25 24 / P75 42，范围 1–770）；note 计 11 077 712 |
+| 分布 | Tap 55.7% / 背面 3.11%（调研基线 2.4–3.0%，`corpus_outliers` 标为轻微离群）/ 越界 0.13% |
+
+**四条与调研基线冲突的实测（都已落成代码或待办）**
+
+1. **PEC 占 9.0%**（872/9651），远高于调研的 2.5%（§9-Q1 得到答案）——原因是抽样偏近期；且旧谱面的 PEC 语法族更宽（`&` / `cf` / `cr`），调研样例的 10 个命令不足以判型（`sniff.py` 已扩表）。
+2. **`info.yml` 文本字段是 `null` 或标量**（`tip` / `level` / `charter` / `composer`）——裸 `str` 声明会把整张谱面判成「结构错误」（首批 20 张里 10 张；修完 `null` 后全库还剩 5 张是数字/布尔，也已归一）。
+3. **`build_pairs` 的 `chart_path` 往返 bug**：写回已解析路径 ⇒ `ChartPairDataset` 再拼一次 chart_dir ⇒ 全部行判「谱面缺失」。**这是「契约写了相对路径、实现写了绝对路径」的典型静默失效**，已加回归测试。
+4. **`max_simultaneous_onsets = 12012`** 与 **`min_same_line_same_time_gap_x = 0.0`**：两者都是 §9-Q16 / §9-5 的输入，但这两个数值**先要复核口径**（0.0 间距与 1.2 万同刻事件更可能是统计口径/异常谱面问题，而不是真实创作习惯）。
+
+**待办（不阻塞，但都指向「先统计再定阈值」）**
+
+- §9-Q1（格式占比）✅ 已有全库数字；§9-Q3（唯一曲目/重复率）✅ 已有；
+- §9-Q16（同刻跨线并发上限）与「共格碰撞率 → `RPE_X_GRID_BINS`」：**先复核那两个离群值**，再回填。

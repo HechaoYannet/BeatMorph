@@ -147,37 +147,39 @@ uv run python scripts/verify_mert_frame_rate.py --model-dir models/pretrained/m-
 
 ---
 
-## 3. 数据获取：Phira API ⬜（脚本待建）
+## 3. 数据获取：Phira API ✅（`scripts/fetch_phira.py`）
 
-> ⚠️ **当前 `scripts/` 下只有 `download_sayobot.py`（v2.x，已退役）与 `verify_mert_frame_rate.py`（§1.5 仍有效）**——
-> **Phira 获取脚本尚不存在**。本节给的是**必须实现的行为规范**，不是可复制粘贴的命令。
-> 实现依据：[survey](knowledges/phira-dataset-survey.md) §7.6 / §9。
+驱动脚本已落地（2026-09-27）。三段式：**枚举** → **预筛**（HTTP Range 取中央目录 + 24 KB 前缀嗅探）
+→ **选择性下载**（只取 `info.yml` 指名的谱面条目与音频条目）。数据落 `data/processed/**`
+（`.gitignore` 全量忽略，**不入库**），每份清单都带 `provenance`（M8 硬约束③，逐张可追溯到 chart id）。
 
-### 3.1 元数据枚举（322 页）
+```powershell
+uv run python scripts/fetch_phira.py meta                      # 322 页全量枚举 → meta.jsonl
+uv run python scripts/fetch_phira.py fetch --limit 1000 --sample-seed 20260927 --workers 8
+uv run python scripts/fetch_phira.py pairs                     # 按曲目切分 → pairs.json
+uv run python scripts/fetch_phira.py stats                     # 语料统计 → stats.json
+```
 
-- 入口：`GET https://api.phira.cn/chart`；**响应键是 `results`**（不是 C 级文档写的 `result`）。
-- **`pageNum` 上限 30**（31 → HTTP 400）；`page` 从 1 到 **322**，末页 19 条 → 总数 **9649**。
-- **没有按定数（`difficulty`）过滤的参数**，分层只能本地做；`level` 是自由文本，**只能用 `difficulty`（f32）做数值分层**（且比较前 round 到 0.1）。
-- 每次请求之间加 sleep（0.3–1 s；未观测到限流，但**是否有限流未查证**）。
-- 落盘字段：`id, name, level, difficulty, charter, composer, tags, created, updated, chartUpdated, file, preview, illustration`。
-- **"上架/ranked"与"全部"必须显式决策**：`stable=true` 仅 627 张、`type=2`（unstable）9022 张 → 建议全用（`type=3`）但把 `stable/ranked` 作为**元数据特征**保留，便于做"只在高质子集上训练"的消融。
+产出：`meta.jsonl / charts.jsonl / quarantine.jsonl / pairs.json / stats.json / fetch_report.json`
+以及 `charts/<chart_id>/<normalized>`、`audio/<sha1>.<ext>`、`features/<sha1>.npz`。
 
-### 3.2 全库预筛（**必须先做，省约 90% 带宽**）
+**实测（2026-09-27，本机）**
 
-- 谱面包 CDN **支持 HTTP Range**（`Range: bytes=0-1023` → `206`）；全量直抓约 **76 GB**（推断）。
-- 流程：① `HEAD`/`Range: bytes=0-0` 取总长 → ② 抓 zip **尾部 ~200 KB** 定位 EOCD（`PK\x05\x06`）读**中央目录** → ③ 读 `info.yml` 条目拿 `chart`（谱面文件名）与 `music`（音频名）→ ④ **只 `Range` 取谱面条目前 24 KB 压缩字节**做格式嗅探。
-- **格式嗅探启发式**（实测有效但非权威）：出现 `"eventLayers"` → **RPE**；出现 `"notesAbove"`/`"notesBelow"`/`"formatVersion"` → **官谱 JSON**；文本且符合 PEC 行结构 → **PEC**；其余（PBC 等）**直接拒收并记账**。
-- 产出直方图（格式 / 大小 / 是否有音频 / 判定线数量）**再决定下载策略**。
-- 实测吞吐参考：单线程 ~30 s/张 → 8 线程 ~1.8 s/张；**务必自行限速**。
+- 枚举 `count = 9651`（调研基线 9649，+2——社区库仍在长：偏差写进交接件而不是当噪声）；
+- 单张谱面包约 10 次 Range 往返（取长 / 尾部 / 中央目录 / `info.yml` / 谱面前缀 / 谱面条目 / 音频分块）；
+- **8 并发 + 4 MB 分块 ≈ 20 MB/s**（约 8 GB / 6.5 min），0 网络失败；
+- 拒收按 `sniff` / `parse` / `qc` 三类分别记账，**未入库的行留在 `quarantine.jsonl` 可追溯**。
 
-### 3.3 选择性下载
+### 3.1 四条硬规则（脚本已内置；改脚本时必须保留）
 
-- ⚠️ **必须按 `info.yml.chart` 定位谱面文件**，**不要"取最大的 .json"**（实测有包内 `.json` 解压总量 294 MB，而谱面文件只有 3.25 MB）。
-- ⚠️ **必须按 `info.yml.music` 定位音频**（音频文件名无规律），并按 **sha1 去重**（同曲多谱共享一份音频）。
-- ⚠️ **必须重试**：200 张扫描中 7 张（3.5%）出现超时/连接重置 → 指数退避 + Range 断点续传。
-- ⚠️ **落盘不要用原始文件名**（实测含全角字符），用 `<chart_id>/<chartfile>`；音频与谱面**分目录存放**，便于"只训结构 / 联合训练"切换。
+| # | 规则 | 反面教材（实测） |
+|---|------|-----------------|
+| R1 | **不得**「取最大的 json」 | id 45756：包内 json 解压总量 294 MB，谱面文件仅 3.25 MB |
+| R2 | **不得**依赖默认名 `chart.json` | 196/196 张的谱面文件都不叫这个名字 |
+| R3 | **不得**依赖 `info.yml.format` | 实测恒为 null ⇒ 只能按内容嗅探 |
+| R4 | 落盘**不得**沿用原始文件名（含全角字符） | 形如 `＃53682.json` ⇒ 规范化为 `<chart_id>/<normalized>` |
 
-### 3.4 三类静默陷阱（**错了不会报错，只会静默错位**）
+### 3.2 三类静默陷阱（**错了不会报错，只会静默错位**）
 
 | # | 陷阱 | 证据 |
 |---|------|------|
@@ -185,12 +187,38 @@ uv run python scripts/verify_mert_frame_rate.py --model-dir models/pretrained/m-
 | 2 | **`info.yml.format` 实测恒为 `null`**，且 196/196 张的谱面文件都**不叫** `chart.json` → 必须按**内容**判型 + 读 `info.yml.chart` 定位 | [survey](knowledges/phira-dataset-survey.md) §4.2/§5.3 |
 | 3 | **note `type` 数字在两套格式中含义不同**（RPE 1 Tap/2 Hold/3 Flick/4 Drag；官谱 2 Drag/3 Hold/4 Flick）→ 混用会**静默全员错位** | [phigros-format.md](knowledges/phigros-format.md) §5.2 |
 
+### 3.3 真实数据暴露的四个坑（2026-09-27，全部已修 + 已加回归测试）
+
+| 坑 | 现象 | 处置 |
+|----|------|------|
+| **`info.yml` 文本字段实测是 `null`** | `tip: null` / `level: null` 极常见 ⇒ 裸 `str` 声明让 pydantic 拒收整个 `info.yml`：首批 20 张里 **10 张**被误判为「包结构错误」 | `ChartInfo` 加 `mode="before"` 校验：文本字段 null → 空串（`format` 除外——它恒为 null 且只记录） |
+| **PEC 语法族比调研样例大** | 旧谱面的 PEC 还有 `&` / `cf` / `cr` 三种符号命令（未识别行首频次 80198 / 49280 / 41644）⇒ 全被记成 `unknown`，污染格式占比统计 | `PEC_COMMANDS` 扩表（判错只影响标签：v1 本就拒收 PEC） |
+| **`build_pairs` 把已解析路径写进清单** | `chart_path` 变成 `data/processed/charts/...`，`ChartPairDataset` 再拼一次 chart_dir ⇒ 20/20 行判「谱面缺失」，门禁装配直接失败 | 清单里保持**相对 chart_dir**；回归测试锁定 `build_pairs → load_pairs → 解析` 往返 |
+| **token 扩张会拆散长 Hold 的配对** | Hold 起止落在不同 `(k, tau)` token；同 token 里另一个事件被选中时扩张只遮一端 ⇒ 数据集在 index=12 抛「hold 配对点被拆散」 | `close_hold_pairs`：扩张后按 token 收口（仅契约路径 `granularity="event"`） |
+
+### 3.4 提速与排障（实测）
+
+- **必须强制 IPv4**：`phira.5wyxi.com` 只有 A 记录（IPv4），而 httpx/httpcore 会**串行**尝试
+  getaddrinfo 的每个地址；本机 IPv6 路由黑洞 ⇒ 每次连接先等满 connect 超时
+  （实测 ConnectTimeout / ConnectError / 11.3 s 才拿到 2 MB，整体退化到 ~0.2 MB/s）。
+  `build_http_client()` 用 `local_address="0.0.0.0"` 强制 IPv4 后同一 URL **0.10–0.27 s / 2 MB**。
+- **代理只给 PyPI，不给 CDN**：本机 PyPI 直连 ~59 KB/s、走代理 ~3.3 MB/s；
+  Phira CDN 反过来（直连 2.8–11 MB/s；代理 0–2.8 MB/s，三次里两次直接失败）。
+- **失败分级**：传输失败退避重试（`--max-retries`；4xx 不重试）；连续 `--max-failures` 张失败即中止；
+  `--workers` 上限 **8**（plan 02 §4 的限速纪律）。
+- **可续跑**：已入库 + 已拒收的 chart_id 都会跳过（`--retry-quarantined` 可强制重试）。
+
+### 3.5 尚未查证
+
+- **限流**：未观测到 `X-RateLimit-*` 或 `Retry-After`，但「未观测到」不等于「没有」（plan 02 §9-Q2）。
+- **PBC 的准入**：结构完全未查证 ⇒ 一律归 `UNKNOWN` 并记账（plan 02 §偏离 2）。
+
 ---
 
-## 4. RPEJSON 解析 → Chart IR ⬜（`io/formats/rpejson/` 待建）
+## 4. RPEJSON 解析 → Chart IR ✅（`beatmorph/data/parsers/rpejson.py`，独立实现）
 
 > 目标模块 `beatmorph/io/formats/rpejson/` **当前不存在**（`io/formats/` 下只有 `base.py`/`osu.py`/`sm.py`）。
-> **实现纪律**：只读 prpr / phichain 的**行为规范**，**独立实现**，不逐行移植（GPL-3.0 / LGPL-3.0 风险，RFC-0029 §4.2）。
+
 
 ### 4.1 解析必须处理的语义
 
@@ -220,31 +248,33 @@ uv run python scripts/verify_mert_frame_rate.py --model-dir models/pretrained/m-
 
 ---
 
-## 5. MERT 特征离线提取 🟡
-
-**目标口径**（RFC-0029 §6 第 2 条 / §7 硬约束 2）：
-
-- 帧率 **75 Hz**，由模型 config **派生并断言**（`MERTAdapter.output_frame_rate()`，不可读时回落契约常量并**告警**）；
-- 缓存**必须带元数据** `{rate, sample_rate, layer, model_rev, duration_s}` 并在**加载时校验**；
-- 音频统一重采样到 **24000 Hz**，并在元数据里记录**原始**采样率与时长；
-- 长音频按 **5 s 窗 / 1 s 重叠**滑窗，重叠区**按帧率对齐**平均。
-
-**当前状态**：`beatmorph/data/pipeline/embed.py` 的 `extract_mert_embeddings` **存在但仍是 .osu 版**（按 `.osu` 父目录解析谱面对音频），需迁移为"按 `info.yml.music` 定位 + 按 sha1 去重"。
+## 5. MERT 特征离线提取 ✅（`scripts/extract_features.py`）
 
 ```powershell
-# 现状调用形态（v2.x 输入；迁移后输入将改为 Phira 谱面包，接口形态待 v3.0 plan 定稿）
-uv run python -c "
-from pathlib import Path
-from beatmorph.data.pipeline.embed import PreprocessPipeline
-PreprocessPipeline(Path('data/raw'), Path('data/processed')).extract_mert_embeddings(Path('data/raw'))
-"
+uv run python scripts/extract_features.py --dry-run      # 只报账（不加载权重、不写缓存）
+uv run python scripts/extract_features.py --limit 24     # 冒烟
+uv run python scripts/extract_features.py                # 全量（可续跑：已有缓存跳过）
 ```
 
-> 提取后**先做形状/帧率抽检**（`T_seq ≈ duration_s × 75`），再进入 §6。若跳过本步，下游数据集会把缺少特征的样本 skip 并计数入日志。
+- 音频由清单的 `audio_path` 定位（**内容 sha1** 命名）；**缓存键 = 音频内容 sha1**
+  ⇒ 「同曲多谱只抽一次」是结构性的，不靠调用方记得去重。
+- 提取前**重算 sha1 并与清单记录比对**，不一致即拒抽并记账（缓存挂到错音频上是静默故障）。
+- 编码器默认 `adapter=none`（离线冻结直出）、`layer=12`、FP16，本地权重目录
+  `models/pretrained/m-a-p/MERT-v1-330M` 优先（缺失才回落 HF id）。
+- 缓存元数据六项校验（rate / sample_rate / layer / model_rev / duration→帧数 / dtype / adapter），
+  其中 `rate` 必须 == `MERT_FRAME_RATE_HZ = 75`（派生量，红线 7）。
+- **实测（2026-09-27，RTX 5070 Laptop 8 GB / 115 W 限功耗）**：24 首 1.7–3.3 分钟曲目共 **48 s**
+  （≈2 s/首，含首次权重加载 ~10 s）；帧数全部满足 `T_seq == round(duration_s × 75)`
+  （例：148.77 s → 11157 帧）。
+- 报告落 `data/processed/features_report.json`（含 provenance、失败清单与 dry-run 计数）。
+
+> 下游：`pairs.json` 只收**特征齐备**的行（`build_pairs(require_feature=True)`），
+> 因此**全量抽完特征后必须重跑** `scripts/fetch_phira.py pairs`，否则训练清单只有冒烟子集。
 
 ---
 
-## 6. 强度场构建（`field/`）⬜（待建）
+
+## 6. 强度场构建（`field/`）✅（网格 / 目标 / 双积分路径 / 泊松 NLL / 碰撞 / 可视化）
 
 | 要点 | 规则 | 出处 |
 |------|------|------|

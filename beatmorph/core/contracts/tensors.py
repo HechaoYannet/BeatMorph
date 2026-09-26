@@ -1,114 +1,43 @@
-"""张量级数据契约 — 模块间的「中间表征」张量形状约定。
+"""张量级数据契约 —— 音频侧的跨模块常量与形状约定。
 
-为避免各模块对张量维度理解不一致，这里集中定义所有跨模块张量的
-契约形状与语义。所有形状以 einops 风格字符串描述。
+Plan 00 之后，本轮范式的物理常量分两处，且**都只允许派生、不允许硬编码**
+（CLAUDE.md 红线 7）：
+
+- **音频帧轴**：本文件（MERT-v1-330M 的采样率与卷积步长累乘）；
+- **谱面 / 场网格**：beatmorph.core.contracts.phigros 与
+  beatmorph.core.contracts.field。
+
+帧率是**派生量**，不是可自由设定的超参：改采样率或主干必须同步改这两个基数。
+来历见 docs/POSTMORTEM-2026-08-05-frame-rate-misalignment.md。
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-# ══════════════════════════════════════════════════════════════
-# 模块间约定的关键常量（统一定义在文件顶部，供下方 dataclass 默认值引用）
-# ══════════════════════════════════════════════════════════════
-
 # ── MERT-v1-330M 音频侧常量 ──
 # 来源：ModelScope/HF 官方仓 config.json + preprocessor_config.json
 #   conv_kernel = [10, 3, 3, 3, 3, 2, 2]
-#   conv_stride = [ 5, 2, 2, 2, 2, 2, 2]  → 累乘 320
-# 帧率是**派生量**，不是可自由设定的超参：改采样率/主干必须同步改这两个基数。
-# 详见 docs/POSTMORTEM-2026-08-05-frame-rate-misalignment.md
+#   conv_stride = [ 5, 2, 2, 2, 2, 2, 2]  -> 累乘 320
 MERT_SAMPLE_RATE_HZ: int = 24000  # MERT 特征提取器要求 24kHz 单声道
 MERT_CONV_STRIDE_PRODUCT: int = 320  # prod(conv_stride)
-MERT_FRAME_RATE_HZ: float = MERT_SAMPLE_RATE_HZ / MERT_CONV_STRIDE_PRODUCT  # 75.0
+MERT_FRAME_RATE_HZ: float = MERT_SAMPLE_RATE_HZ / MERT_CONV_STRIDE_PRODUCT
 MERT_DEFAULT_FEAT_DIM: int = 1024  # MERT-v1-330M hidden_size（所有层均为 1024）
 
-# ── 以下 VQ 码本常量为 RFC-0028 legacy：仅 archive/vqvae-baseline 分支沿用 ──
-CODEBOOK_BASE: int = 2048  # §3.2 基础码本（VQ-VAE, 已退役 baseline）
-CODEBOOK_FINE: int = 4096  # §3.2 精细码本（VQ-VAE, 已退役 baseline）
 
-DEFAULT_LANE_COUNT: int = 4  # §1.1 先攻 4K
-
-# ── RFC-0028 BPE/event tokenizer 常量（主路径）──
-BPE_DEFAULT_VOCAB: int = 4096  # §3.2.1 BPE 词表默认大小
-BPE_VOCAB_POC_SWEEP: tuple[int, ...] = (2048, 4096, 8192)  # PoC 词表扫参
-POS_DIVISIONS_PER_BEAT: int = 48  # §3.2.2 Position 子拍网格 1/48 拍
-NUDGE_BUCKETS: int = 12  # §3.2.2 残差毫秒桶数（PoC 不达标可升 16）
-AR_CONTEXT_TOKENS: int = 1024  # §3.4.1 ~1024 event 分段（原 256 小节）
-
-
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class AudioEmbedding:
-    """Stage0 音频编码器输出。
+    """Stage 0 音频编码器输出。
 
-    einops: `(batch, time_seq, feat)`
+    einops: (batch, time_seq, feat)
 
     Attributes:
-        feat: 特征维。MERT-v1-330M 各层均为 :data:`MERT_DEFAULT_FEAT_DIM`（1024）；
-            奠基 §3.1 原写「第12层 768 / 第24层 1024」系与 MERT-v1-95M 混淆，
-            经 TRAINING_LOG Bug5 实测纠正。
-        time_seq: 帧序列长度 = `round(duration_s * hop_rate)`。
-        hop_rate: 帧率 Hz，= :data:`MERT_SAMPLE_RATE_HZ` /
-            :data:`MERT_CONV_STRIDE_PRODUCT` = 75.0（**派生量**，勿硬编码）。
+        feat: 特征维，MERT-v1-330M 各层均为 MERT_DEFAULT_FEAT_DIM（1024）。
+        time_seq: 帧序列长度 = round(duration_s * hop_rate)。
+        hop_rate: 帧率 Hz，= MERT_SAMPLE_RATE_HZ / MERT_CONV_STRIDE_PRODUCT
+            （**派生量**，勿硬编码）。
     """
 
     feat: int = MERT_DEFAULT_FEAT_DIM
     time_seq: int = 0  # 运行期确定
     hop_rate: float = MERT_FRAME_RATE_HZ
-
-
-@dataclass(frozen=True)
-class PlanOutput:
-    """Stage1 全局规划层输出。
-
-    - density_target: `(batch, num_sections)` 0-1
-    - energy_level: `(batch, num_sections)` 0-1
-    - rest_probability: `(batch, num_sections)` 0-1
-    基金会文档 §3.3：每 4 小节一个 Section。
-    """
-
-    num_sections: int = 0
-    section_bars: int = 4
-
-
-@dataclass(frozen=True)
-class TokenSeq:
-    """Stage2 Pattern Token 序列（**legacy / baseline 分支**，RFC-0028）。
-
-    einops: `(batch, seq_len)` 的 long 张量，取值范围 `[0, codebook_size)`。
-    每个元素是一小节的离散 Pattern ID。原 VQ-VAE 范式产物；主路径改用
-    :class:`EventSeq`，本类型仅由 `archive/vqvae-baseline` 分支沿用。
-    """
-
-    seq_len: int = 0
-    codebook_size: int = 2048  # 2048 基础 / 4096 精细
-
-
-@dataclass(frozen=True)
-class EventSeq:
-    """Stage2 event token 序列（RFC-0028，主路径）。
-
-    einops: `(batch, seq_len)` 的 long 张量，取值范围 `[0, vocab_size)`。
-    每个元素是一个 BPE event id（原子或复合）。`seq_len` 单位是 event 而非小节
-    （~4700 原子 event/曲 → BPE 合并后 ~2000-2500）。
-
-    Attributes:
-        seq_len: 序列长度（event 数）。
-        vocab_size: BPE 词表大小（默认 :data:`BPE_DEFAULT_VOCAB`=4096）。
-    """
-
-    seq_len: int = 0
-    vocab_size: int = 4096
-
-
-@dataclass(frozen=True)
-class RAGContext:
-    """RAG 检索上下文（奠基文档 §3.5）。
-
-    - token_prefix: `(batch, top_k, ref_seq_len)` 检索到的参考谱面 Token
-    - style_emb: `(batch, top_k, feat)` 检索谱面风格向量
-    """
-
-    top_k: int = 3
-    ref_seq_len: int = 256
-    feat: int = 768

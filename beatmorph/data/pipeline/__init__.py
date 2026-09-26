@@ -1,4 +1,65 @@
-"""BeatMorph package: beatmorph/data/pipeline.
+"""数据流水线：特征离线提取（M9）+ 配对切分（M10）。
 
-Auto-generated placeholder. See docs/CODE_STRUCTURE.md.
+全部实现位于 :mod:`beatmorph.data.pipeline.embed`，本包只做再导出。
+默认 CI 用假编码器与假数据，**不下载权重、不需要 GPU、不发网络请求**。
 """
+
+from beatmorph.data.pipeline.embed import (
+    CACHE_META_KEYS,
+    FEATURE_CACHE_META_KEYS,
+    FRAME_TOLERANCE,
+    MANIFEST_SUFFIX,
+    MIN_CHARTS_FOR_CORPUS_CHECK,
+    SPLIT_NAMES,
+    SURVEY_BACK_FRACTION_RANGE,
+    SURVEY_LINES_MEDIAN_RANGE,
+    SURVEY_TAP_FRACTION_RANGE,
+    AudioLoader,
+    DatasetStats,
+    FeatureArray,
+    FeatureCacheMeta,
+    FeatureCacheMismatchError,
+    FeatureEncoder,
+    GeneralizationPair,
+    PairRow,
+    PairSplits,
+    Resampler,
+    SplitError,
+    audio_cache_key,
+    build_pairs,
+    chart_row,
+    dataset_stats,
+    extract_features,
+    feature_cache_paths,
+    load_feature_cache,
+)
+
+__all__ = [
+    "CACHE_META_KEYS",
+    "FEATURE_CACHE_META_KEYS",
+    "FRAME_TOLERANCE",
+    "MANIFEST_SUFFIX",
+    "MIN_CHARTS_FOR_CORPUS_CHECK",
+    "SPLIT_NAMES",
+    "SURVEY_BACK_FRACTION_RANGE",
+    "SURVEY_LINES_MEDIAN_RANGE",
+    "SURVEY_TAP_FRACTION_RANGE",
+    "AudioLoader",
+    "DatasetStats",
+    "FeatureArray",
+    "FeatureCacheMeta",
+    "FeatureCacheMismatchError",
+    "FeatureEncoder",
+    "GeneralizationPair",
+    "PairRow",
+    "PairSplits",
+    "Resampler",
+    "SplitError",
+    "audio_cache_key",
+    "build_pairs",
+    "chart_row",
+    "dataset_stats",
+    "extract_features",
+    "feature_cache_paths",
+    "load_feature_cache",
+]

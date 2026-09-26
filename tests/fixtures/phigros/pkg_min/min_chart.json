@@ -1,0 +1,47 @@
+{
+  "BPMList": [
+    { "bpm": 120.0, "startTime": [0, 0, 1] }
+  ],
+  "META": {
+    "RPEVersion": 150,
+    "background": "bg.png",
+    "charter": "fixture-charter",
+    "composer": "fixture-composer",
+    "level": "FIX Lv.1",
+    "name": "fixture-pkg-min",
+    "offset": 0,
+    "song": "min.ogg"
+  },
+  "chartTime": 4.0,
+  "judgeLineList": [
+    {
+      "Name": "pkg-line",
+      "isCover": 1,
+      "numOfNotes": 2,
+      "eventLayers": [
+        {
+          "moveXEvents": [
+            { "startTime": [0, 0, 1], "endTime": [2, 0, 1], "start": 0, "end": 90,
+              "easingType": 1, "bezier": 0, "bezierPoints": [0.0, 0.0, 0.0, 0.0],
+              "easingLeft": 0.0, "easingRight": 1.0, "linkgroup": 0 }
+          ]
+        },
+        {
+          "moveXEvents": [
+            { "startTime": [0, 0, 1], "endTime": [2, 0, 1], "start": 0, "end": 10,
+              "easingType": 1, "bezier": 0, "bezierPoints": [0.0, 0.0, 0.0, 0.0],
+              "easingLeft": 0.0, "easingRight": 1.0, "linkgroup": 0 }
+          ]
+        }
+      ],
+      "notes": [
+        { "type": 1, "startTime": [0, 0, 1], "endTime": [0, 0, 1], "positionX": 0.0,
+          "above": 1, "isFake": 0, "size": 1.0, "speed": 1.0, "alpha": 255,
+          "visibleTime": 999999.0, "yOffset": 0.0 },
+        { "type": 2, "startTime": [1, 0, 1], "endTime": [2, 0, 1], "positionX": 150.0,
+          "above": 1, "isFake": 0, "size": 1.0, "speed": 1.0, "alpha": 255,
+          "visibleTime": 999999.0, "yOffset": 0.0 }
+      ]
+    }
+  ]
+}

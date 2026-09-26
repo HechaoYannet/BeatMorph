@@ -1,0 +1,17 @@
+name: fixture-pkg-min
+difficulty: 1.0
+level: FIX Lv.1
+charter: fixture-charter
+composer: fixture-composer
+illustrator: fixture-illustrator
+chart: min_chart.json
+format: null
+music: min.ogg
+illustration: min.png
+previewStart: 0.0
+previewEnd: 1.0
+aspectRatio: 1.5
+offset: 0.0
+lineLength: 6.0
+tags: [fixture, minimal]
+intro: 手工构造的最小谱面包夹具（不含音频与曲绘）

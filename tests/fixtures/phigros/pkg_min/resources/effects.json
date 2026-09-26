@@ -1,0 +1,362 @@
+[
+  {
+    "effectId": "fx-000",
+    "kind": "particle",
+    "texture": "resources/fx_0.png",
+    "blendMode": "add",
+    "lifetimeMs": 250,
+    "particleCount": 16,
+    "note": "手工构造的干扰 json：解压体积大于谱面文件，用于验证「不得取最大的 json」"
+  },
+  {
+    "effectId": "fx-001",
+    "kind": "shader",
+    "texture": "resources/fx_1.png",
+    "blendMode": "normal",
+    "lifetimeMs": 255,
+    "particleCount": 17,
+    "note": "手工构造的干扰 json：解压体积大于谱面文件，用于验证「不得取最大的 json」"
+  },
+  {
+    "effectId": "fx-002",
+    "kind": "sprite",
+    "texture": "resources/fx_2.png",
+    "blendMode": "add",
+    "lifetimeMs": 260,
+    "particleCount": 18,
+    "note": "手工构造的干扰 json：解压体积大于谱面文件，用于验证「不得取最大的 json」"
+  },
+  {
+    "effectId": "fx-003",
+    "kind": "particle",
+    "texture": "resources/fx_3.png",
+    "blendMode": "normal",
+    "lifetimeMs": 265,
+    "particleCount": 19,
+    "note": "手工构造的干扰 json：解压体积大于谱面文件，用于验证「不得取最大的 json」"
+  },
+  {
+    "effectId": "fx-004",
+    "kind": "shader",
+    "texture": "resources/fx_4.png",
+    "blendMode": "add",
+    "lifetimeMs": 270,
+    "particleCount": 20,
+    "note": "手工构造的干扰 json：解压体积大于谱面文件，用于验证「不得取最大的 json」"
+  },
+  {
+    "effectId": "fx-005",
+    "kind": "sprite",
+    "texture": "resources/fx_5.png",
+    "blendMode": "normal",
+    "lifetimeMs": 275,
+    "particleCount": 21,
+    "note": "手工构造的干扰 json：解压体积大于谱面文件，用于验证「不得取最大的 json」"
+  },
+  {
+    "effectId": "fx-006",
+    "kind": "particle",
+    "texture": "resources/fx_6.png",
+    "blendMode": "add",
+    "lifetimeMs": 280,
+    "particleCount": 22,
+    "note": "手工构造的干扰 json：解压体积大于谱面文件，用于验证「不得取最大的 json」"
+  },
+  {
+    "effectId": "fx-007",
+    "kind": "shader",
+    "texture": "resources/fx_7.png",
+    "blendMode": "normal",
+    "lifetimeMs": 285,
+    "particleCount": 23,
+    "note": "手工构造的干扰 json：解压体积大于谱面文件，用于验证「不得取最大的 json」"
+  },
+  {
+    "effectId": "fx-008",
+    "kind": "sprite",
+    "texture": "resources/fx_8.png",
+    "blendMode": "add",
+    "lifetimeMs": 290,
+    "particleCount": 24,
+    "note": "手工构造的干扰 json：解压体积大于谱面文件，用于验证「不得取最大的 json」"
+  },
+  {
+    "effectId": "fx-009",
+    "kind": "particle",
+    "texture": "resources/fx_9.png",
+    "blendMode": "normal",
+    "lifetimeMs": 295,
+    "particleCount": 25,
+    "note": "手工构造的干扰 json：解压体积大于谱面文件，用于验证「不得取最大的 json」"
+  },
+  {
+    "effectId": "fx-010",
+    "kind": "shader",
+    "texture": "resources/fx_10.png",
+    "blendMode": "add",
+    "lifetimeMs": 300,
+    "particleCount": 26,
+    "note": "手工构造的干扰 json：解压体积大于谱面文件，用于验证「不得取最大的 json」"
+  },
+  {
+    "effectId": "fx-011",
+    "kind": "sprite",
+    "texture": "resources/fx_11.png",
+    "blendMode": "normal",
+    "lifetimeMs": 305,
+    "particleCount": 27,
+    "note": "手工构造的干扰 json：解压体积大于谱面文件，用于验证「不得取最大的 json」"
+  },
+  {
+    "effectId": "fx-012",
+    "kind": "particle",
+    "texture": "resources/fx_12.png",
+    "blendMode": "add",
+    "lifetimeMs": 310,
+    "particleCount": 28,
+    "note": "手工构造的干扰 json：解压体积大于谱面文件，用于验证「不得取最大的 json」"
+  },
+  {
+    "effectId": "fx-013",
+    "kind": "shader",
+    "texture": "resources/fx_13.png",
+    "blendMode": "normal",
+    "lifetimeMs": 315,
+    "particleCount": 29,
+    "note": "手工构造的干扰 json：解压体积大于谱面文件，用于验证「不得取最大的 json」"
+  },
+  {
+    "effectId": "fx-014",
+    "kind": "sprite",
+    "texture": "resources/fx_14.png",
+    "blendMode": "add",
+    "lifetimeMs": 320,
+    "particleCount": 30,
+    "note": "手工构造的干扰 json：解压体积大于谱面文件，用于验证「不得取最大的 json」"
+  },
+  {
+    "effectId": "fx-015",
+    "kind": "particle",
+    "texture": "resources/fx_15.png",
+    "blendMode": "normal",
+    "lifetimeMs": 325,
+    "particleCount": 31,
+    "note": "手工构造的干扰 json：解压体积大于谱面文件，用于验证「不得取最大的 json」"
+  },
+  {
+    "effectId": "fx-016",
+    "kind": "shader",
+    "texture": "resources/fx_16.png",
+    "blendMode": "add",
+    "lifetimeMs": 330,
+    "particleCount": 32,
+    "note": "手工构造的干扰 json：解压体积大于谱面文件，用于验证「不得取最大的 json」"
+  },
+  {
+    "effectId": "fx-017",
+    "kind": "sprite",
+    "texture": "resources/fx_17.png",
+    "blendMode": "normal",
+    "lifetimeMs": 335,
+    "particleCount": 33,
+    "note": "手工构造的干扰 json：解压体积大于谱面文件，用于验证「不得取最大的 json」"
+  },
+  {
+    "effectId": "fx-018",
+    "kind": "particle",
+    "texture": "resources/fx_18.png",
+    "blendMode": "add",
+    "lifetimeMs": 340,
+    "particleCount": 34,
+    "note": "手工构造的干扰 json：解压体积大于谱面文件，用于验证「不得取最大的 json」"
+  },
+  {
+    "effectId": "fx-019",
+    "kind": "shader",
+    "texture": "resources/fx_19.png",
+    "blendMode": "normal",
+    "lifetimeMs": 345,
+    "particleCount": 35,
+    "note": "手工构造的干扰 json：解压体积大于谱面文件，用于验证「不得取最大的 json」"
+  },
+  {
+    "effectId": "fx-020",
+    "kind": "sprite",
+    "texture": "resources/fx_20.png",
+    "blendMode": "add",
+    "lifetimeMs": 350,
+    "particleCount": 36,
+    "note": "手工构造的干扰 json：解压体积大于谱面文件，用于验证「不得取最大的 json」"
+  },
+  {
+    "effectId": "fx-021",
+    "kind": "particle",
+    "texture": "resources/fx_21.png",
+    "blendMode": "normal",
+    "lifetimeMs": 355,
+    "particleCount": 37,
+    "note": "手工构造的干扰 json：解压体积大于谱面文件，用于验证「不得取最大的 json」"
+  },
+  {
+    "effectId": "fx-022",
+    "kind": "shader",
+    "texture": "resources/fx_22.png",
+    "blendMode": "add",
+    "lifetimeMs": 360,
+    "particleCount": 38,
+    "note": "手工构造的干扰 json：解压体积大于谱面文件，用于验证「不得取最大的 json」"
+  },
+  {
+    "effectId": "fx-023",
+    "kind": "sprite",
+    "texture": "resources/fx_23.png",
+    "blendMode": "normal",
+    "lifetimeMs": 365,
+    "particleCount": 39,
+    "note": "手工构造的干扰 json：解压体积大于谱面文件，用于验证「不得取最大的 json」"
+  },
+  {
+    "effectId": "fx-024",
+    "kind": "particle",
+    "texture": "resources/fx_24.png",
+    "blendMode": "add",
+    "lifetimeMs": 370,
+    "particleCount": 40,
+    "note": "手工构造的干扰 json：解压体积大于谱面文件，用于验证「不得取最大的 json」"
+  },
+  {
+    "effectId": "fx-025",
+    "kind": "shader",
+    "texture": "resources/fx_25.png",
+    "blendMode": "normal",
+    "lifetimeMs": 375,
+    "particleCount": 41,
+    "note": "手工构造的干扰 json：解压体积大于谱面文件，用于验证「不得取最大的 json」"
+  },
+  {
+    "effectId": "fx-026",
+    "kind": "sprite",
+    "texture": "resources/fx_26.png",
+    "blendMode": "add",
+    "lifetimeMs": 380,
+    "particleCount": 42,
+    "note": "手工构造的干扰 json：解压体积大于谱面文件，用于验证「不得取最大的 json」"
+  },
+  {
+    "effectId": "fx-027",
+    "kind": "particle",
+    "texture": "resources/fx_27.png",
+    "blendMode": "normal",
+    "lifetimeMs": 385,
+    "particleCount": 43,
+    "note": "手工构造的干扰 json：解压体积大于谱面文件，用于验证「不得取最大的 json」"
+  },
+  {
+    "effectId": "fx-028",
+    "kind": "shader",
+    "texture": "resources/fx_28.png",
+    "blendMode": "add",
+    "lifetimeMs": 390,
+    "particleCount": 44,
+    "note": "手工构造的干扰 json：解压体积大于谱面文件，用于验证「不得取最大的 json」"
+  },
+  {
+    "effectId": "fx-029",
+    "kind": "sprite",
+    "texture": "resources/fx_29.png",
+    "blendMode": "normal",
+    "lifetimeMs": 395,
+    "particleCount": 45,
+    "note": "手工构造的干扰 json：解压体积大于谱面文件，用于验证「不得取最大的 json」"
+  },
+  {
+    "effectId": "fx-030",
+    "kind": "particle",
+    "texture": "resources/fx_30.png",
+    "blendMode": "add",
+    "lifetimeMs": 400,
+    "particleCount": 46,
+    "note": "手工构造的干扰 json：解压体积大于谱面文件，用于验证「不得取最大的 json」"
+  },
+  {
+    "effectId": "fx-031",
+    "kind": "shader",
+    "texture": "resources/fx_31.png",
+    "blendMode": "normal",
+    "lifetimeMs": 405,
+    "particleCount": 47,
+    "note": "手工构造的干扰 json：解压体积大于谱面文件，用于验证「不得取最大的 json」"
+  },
+  {
+    "effectId": "fx-032",
+    "kind": "sprite",
+    "texture": "resources/fx_32.png",
+    "blendMode": "add",
+    "lifetimeMs": 410,
+    "particleCount": 48,
+    "note": "手工构造的干扰 json：解压体积大于谱面文件，用于验证「不得取最大的 json」"
+  },
+  {
+    "effectId": "fx-033",
+    "kind": "particle",
+    "texture": "resources/fx_33.png",
+    "blendMode": "normal",
+    "lifetimeMs": 415,
+    "particleCount": 49,
+    "note": "手工构造的干扰 json：解压体积大于谱面文件，用于验证「不得取最大的 json」"
+  },
+  {
+    "effectId": "fx-034",
+    "kind": "shader",
+    "texture": "resources/fx_34.png",
+    "blendMode": "add",
+    "lifetimeMs": 420,
+    "particleCount": 50,
+    "note": "手工构造的干扰 json：解压体积大于谱面文件，用于验证「不得取最大的 json」"
+  },
+  {
+    "effectId": "fx-035",
+    "kind": "sprite",
+    "texture": "resources/fx_35.png",
+    "blendMode": "normal",
+    "lifetimeMs": 425,
+    "particleCount": 51,
+    "note": "手工构造的干扰 json：解压体积大于谱面文件，用于验证「不得取最大的 json」"
+  },
+  {
+    "effectId": "fx-036",
+    "kind": "particle",
+    "texture": "resources/fx_36.png",
+    "blendMode": "add",
+    "lifetimeMs": 430,
+    "particleCount": 52,
+    "note": "手工构造的干扰 json：解压体积大于谱面文件，用于验证「不得取最大的 json」"
+  },
+  {
+    "effectId": "fx-037",
+    "kind": "shader",
+    "texture": "resources/fx_37.png",
+    "blendMode": "normal",
+    "lifetimeMs": 435,
+    "particleCount": 53,
+    "note": "手工构造的干扰 json：解压体积大于谱面文件，用于验证「不得取最大的 json」"
+  },
+  {
+    "effectId": "fx-038",
+    "kind": "sprite",
+    "texture": "resources/fx_38.png",
+    "blendMode": "add",
+    "lifetimeMs": 440,
+    "particleCount": 54,
+    "note": "手工构造的干扰 json：解压体积大于谱面文件，用于验证「不得取最大的 json」"
+  },
+  {
+    "effectId": "fx-039",
+    "kind": "particle",
+    "texture": "resources/fx_39.png",
+    "blendMode": "normal",
+    "lifetimeMs": 445,
+    "particleCount": 55,
+    "note": "手工构造的干扰 json：解压体积大于谱面文件，用于验证「不得取最大的 json」"
+  }
+]

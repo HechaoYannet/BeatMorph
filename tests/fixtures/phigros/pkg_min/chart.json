@@ -1,0 +1,36 @@
+{
+  "BPMList": [
+    { "bpm": 60.0, "startTime": [0, 0, 1] }
+  ],
+  "META": {
+    "RPEVersion": 150,
+    "charter": "decoy",
+    "composer": "decoy",
+    "level": "DECOY Lv.0",
+    "name": "decoy-chart",
+    "offset": 0,
+    "song": "decoy.ogg"
+  },
+  "chartTime": 2.0,
+  "judgeLineList": [
+    {
+      "Name": "decoy-line",
+      "isCover": 1,
+      "numOfNotes": 1,
+      "eventLayers": [
+        {
+          "alphaEvents": [
+            { "startTime": [0, 0, 1], "endTime": [1, 0, 1], "start": 0, "end": 255,
+              "easingType": 1, "bezier": 0, "bezierPoints": [0.0, 0.0, 0.0, 0.0],
+              "easingLeft": 0.0, "easingRight": 1.0, "linkgroup": 0 }
+          ]
+        }
+      ],
+      "notes": [
+        { "type": 3, "startTime": [0, 0, 1], "endTime": [0, 0, 1], "positionX": 0.0,
+          "above": 1, "isFake": 0, "size": 1.0, "speed": 1.0, "alpha": 255,
+          "visibleTime": 999999.0, "yOffset": 0.0 }
+      ]
+    }
+  ]
+}

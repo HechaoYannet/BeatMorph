@@ -1,0 +1,153 @@
+{
+  "BPMList": [
+    { "bpm": 120.0, "startTime": [0, 0, 1] },
+    { "bpm": 180.0, "startTime": [8, 0, 1] }
+  ],
+  "META": {
+    "RPEVersion": 150,
+    "background": "bg.png",
+    "charter": "fixture-charter",
+    "composer": "fixture-composer",
+    "id": "fixture",
+    "illustration": "fixture-illustrator",
+    "level": "FIX Lv.1",
+    "name": "fixture-min",
+    "offset": 0,
+    "song": "min.ogg"
+  },
+  "chartTime": 12.0,
+  "judgeLineGroup": ["main", "fx"],
+  "judgeLineList": [
+    {
+      "Group": 0,
+      "Name": "main-line",
+      "Texture": "line.png",
+      "anchor": [0.5, 0.5],
+      "father": -1,
+      "isCover": 1,
+      "rotateWithFather": true,
+      "zOrder": 0,
+      "bpmfactor": 1.0,
+      "numOfNotes": 4,
+      "eventLayers": [
+        {
+          "moveXEvents": [
+            { "startTime": [0, 0, 1], "endTime": [2, 0, 1], "start": 100, "end": 200,
+              "easingType": 1, "bezier": 0, "bezierPoints": [0.0, 0.0, 0.0, 0.0],
+              "easingLeft": 0.0, "easingRight": 1.0, "linkgroup": 0 },
+            { "startTime": [6, 0, 1], "endTime": [8, 0, 1], "start": 400, "end": 500,
+              "easingType": 99, "bezier": 0, "bezierPoints": [0.0, 0.0, 0.0, 0.0],
+              "easingLeft": 0.0, "easingRight": 1.0, "linkgroup": 0 }
+          ],
+          "rotateEvents": [
+            { "startTime": [0, 0, 1], "endTime": [4, 0, 1], "start": 0, "end": 90,
+              "easingType": -5, "bezier": 0, "bezierPoints": [0.0, 0.0, 0.0, 0.0],
+              "easingLeft": 0.0, "easingRight": 1.0, "linkgroup": 0 }
+          ]
+        },
+        {
+          "moveXEvents": [
+            { "startTime": [0, 0, 1], "endTime": [4, 0, 1], "start": 50, "end": 50,
+              "easingType": 1, "bezier": 0, "bezierPoints": [0.0, 0.0, 0.0, 0.0],
+              "easingLeft": 0.0, "easingRight": 1.0, "linkgroup": 0 }
+          ],
+          "alphaEvents": [
+            { "startTime": [0, 0, 1], "endTime": [8, 0, 1], "start": 255, "end": 255,
+              "easingType": 1, "bezier": 0, "bezierPoints": [0.0, 0.0, 0.0, 0.0],
+              "easingLeft": 0.0, "easingRight": 1.0, "linkgroup": 0 }
+          ]
+        }
+      ],
+      "notes": [
+        { "type": 1, "startTime": [0, 0, 1], "endTime": [0, 0, 1], "positionX": 100.0,
+          "above": 1, "isFake": 0, "size": 1.0, "speed": 1.0, "alpha": 255,
+          "visibleTime": 999999.0, "yOffset": 0.0 },
+        { "type": 2, "startTime": [2, 0, 1], "endTime": [3, 0, 1], "positionX": -200.0,
+          "above": 1, "isFake": 0, "size": 1.0, "speed": 1.0, "alpha": 255,
+          "visibleTime": 999999.0, "yOffset": 0.0 },
+        { "type": 3, "startTime": [4, 1, 2], "endTime": [4, 1, 2], "positionX": 0.0,
+          "above": 2, "isFake": 0, "size": 1.0, "speed": 1.0, "alpha": 255,
+          "visibleTime": 999999.0, "yOffset": 0.0 },
+        { "type": 4, "startTime": [8, 0, 1], "endTime": [8, 0, 1], "positionX": 300.0,
+          "above": 1, "isFake": 0, "size": 1.0, "speed": 1.0, "alpha": 255,
+          "visibleTime": 999999.0, "yOffset": 0.0 }
+      ]
+    },
+    {
+      "Group": 1,
+      "Name": "null-layer-line",
+      "father": -1,
+      "isCover": 1,
+      "eventLayers": [null],
+      "extended": {
+        "inclineEvents": [
+          { "startTime": [0, 0, 1], "endTime": [8, 0, 1], "start": 10, "end": 20,
+            "easingType": 1, "bezier": 0, "bezierPoints": [0.0, 0.0, 0.0, 0.0],
+            "easingLeft": 0.0, "easingRight": 1.0, "linkgroup": 0 }
+        ]
+      },
+      "numOfNotes": 1,
+      "notes": [
+        { "type": 1, "startTime": [1, 0, 1], "endTime": [1, 0, 1], "positionX": 0.0,
+          "above": 0, "isFake": 1, "size": 1.0, "speed": 1.0, "alpha": 255,
+          "visibleTime": 999999.0, "yOffset": 0.0 }
+      ]
+    },
+    {
+      "Group": 1,
+      "Name": "child-line",
+      "father": 1,
+      "rotateWithFather": true,
+      "isCover": 1,
+      "eventLayers": [
+        {
+          "moveXEvents": [
+            { "startTime": [0, 0, 1], "endTime": [8, 0, 1], "start": 0, "end": 0,
+              "easingType": 1, "bezier": 0, "bezierPoints": [0.0, 0.0, 0.0, 0.0],
+              "easingLeft": 0.0, "easingRight": 1.0, "linkgroup": 0 }
+          ],
+          "rotateEvents": [
+            { "startTime": [0, 0, 1], "endTime": [8, 0, 1], "start": 45, "end": 45,
+              "easingType": 1, "bezier": 0, "bezierPoints": [0.0, 0.0, 0.0, 0.0],
+              "easingLeft": 0.0, "easingRight": 1.0, "linkgroup": 0 }
+          ]
+        }
+      ],
+      "numOfNotes": 1,
+      "notes": [
+        { "type": 4, "startTime": [9, 0, 1], "endTime": [9, 0, 1], "positionX": 720.0,
+          "above": 1, "isFake": 0, "size": 1.0, "speed": 1.0, "alpha": 255,
+          "visibleTime": 999999.0, "yOffset": 0.0 }
+      ]
+    },
+    {
+      "Group": 0,
+      "Name": "extended-only-line",
+      "father": -1,
+      "isCover": 2,
+      "bpmfactor": 2.0,
+      "attachUI": "combo",
+      "zOrder": -1,
+      "numOfNotes": 0,
+      "extended": {
+        "scaleXEvents": [
+          { "startTime": [0, 0, 1], "endTime": [4, 0, 1], "start": 1.0, "end": 2.0,
+            "easingType": 1, "bezier": 0, "bezierPoints": [0.0, 0.0, 0.0, 0.0],
+            "easingLeft": 0.0, "easingRight": 1.0, "linkgroup": 0 }
+        ],
+        "colorEvents": [
+          { "startTime": [0, 0, 1], "endTime": [4, 0, 1], "start": [255, 0, 0],
+            "end": [0, 0, 255], "easingType": 1, "bezier": 0,
+            "bezierPoints": [0.0, 0.0, 0.0, 0.0], "easingLeft": 0.0,
+            "easingRight": 1.0, "linkgroup": 0 }
+        ],
+        "textEvents": [
+          { "startTime": [0, 0, 1], "endTime": [4, 0, 1], "start": "hello",
+            "end": "world", "easingType": 1, "bezier": 0,
+            "bezierPoints": [0.0, 0.0, 0.0, 0.0], "easingLeft": 0.0,
+            "easingRight": 1.0, "linkgroup": 0 }
+        ]
+      }
+    }
+  ]
+}

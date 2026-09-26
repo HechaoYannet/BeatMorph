@@ -54,7 +54,7 @@
 | RFC-0004 | Tokenizer 起步数据量 50K vs 100万 | 02（08 依赖） | 提案 |
 | RFC-0005 | 变速曲 `bpm` 字段扩展为时间点 | 00/02/03（08 依赖） | [采纳](RFC-0005-bpm-timepoints.md) |
 | RFC-0006 | `sections_type` 是否作分类目标 | 03 | 提案 |
-| RFC-0007 | AR 隐层 dim=768 | 04 | 提案 |
+| RFC-0007 | AR 隐层 dim=768 | 04 | **搁置**（RFC-0029 后 AR 退出主线，仅存为消融臂 B4；且 dim 应为 1024 而非 768） |
 | RFC-0008 | 超长曲滑窗段落衔接 | 04 | 提案 |
 | RFC-0009 | Flow Matching 蒸馏对齐目标 | 04 | 提案 |
 | RFC-0010 | RAG 注入默认 Prefix vs Cross-Attention KV | 05 | 提案（暂定 Prefix） |
@@ -76,5 +76,8 @@
 | RFC-0026 | 小节边界相位对齐（修复栅格化系统性错位） | 02/03/08 | [采纳](RFC-0026-bar-boundary-phase-alignment.md) |
 | RFC-0027 | VQ-VAE encoder：栅格 1D-CNN → note 集合 set-transformer（评估） | 02 | 搁置（RFC-0028 采纳后作废，VQ 范式退出） |
 | RFC-0028 | 修宪议案：tokenizer 范式 VQ-VAE 小节粒度 → BPE/event（范式级首选） | 02/04/07（BasePlan §3.2） | [采纳](RFC-0028-bpe-event-tokenizer-constitutional-amendment.md)（BPE/event tokenizer，2026-08-04） |
+| RFC-0029 | 修宪议案：目标转向 Phigros + 生成范式改为「判定线局部系**多线**标记点过程 + 掩码补全」 | 全量（BasePlan §1/§2/§3/§4/§7） | [采纳](RFC-0029-phigros-continuous-chart-generation.md)（2026-08-05；Q1/Q2/Q4/Q6/Q7/Q8 已批复） |
 
-> 下一个可用编号：**RFC-0029**。
+> ⚠️ **RFC-0029 采纳后**：RFC-0006~0023 中与「4K VSRG / VQ-VAE / BPE-event tokenizer / planner 密度规划 / osu! 数据源」相关的开放项**随之失效**，待按 Phigros 范式重写；RFC-0001（Note 时间单位=秒）、0005（变速 bpm 时间点）、0026（小节相位对齐）的**思想仍适用**，但载体契约需重设。
+
+> 下一个可用编号：**RFC-0030**。

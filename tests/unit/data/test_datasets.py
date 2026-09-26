@@ -11,7 +11,13 @@ from pathlib import Path
 import pytest
 import torch
 
-from beatmorph.core.contracts import BpmPoint, Chart, Section
+from beatmorph.core.contracts import (
+    MERT_DEFAULT_FEAT_DIM,
+    MERT_FRAME_RATE_HZ,
+    BpmPoint,
+    Chart,
+    Section,
+)
 from beatmorph.data.datasets import MERTExtractionDataset, PlannerDataset
 
 # ── 夹具构造 ──────────────────────────────────────────────────
@@ -167,7 +173,10 @@ class TestExtractMertEmbeddingsMock:
             def encode(self, w: torch.Tensor) -> torch.Tensor:
                 self.calls += 1
                 dur = w.shape[-1] / 16000.0
-                return torch.randn(1, max(1, round(dur * 25)), 768)
+                # mock 必须与契约同帧率，否则会把错误的帧率洗成绿灯（见 POSTMORTEM）
+                return torch.randn(
+                    1, max(1, round(dur * MERT_FRAME_RATE_HZ)), MERT_DEFAULT_FEAT_DIM
+                )
 
         mock = _MockEnc()
         out_dir = tmp_path / "emb"
@@ -246,7 +255,7 @@ class TestSetIdDedup:
 
             def encode(self, w: torch.Tensor) -> torch.Tensor:
                 self.calls += 1
-                return torch.randn(1, 25, 768)
+                return torch.randn(1, round(MERT_FRAME_RATE_HZ), MERT_DEFAULT_FEAT_DIM)
 
         mock = _MockEnc()
         out_dir = tmp_path / "emb"

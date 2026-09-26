@@ -26,7 +26,7 @@ def _make_bounds(batch: int, n_sec: int, dur_s: float = 10.0) -> torch.Tensor:
 class TestDensityPlannerForward:
     def test_forward_shapes_and_ranges(self) -> None:
         m = DensityPlanner()
-        B, T = 2, 250  # 10s @25Hz
+        B, T = 2, round(10.0 * _FRAME_RATE)  # 10s @ 派生帧率（75Hz → 750）
         audio_emb = torch.randn(B, T, MERT_DEFAULT_FEAT_DIM)
         difficulty = torch.tensor([5, 12])
         bounds = _make_bounds(B, 10, 10.0)

@@ -9,7 +9,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from beatmorph.core.contracts import MERT_DEFAULT_FEAT_DIM
+from beatmorph.core.contracts import MERT_DEFAULT_FEAT_DIM, MERT_FRAME_RATE_HZ, MERT_SAMPLE_RATE_HZ
 from beatmorph.planner.density import DensityPlanner
 
 
@@ -19,7 +19,7 @@ class TestPlannerOnSyntheticAudioEmb:
     def test_synthetic_to_sections(self) -> None:
         planner = DensityPlanner(n_layers=2)
         dur = 32.0  # 120BPM 4/4 → bar=2s; section_bars=4 → 8s/section → 4 sections
-        t_seq = round(dur * 25)
+        t_seq = round(dur * MERT_FRAME_RATE_HZ)  # 派生帧率，勿写死
         audio_emb = torch.randn(1, t_seq, MERT_DEFAULT_FEAT_DIM)
 
         sections = planner.plan(
@@ -85,7 +85,7 @@ class TestRealMertToPlanner:
             pytest.skip("MERT weights not cached")
 
         enc = MERTAdapter(adapter="none", device="cuda", fp16=True)
-        sr = 16000
+        sr = MERT_SAMPLE_RATE_HZ  # MERT 要求 24kHz（TRAINING_LOG Bug1）
         dur = 2.0
         wav = torch.randn(1, int(dur * sr))
         emb = enc.encode(wav)  # [1, T_seq, feat]

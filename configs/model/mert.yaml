@@ -1,17 +1,20 @@
 # Hydra 模型组配置 — Stage 0 MERT 编码器（group=model → 自动前缀为 cfg.model）
-# 奠基文档 §3.1 / plan 01 / RFC-0003（LoRA 采纳）。冻结主干 + Adapter，[B,T_seq,768]@25Hz。
+# 奠基文档 §3.1 / plan 01 / RFC-0003（LoRA 采纳）。冻结主干 + Adapter。
+# 输出契约： [B, T_seq, 1024]，帧率 = MERT_SAMPLE_RATE_HZ / MERT_CONV_STRIDE_PRODUCT = 75Hz（**派生量**）
 # 注意：组配置文件内容自动挂到 group key 下，**勿再包 model:**（否则双重嵌套）。
+# ⚠️ 2026-08-05 修正：此前写 feat:768 / frame_rate:25.0 —— 均为错值（真值 1024 / 75Hz，差 3×），
+#    见 docs/POSTMORTEM-2026-08-05-frame-rate-misalignment.md 与 CLAUDE.md 红线 7。
 
 name: mert
 model_name: m-a-p/MERT-v1-330M     # HF id；ModelScope 仓 ID 可在此覆盖
-layer: 12                           # 第 12 层 hidden state（768 维）
+layer: 12                           # 取第几层 hidden state（MERT-v1-330M 各层均为 1024 维）
 adapter: lora                       # lora | mlp | none（RFC-0003 采纳 LoRA）
 lora_rank: 8
 lora_alpha: 16
 lora_dropout: 0.05
-use_demucs: false                   # Phase 1 demucs 仍 stub
-feat: 768
-frame_rate: 25.0
+use_demucs: false                   # 目前仍 stub
+feat: 1024                          # = MERT_DEFAULT_FEAT_DIM（契约）
+frame_rate: null                    # **派生量，勿在此写死具体数字**；运行期由主干 config 推导为 75.0
 source: modelscope                  # modelscope | huggingface（优先级，fallback）
 device: auto
 fp16: true

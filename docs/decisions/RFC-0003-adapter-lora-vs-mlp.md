@@ -2,7 +2,15 @@
 
 - 状态：采纳 ｜ 提出日期：2026-07-31 ｜ 决定日期：2026-07-31
 - 提出者：音频组
-- 影响模块：plan 01（`beatmorph/audio/encoder/mert.py`）、plan 02/04（消费 `audio_emb` 的训 Adapter 影响）、`pyproject.toml`（新增 `peft`）
+- 影响模块：plan 01（`beatmorph/audio/encoder/mert.py`）、消费 `audio_emb` 的下游、`pyproject.toml`（新增 `peft`）
+
+> ## ⚠️ 勘误（2026-08-05，RFC-0029 修宪后）
+>
+> 本 RFC 的**选型结论（LoRA）仍然有效**，但两处内容已过时：
+> - 正文写的 `feat=768` 与 `[B,T_seq,768]` **是错值**——MERT-v1-330M 各层 hidden 均为 **1024**（实测量与权重核对双重确证）。以契约 `MERT_DEFAULT_FEAT_DIM = 1024` 为准。
+> - 原文所指的下游「Stage1 planner 与 Stage2 AR」**已随 RFC-0029 退役**；现下游为**强度场生成主干**。
+>
+> 见 [plan 01 §2 偏离 1](../plans/01-audio-encoder.md) 与 [POSTMORTEM-2026-08-05](../POSTMORTEM-2026-08-05-frame-rate-misalignment.md)。
 
 ## 背景
 

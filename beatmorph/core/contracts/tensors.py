@@ -8,31 +8,62 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+# ══════════════════════════════════════════════════════════════
+# 模块间约定的关键常量（统一定义在文件顶部，供下方 dataclass 默认值引用）
+# ══════════════════════════════════════════════════════════════
+
+# ── MERT-v1-330M 音频侧常量 ──
+# 来源：ModelScope/HF 官方仓 config.json + preprocessor_config.json
+#   conv_kernel = [10, 3, 3, 3, 3, 2, 2]
+#   conv_stride = [ 5, 2, 2, 2, 2, 2, 2]  → 累乘 320
+# 帧率是**派生量**，不是可自由设定的超参：改采样率/主干必须同步改这两个基数。
+# 详见 docs/POSTMORTEM-2026-08-05-frame-rate-misalignment.md
+MERT_SAMPLE_RATE_HZ: int = 24000  # MERT 特征提取器要求 24kHz 单声道
+MERT_CONV_STRIDE_PRODUCT: int = 320  # prod(conv_stride)
+MERT_FRAME_RATE_HZ: float = MERT_SAMPLE_RATE_HZ / MERT_CONV_STRIDE_PRODUCT  # 75.0
+MERT_DEFAULT_FEAT_DIM: int = 1024  # MERT-v1-330M hidden_size（所有层均为 1024）
+
+# ── 以下 VQ 码本常量为 RFC-0028 legacy：仅 archive/vqvae-baseline 分支沿用 ──
+CODEBOOK_BASE: int = 2048  # §3.2 基础码本（VQ-VAE, 已退役 baseline）
+CODEBOOK_FINE: int = 4096  # §3.2 精细码本（VQ-VAE, 已退役 baseline）
+
+DEFAULT_LANE_COUNT: int = 4  # §1.1 先攻 4K
+
+# ── RFC-0028 BPE/event tokenizer 常量（主路径）──
+BPE_DEFAULT_VOCAB: int = 4096  # §3.2.1 BPE 词表默认大小
+BPE_VOCAB_POC_SWEEP: tuple[int, ...] = (2048, 4096, 8192)  # PoC 词表扫参
+POS_DIVISIONS_PER_BEAT: int = 48  # §3.2.2 Position 子拍网格 1/48 拍
+NUDGE_BUCKETS: int = 12  # §3.2.2 残差毫秒桶数（PoC 不达标可升 16）
+AR_CONTEXT_TOKENS: int = 1024  # §3.4.1 ~1024 event 分段（原 256 小节）
+
 
 @dataclass(frozen=True)
 class AudioEmbedding:
     """Stage0 音频编码器输出。
 
-    einops: ``(batch, time_seq, feat)``
+    einops: `(batch, time_seq, feat)`
 
     Attributes:
-        feat: 特征维，MERT 默认 768（第12层）或 1024（第24层）。
-        time_seq: 帧序列长度，帧率 25Hz（秒数 * 25）。
-        hop_rate: 帧率 Hz（默认 25.0，奠基文档 §3.1）。
+        feat: 特征维。MERT-v1-330M 各层均为 :data:`MERT_DEFAULT_FEAT_DIM`（1024）；
+            奠基 §3.1 原写「第12层 768 / 第24层 1024」系与 MERT-v1-95M 混淆，
+            经 TRAINING_LOG Bug5 实测纠正。
+        time_seq: 帧序列长度 = `round(duration_s * hop_rate)`。
+        hop_rate: 帧率 Hz，= :data:`MERT_SAMPLE_RATE_HZ` /
+            :data:`MERT_CONV_STRIDE_PRODUCT` = 75.0（**派生量**，勿硬编码）。
     """
 
-    feat: int = 768
+    feat: int = MERT_DEFAULT_FEAT_DIM
     time_seq: int = 0  # 运行期确定
-    hop_rate: float = 25.0
+    hop_rate: float = MERT_FRAME_RATE_HZ
 
 
 @dataclass(frozen=True)
 class PlanOutput:
     """Stage1 全局规划层输出。
 
-    - density_target: ``(batch, num_sections)`` 0-1
-    - energy_level: ``(batch, num_sections)`` 0-1
-    - rest_probability: ``(batch, num_sections)`` 0-1
+    - density_target: `(batch, num_sections)` 0-1
+    - energy_level: `(batch, num_sections)` 0-1
+    - rest_probability: `(batch, num_sections)` 0-1
     基金会文档 §3.3：每 4 小节一个 Section。
     """
 
@@ -44,9 +75,9 @@ class PlanOutput:
 class TokenSeq:
     """Stage2 Pattern Token 序列（**legacy / baseline 分支**，RFC-0028）。
 
-    einops: ``(batch, seq_len)`` 的 long 张量，取值范围 ``[0, codebook_size)``。
+    einops: `(batch, seq_len)` 的 long 张量，取值范围 `[0, codebook_size)`。
     每个元素是一小节的离散 Pattern ID。原 VQ-VAE 范式产物；主路径改用
-    :class:`EventSeq`，本类型仅由 ``archive/vqvae-baseline`` 分支沿用。
+    :class:`EventSeq`，本类型仅由 `archive/vqvae-baseline` 分支沿用。
     """
 
     seq_len: int = 0
@@ -57,8 +88,8 @@ class TokenSeq:
 class EventSeq:
     """Stage2 event token 序列（RFC-0028，主路径）。
 
-    einops: ``(batch, seq_len)`` 的 long 张量，取值范围 ``[0, vocab_size)``。
-    每个元素是一个 BPE event id（原子或复合）。``seq_len`` 单位是 event 而非小节
+    einops: `(batch, seq_len)` 的 long 张量，取值范围 `[0, vocab_size)`。
+    每个元素是一个 BPE event id（原子或复合）。`seq_len` 单位是 event 而非小节
     （~4700 原子 event/曲 → BPE 合并后 ~2000-2500）。
 
     Attributes:
@@ -74,25 +105,10 @@ class EventSeq:
 class RAGContext:
     """RAG 检索上下文（奠基文档 §3.5）。
 
-    - token_prefix: ``(batch, top_k, ref_seq_len)`` 检索到的参考谱面 Token
-    - style_emb: ``(batch, top_k, feat)`` 检索谱面风格向量
+    - token_prefix: `(batch, top_k, ref_seq_len)` 检索到的参考谱面 Token
+    - style_emb: `(batch, top_k, feat)` 检索谱面风格向量
     """
 
     top_k: int = 3
     ref_seq_len: int = 256
     feat: int = 768
-
-
-# ── 模块间约定的关键常量 ──
-MERT_FRAME_RATE_HZ: float = 25.0  # 奠基文档 §3.1
-MERT_DEFAULT_FEAT_DIM: int = 1024  # MERT-v1-330M hidden_size
-# ── 以下 VQ 码本常量为 RFC-0028 legacy：仅 archive/vqvae-baseline 分支沿用 ──
-CODEBOOK_BASE: int = 2048  # §3.2 基础码本（VQ-VAE, 已退役 baseline）
-CODEBOOK_FINE: int = 4096  # §3.2 精细码本（VQ-VAE, 已退役 baseline）
-DEFAULT_LANE_COUNT: int = 4  # §1.1 先攻 4K
-# ── RFC-0028 BPE/event tokenizer 常量（主路径）──
-BPE_DEFAULT_VOCAB: int = 4096  # §3.2.1 BPE 词表默认大小
-BPE_VOCAB_POC_SWEEP: tuple[int, ...] = (2048, 4096, 8192)  # PoC 词表扫参
-POS_DIVISIONS_PER_BEAT: int = 48  # §3.2.2 Position 子拍网格 1/48 拍
-NUDGE_BUCKETS: int = 12  # §3.2.2 残差毫秒桶数（PoC 不达标可升 16）
-AR_CONTEXT_TOKENS: int = 1024  # §3.4.1 ~1024 event 分段（原 256 小节）

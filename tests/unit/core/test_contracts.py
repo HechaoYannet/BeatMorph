@@ -13,7 +13,9 @@ from beatmorph.core.contracts import (
     AR_CONTEXT_TOKENS,
     BPE_DEFAULT_VOCAB,
     CODEBOOK_BASE,
+    MERT_CONV_STRIDE_PRODUCT,
     MERT_FRAME_RATE_HZ,
+    MERT_SAMPLE_RATE_HZ,
     BpmPoint,
     Chart,
     EventToken,
@@ -94,7 +96,13 @@ def test_chart_sorted_notes_deterministic() -> None:
 
 def test_constants_align_with_base_plan() -> None:
     """常量与奠基文档约定一致（RFC-0028 修宪后口径）。"""
-    assert MERT_FRAME_RATE_HZ == 25.0
+    # 帧率是**派生量**：24000 / prod(conv_stride=[5,2,2,2,2,2,2]) = 75.0
+    # 此前误写 25.0（差 3×），使 embedding 帧轴与段标签系统性错位
+    # → docs/POSTMORTEM-2026-08-05-frame-rate-misalignment.md
+    assert MERT_CONV_STRIDE_PRODUCT == 320
+    assert MERT_SAMPLE_RATE_HZ == 24000
+    assert MERT_FRAME_RATE_HZ == MERT_SAMPLE_RATE_HZ / MERT_CONV_STRIDE_PRODUCT
+    assert MERT_FRAME_RATE_HZ == 75.0
     # VQ-VAE 码本常量保留（legacy/baseline 分支沿用），主路径不再消费
     assert CODEBOOK_BASE == 2048
     # RFC-0028：AR 上下文 256 小节(bar) → 1024 event（分段生成）

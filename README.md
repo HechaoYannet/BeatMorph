@@ -1,119 +1,138 @@
 # BeatMorph
 
-> 音游谱面端到端自动生成系统 —— 从音频到可玩谱面，自监督学习取代显式标注。
+> **Phigros 谱面端到端自动生成系统** —— 从音频到可玩谱面，自监督学习取代显式标注。
 >
-> **核心范式**：`音频 → MERT 隐式理解 → VQ-VAE 谱面分布学习 → RAG 风格迁移 → DPO 手感优化`
+> **核心范式**：`音频 → MERT 隐式理解 → 判定线局部系多线强度场 → 掩码补全 → 泊松 NLL → RPEJSON`
 
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Python 3.11](https://img.shields.io/badge/python-3.11-blue.svg)](https://www.python.org/)
 [![Status: Pre-Alpha](https://img.shields.io/badge/status-pre--alpha-orange.svg)]()
 
-BeatMorph 从原始音频（WAV/MP3）+ 难度（1-15）+ 参考谱面（可选），端到端自动生成高质量、可玩的音游谱面。**优先支持 4K VSRG**（垂直下落式），输出标准 `.osu` / `.sm` / `.ma2` 格式。模型从百万级社区谱面自主学习创作规律，无需人工标注（标注成本 ≈ 0）。
+BeatMorph 从原始音频（WAV/MP3）+ 难度（+ 可选判定线事件轨）出发，端到端生成高质量、可玩的 **Phigros 谱面（RPEJSON）**。模型从社区海量自制谱自主学习创作规律，无需人工标注（标注成本 ≈ 0）。
 
-> 📌 **状态**：Pre-Alpha。工程脚手架、数据契约、模块计划已就绪，模型实现按分阶段路线图推进。
+> 📌 **状态**：Pre-Alpha。范式（[RFC-0029](docs/decisions/RFC-0029-phigros-continuous-chart-generation.md)）、奠基文档（v3.0）、格式/单位/数据/文献事实库已就绪；**代码尚未迁移**（当前仓库仍为 osu!mania 版）。
 
 ---
+
+## 为什么是 Phigros
+
+| 维度 | 4K 下落式（osu!mania / DDR） | **Phigros** |
+|------|------------------------------|------------|
+| 空间 | 4 条静止离散轨道 | **判定线局部系 2 维**：`positionX` 连续 + `side`（哪一侧） |
+| 屏幕方向 | 恒定自上而下 | **任意方向**——由判定线自身的 move/rotate 事件轨决定 |
+| 舞台对象 | 无 | **判定线是一等公民**：多线（实测中位 **30** 条）、带完整事件轨的动画对象 |
+| 音符类型 | TAP / HOLD / … | Tap / Drag / Hold / Flick |
+
+**一条必须记住的事实**：STRUM 实测人类谱面事件**只有 89% 落在音频 onset ±100ms 内**。所以谱面生成**不是转录，而是创造性诠释**——那 11% 正是"创作"发生的地方。
 
 ## 系统架构
 
 ```
-用户输入: ① 音频(WAV/MP3)  ② 难度(1-15)  ③ 参考谱面(可选)
+输入：① 音频(WAV/MP3)  ② 难度  ③ 判定线事件轨（可选，条件输入）
    │
    ▼
-Stage 0  音频理解    MERT-v1-330M(冻结) + 可训练 Adapter   [可选 Demucs 四轨分离]
-         → audio_emb [T_seq, 768] @ 25Hz
+Stage 0  音频理解    MERT-v1-330M（冻结，24kHz）+ LoRA Adapter
+         → audio_emb [B, T, 1024]，帧率 = 24000/320 = 75Hz（**派生量**）
    ▼
-Stage 1  全局规划    6层双向 Transformer（自监督回归）
-         → 每4小节 density / energy / rest 蓝图
+Stage 1  强度场生成   掩码补全 Encoder-Decoder（迭代并行解码）
+         → λ_k(t, positionX, side, type)，k = 1..K 条判定线
    ▼
-Stage 2  Pattern 生成  AR Transformer Decoder + VQ-VAE(2048/4096)
-         + RAG(Top-K=3 风格检索)  +  DPO(偏好对齐)
-         → Pattern Token 序列
-   ▼
-Stage 3&4 解码导出    VQ-VAE Decoder → Note[]>(time,lane,type,duration)
-         → 规则后处理(物理红线) → .osu / .sm / .ma2
+Stage 2  解码与导出   强度场 → 离散事件（Ogata thinning / find_peaks）
+         → 合法性后处理（含**跨线几何冲突**）→ RPEJSON
 ```
 
-完整技术选型与决策理由见 **[奠基文档 docs/BasePlan.md](docs/BasePlan.md)**。
+**训练目标**：非齐次泊松 NLL —— 事件处强度必须高，全域积分必须低。note 分配到哪条判定线**不需要额外分类损失**，它是 K 个强度场竞争的自然结果（实测最忙的一条线独占中位 **73%** 的 note，任何"均匀 softmax 分配"假设都是错的）。
+
+完整技术选型见 **[docs/BasePlan.md](docs/BasePlan.md)**；范式论证见 **[RFC-0029](docs/decisions/RFC-0029-phigros-continuous-chart-generation.md)**。
 
 ## 仓库结构
 
 ```
-beatmorph/        主包（audio / tokenizer / planner / generation / rag /
-                  alignment / decoder / data / io / core / infra / cli / api）
-tests/            unit / integration / e2e / fixtures
-configs/          Hydra 配置（model / train / data）
-docs/             BasePlan + plans + decisions + 约束文档
+beatmorph/
+├── audio/encoder/        Stage 0  MERT-v1-330M + LoRA Adapter
+├── data/                 Phira 谱面获取 + RPEJSON 解析 + 质检 + 特征离线提取
+├── core/contracts/       ★ 跨模块契约：JudgeLine / PhigrosNote / PhigrosChart / ChartField
+├── field/                强度场：网格化、目标构建、双路径积分、可视化
+├── generation/           掩码补全 Encoder-Decoder（主选）
+├── decoder/              强度场 → 离散谱面 + 合法性与可玩性后处理
+├── io/formats/rpejson/   RPEJSON 读写
+├── eval/                 事件级 F1 / 校准 / 跨线合法性 / 人评协议
+├── infra/                训练栈 + 健全性门禁 G1-G4
+└── cli/  api/            命令行与服务接口
+tests/   unit / integration / e2e / fixtures
+configs/ Hydra 配置
+docs/    BasePlan + plans + decisions + knowledges
 ```
 
-详见 [docs/CODE_STRUCTURE.md](docs/CODE_STRUCTURE.md)。
+详见 [docs/CODE_STRUCTURE.md](docs/CODE_STRUCTURE.md)（含「现状 vs 目标」对照）。
 
 ## 快速开始
 
 需 Python 3.11 与 [uv](https://docs.astral.sh/uv/)。
 
 ```bash
-git clone https://github.com/HechaoYannet/BeatMorph.git BeatMorph && cd BeatMorph
-uv sync --group dev          # 安装依赖
-uv run pre-commit install    # 安装提交钩子
-make test-fast               # 冒烟测试（跳过 slow/gpu/e2e）
+git clone https://github.com/HechaoYann/BeatMorph.git BeatMorph && cd BeatMorph
+uv sync --group dev
+uv run pre-commit install
+make test-fast
 ```
 
-端到端生成（模型实现后启用）：
+自检帧率契约（**应输出 5s → 374 帧 = 75Hz**）：
+
 ```bash
-beatmorph-generate --audio song.mp3 --difficulty 8 --ref reference.osu -o out.osu
+python scripts/verify_mert_frame_rate.py
 ```
 
-## 训练与数据
+## 数据与训练
 
-Phase 1 端到端流程（环境 → sayobot 数据下载 → 预处理 → MERT 离线提取 → Stage1 训练）见
-**[docs/TRAINING.md](docs/TRAINING.md)**（操作手册）。小型开发样本（`data/dev_sample/`，走 Git LFS）供 VQ-VAE / AR 冒烟。
+⚠️ **数据合规是当前阻塞项**：唯一可用的万级数据源（Phira 官方 API，实测 9649 张）其 ToU **未授予机器学习训练权利**，且音频随谱 100% 捆绑分发。**裁定前不得开始训练**。详见 [BasePlan §4.4](docs/BasePlan.md) 与 [phira-dataset-survey.md](docs/knowledges/phira-dataset-survey.md)。
 
-> GPU 训练需自行安装匹配 CUDA 的 PyTorch；可选依赖组：`uv sync --extra audio --extra train --extra rag --extra data`。
+流程与操作见 **[docs/TRAINING.md](docs/TRAINING.md)**。
+
+> **硬性纪律**：任何新模型/新范式在**扩大数据规模之前**必须通过 **G1-G4** 四道健全性门禁（单 batch 过拟合 / 打乱标签对照 / 常数基线 / 契约断言）。来历见 [POSTMORTEM-2026-08-05](docs/POSTMORTEM-2026-08-05-frame-rate-misalignment.md)。
 
 ## 技术选型一览
 
 | 模块 | 决策 | 理由 |
 |------|------|------|
-| 音频编码 | **MERT-330M + Adapter** | 音乐专用、轻量、层次表征好（非 Qwen2-Audio） |
-| 声源分离 | **Demucs（可选）** | 有增益但非必需 |
-| 谱面压缩 | **VQ-VAE** | 语义离散化、适配 AR（非 FSQ） |
-| 生成主干 | **AR Transformer**（备选 Flow Matching） | 成熟稳定；FM 用于未来加速 |
-| 风格控制 | **RAG** | 零训练、可解释（非对比学习） |
-| 偏好对齐 | **DPO** | 轻量、适合离线数据（非 RLHF/PPO） |
-| 全局规划 | **自监督回归** | 零标注、利用统计量（非规则/LLM） |
+| 音频编码 | **MERT-v1-330M + LoRA** | 音乐专用、轻量、层次表征好 |
+| 谱面表示 | **判定线局部系多线强度场** | 局部系是原生存储系；无量化损失；多线 v1 即支持 |
+| 生成主干 | **掩码补全 Encoder-Decoder** | 并行 + 双向上下文；事件间强共现 |
+| 目标函数 | **非齐次泊松 NLL** | 稀疏目标下不塌陷；音符数量由积分隐式决定 |
+| 解码 | **Ogata thinning** | 从强度场直接采样的原则性做法 |
+| 判定线运动 | **条件化输入**（v1） | 难度与观感大量来自线运动；联合生成留待后续 |
+| 全局规划层 | **取消** | 段级均值池化是结构性信息瓶颈，且不需要 |
 
 ## 实施路线
 
-| Phase | 时间 | 目标 |
-|-------|------|------|
-| 1 | 0-3 月 | 数据流水线 + 10K 首 MERT 离线提取 + VQ-VAE(重建>95%) + Stage1 |
-| 2 | 3-8 月 | AR 生成 + RAG + 首版可玩 `.osu` + 内部盲测 |
-| 3 | 8-12 月 | DPO 微调 + Flow Matching 蒸馏(<2s/首) + API/Demo 封测 |
-| 4 | 12+ 月 | 6K / osu!std / 个人风格 LoRA |
+| Phase | 目标 |
+|-------|------|
+| **1 地基** | 数据合规裁定 → 全库预筛 → RPEJSON 解析器 → 契约断言 → MERT 特征 |
+| **2 强度场** | field 模块（双积分路径）→ 掩码补全主干 → **G1-G4 全绿** → B1-B6 对照 → 首版可玩谱面 |
+| **3 对齐与产品化** | DPO / 风格检索（待重估）→ 推理加速 → API / Demo |
 
-详见 [docs/BasePlan.md §7](docs/BasePlan.md) 与各模块 [plans/](docs/plans/README.md)。
+详见 [docs/BasePlan.md §7](docs/BasePlan.md)。
 
 ## 文档
 
-- [docs/BasePlan.md](docs/BasePlan.md) — **技术奠基文档（最高权威）**
-- [docs/CODE_STRUCTURE.md](docs/CODE_STRUCTURE.md) — 代码结构详解
-- [docs/plans/](docs/plans/README.md) — 各模块实施计划（00-09）
-- [docs/decisions/](docs/decisions/README.md) — RFC 决策记录
-- [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) — 贡献指南
-- [docs/glossary.md](docs/glossary.md) — 术语表
-- [CLAUDE.md](CLAUDE.md) — AI 协作宪法
+- [docs/BasePlan.md](docs/BasePlan.md) — **技术奠基（最高权威）**
+- [CLAUDE.md](CLAUDE.md) — AI 协作宪法（红线、模块拓扑、开发流程）
+- [docs/decisions/](docs/decisions/README.md) — RFC 决策记录（**RFC-0029 为当前范式权威**）
+- [docs/knowledges/](docs/knowledges/) — 格式 / 单位几何 / 数据集 / 文献 事实库（**含 A 级源码证据与显式存疑清单**）
+- [docs/plans/](docs/plans/README.md) — 各模块实施计划（00-08）
+- [docs/TRAINING.md](docs/TRAINING.md) — 训练操作手册
+- [docs/POSTMORTEM-2026-08-05-frame-rate-misalignment.md](docs/POSTMORTEM-2026-08-05-frame-rate-misalignment.md) — 帧率事件根因与门禁由来
 - [AGENTS.md](AGENTS.md) — 子 agent 协作约定
 
 ## 协作
 
 - 默认分支 `main`；特性分支 `feat/<module>-<topic>`。
 - 提交遵循 Conventional Commits（pre-commit 强制）。
-- 偏离 BasePlan 的技术变更须先开 RFC（[docs/decisions/](docs/decisions/README.md)）。
-- 换行符统一 LF，模型权重/音频/数据集不入库（走 LFS/外部存储）。
+- **偏离 BasePlan 的技术变更须先开 RFC**；范式级变更须修宪（改 CLAUDE.md 红线）。
+- 换行符统一 LF；模型权重 / 音频 / 数据集不入库（走 LFS 或外部存储）。
 
 ## 许可证
 
-[Apache-2.0](LICENSE) © 2026 BeatMorph Team。
+Apache-2.0 © 2026 BeatMorph Team。
 
-> 训练数据仅用于学术/研究目的；生成系统输出不包含原音频拷贝（BasePlan §4.3 版权原则）。
+> 训练数据仅用于学术/研究目的；生成系统输出不包含原音频拷贝。**数据来源的合规性仍在裁定中**（见上文）。

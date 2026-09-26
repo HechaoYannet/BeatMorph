@@ -8,7 +8,7 @@
 
 详细计划：docs/plans/03-planner-density.md
 
-输入契约（不可破）：``audio_emb [B, T_seq, 768]`` 来自 Stage 0（MERT）。
+输入契约（不可破）：``audio_emb [B, T_seq, 1024]`` @ 75Hz 来自 Stage 0（MERT）。
 按 Section 时间边界把帧级 ``audio_emb`` mean-pool 成段级序列，喂 6 层双向
 Transformer，输出 3 回归头（sigmoid [0,1]）+ 5 类分类头。
 """
@@ -23,6 +23,7 @@ from torch import nn
 
 from beatmorph.core.contracts import (
     MERT_DEFAULT_FEAT_DIM,
+    MERT_FRAME_RATE_HZ,
     Section,
 )
 from beatmorph.core.logging import get_logger
@@ -37,7 +38,7 @@ _DEFAULT_METER = 4  # 默认拍号 4/4
 _DEFAULT_N_HEADS = 8
 _TYPE_CLASSES = 5
 _TYPE_NAMES = ("intro", "verse", "chorus", "bridge", "outro")
-_FRAME_RATE = 25.0  # audio_emb 帧率 Hz（契约 MERT_FRAME_RATE_HZ）
+_FRAME_RATE = MERT_FRAME_RATE_HZ  # 75.0；派生量。此前独立复制的 25.0 是错值，见 POSTMORTEM-2026-08-05
 
 
 class DensityPlanner(nn.Module):
@@ -276,14 +277,14 @@ class DensityPlanner(nn.Module):
         """按时间边界把帧级 audio_emb mean-pool 成段级 [B, S, dim]。
 
         Args:
-            audio_emb: ``[B, T_seq, dim]``，帧率 25Hz。
+            audio_emb: ``[B, T_seq, dim]``，帧率 ``_FRAME_RATE``（契约派生）。
             section_bounds: ``[B, S+1]`` 秒。
         """
         batch, t_seq, dim = audio_emb.shape
         n_sec = section_bounds.shape[1] - 1
         device = audio_emb.device
 
-        # 帧 index → 时间（秒）：frame t / 25
+        # 帧 index → 时间（秒）：frame t / _FRAME_RATE（75Hz，非 25Hz）
         frame_times = torch.arange(t_seq, device=device, dtype=audio_emb.dtype) / _FRAME_RATE  # [T]
         out = audio_emb.new_zeros(batch, n_sec, dim)
         for s in range(n_sec):

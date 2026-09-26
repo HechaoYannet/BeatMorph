@@ -1,7 +1,7 @@
 """Stage 0：多模态音频编码器（MERT-v1-330M + Adapter）。
 
 奠基文档 §3.1。冻结 MERT 主干，仅训轻量 Adapter（LoRA，RFC-0003 采纳），
-输出 25Hz、768 维帧级序列 embedding。Demucs 分轨为可选增强
+输出帧率由主干 stride 派生（MERT-v1-330M = 75Hz）、1024 维帧级序列 embedding。Demucs 分轨为可选增强
 （:mod:`beatmorph.audio.separation.demucs`，本 Phase 1 留 stub）。
 
 详细计划：docs/plans/01-audio-encoder.md
@@ -11,8 +11,10 @@
   source 优先级思路。MERT 主干全部 ``requires_grad_(False)`` 冻结。
 - Adapter：``"lora"``（peft 注入 attention q/v，rank=8）/ ``"mlp"``（2 层 MLP 残差挂
   第 ``layer`` 层后）/ ``"none"``（纯冻结直出，离线提取用）。
-- 输出契约（不可破）：``[B, T_seq, 768]`` @25Hz，``T_seq ≈ duration_s * 25``，
-  768 与 Stage1/Stage2 直连免投影（契约 ``AudioEmbedding.feat=768``）。
+- 输出契约（不可破）：``[B, T_seq, 1024]``，帧率由主干 config **派生**
+  （``MERT_SAMPLE_RATE_HZ / prod(conv_stride) = 24000/320 = 75 Hz``，见
+  ``output_frame_rate()`` 与 docs/POSTMORTEM-2026-08-05-frame-rate-misalignment.md），
+  ``T_seq ≈ duration_s * 75``；1024 与 Stage1/Stage2 直连免投影。
 - 长音频滑窗 5s / 重叠 1s + 重叠区平均（plan 01 §4，RFC-0002 暂定固定窗）。
 """
 
@@ -23,7 +25,11 @@ from typing import TYPE_CHECKING, Protocol
 import torch
 from torch import nn
 
-from beatmorph.core.contracts import MERT_DEFAULT_FEAT_DIM, MERT_FRAME_RATE_HZ
+from beatmorph.core.contracts import (
+    MERT_DEFAULT_FEAT_DIM,
+    MERT_FRAME_RATE_HZ,
+    MERT_SAMPLE_RATE_HZ,
+)
 from beatmorph.core.logging import get_logger
 
 if TYPE_CHECKING:
@@ -33,10 +39,27 @@ logger = get_logger(__name__)
 
 # ── 常量 ──────────────────────────────────────────────────────
 _DEFAULT_MODEL_NAME = "m-a-p/MERT-v1-330M"
-_TARGET_SR = 24000  # MERT-v1-330M 官方要求 24kHz 单声道
+_TARGET_SR = MERT_SAMPLE_RATE_HZ  # MERT-v1-330M 官方要求 24kHz 单声道
 _WINDOW_S = 5.0  # 滑窗 5s
 _OVERLAP_S = 1.0  # 重叠 1s
-_FRAME_RATE = MERT_FRAME_RATE_HZ  # 25.0
+_FRAME_RATE = MERT_FRAME_RATE_HZ  # 75.0（派生量，仅作主干 config 不可用时的兜底）
+
+
+def _conv_stride_product(config: object) -> int | None:
+    """从模型 config 推导特征提取器总下采样倍数（`prod(conv_stride)`）。
+
+    MERT-v1-330M 的 `conv_stride = [5, 2, 2, 2, 2, 2, 2]` → 320。返回 `None`
+    表示 config 不可读/无该字段——调用方应回落契约常量，而不是猜一个数。
+    """
+    strides = getattr(config, "conv_stride", None)
+    if strides is None and isinstance(config, dict):
+        strides = config.get("conv_stride")
+    if not strides:
+        return None
+    total = 1
+    for s in strides:
+        total *= int(s)
+    return total if total > 0 else None
 
 
 class MERTAdapter(nn.Module):
@@ -45,7 +68,7 @@ class MERTAdapter(nn.Module):
     Args:
         model_name: 模型标识。默认 HF id ``m-a-p/MERT-v1-330M``；ModelScope 仓 ID
             可经同名覆盖（需与 ``source`` 配合）。
-        layer: 取第几层 hidden state（默认 12，768 维）。
+        layer: 取第几层 hidden state（默认 12；MERT-v1-330M 各层均为 1024 维）。
         adapter: ``"lora"`` / ``"mlp"`` / ``"none"``。默认 ``"lora"``（RFC-0003）。
         lora_rank: LoRA rank（默认 8）。
         lora_alpha / lora_dropout: LoRA 超参。
@@ -113,9 +136,10 @@ class MERTAdapter(nn.Module):
         """编码音频为帧级 embedding。
 
         Args:
-            wav: ``[B, samples]`` 16kHz 单声道波形。
+            wav: ``[B, samples]`` 24kHz 单声道波形（``_TARGET_SR``）。
         Returns:
-            ``[B, T_seq, feat]`` 帧级 embedding，帧率 25Hz，``feat=768``。
+            ``[B, T_seq, feat]`` 帧级 embedding；帧率见 :meth:``output_frame_rate``
+            （MERT-v1-330M = 75Hz），``feat`` = :data:``MERT_DEFAULT_FEAT_DIM``。
         """
         if wav.dim() == 1:
             wav = wav.unsqueeze(0)
@@ -148,14 +172,30 @@ class MERTAdapter(nn.Module):
             pos += hop
 
         # 重叠区平均：把每段按其覆盖的帧对齐拼回，重叠帧取均值
-        return self._merge_overlapping(outs, starts, hop)
+        # 帧率从主干 config 派生（不再假设 25Hz）——帧率错 = 接缝处系统性错位
+        return self._merge_overlapping(outs, starts, hop, self.output_frame_rate())
 
     def encode(self, wav: torch.Tensor) -> torch.Tensor:
         """契约名（plan 01 §3.1），等价于 :meth:`forward`。"""
         return self.forward(wav)
 
+    def output_frame_rate(self) -> float:
+        """输出帧率（Hz），由主干 config 的 `conv_stride` 推导。
+
+        `24000 / prod([5, 2, 2, 2, 2, 2, 2]) = 24000 / 320 = 75.0`。主干 config
+        不可读时回落契约常量 :data:`MERT_FRAME_RATE_HZ` 并告警——绝不静默假设。
+        """
+        stride = _conv_stride_product(getattr(self.backbone, "config", None))
+        if stride is None:
+            logger.warning(
+                "无法从主干 config 推导 conv_stride，回落契约帧率 %.1fHz",
+                MERT_FRAME_RATE_HZ,
+            )
+            return MERT_FRAME_RATE_HZ
+        return _TARGET_SR / stride
+
     def _encode_chunk(self, wav: torch.Tensor) -> torch.Tensor:
-        """编码一段 ≤5s 音频 → [B, T_seq, 768]。"""
+        """编码一段 ≤5s 音频 → [B, T_seq, `MERT_DEFAULT_FEAT_DIM`]。"""
         # MERT 需要 input_values（[normalized]），特征提取器做归一
         # 特征提取器期望 1D 波形；传入 2D [1, samples] 在新版 transformers
         # 中可能误加 channel 维 → squeeze 到 1D 后调用
@@ -183,7 +223,7 @@ class MERTAdapter(nn.Module):
             )
         emb = hidden_states[self.layer].to(dtype)
 
-        # MLP Adapter：在选定层输出后接残差（不投影，保 768 维）
+        # MLP Adapter：在选定层输出后接残差（不投影，保 1024 维）
         if self.adapter == "mlp" and self.adapter_module is not None:
             emb = emb + self.adapter_module(emb)
         # LoRA 已通过 peft 注入 backbone 内部，无需额外处理
@@ -196,9 +236,18 @@ class MERTAdapter(nn.Module):
         outs: list[torch.Tensor],
         starts: list[int],
         hop_samples: int,
+        frame_rate: float = _FRAME_RATE,
     ) -> torch.Tensor:
-        """把若干重叠段的 frame 序列按 hop 对齐拼回，重叠帧取均值。"""
-        frame_rate = _FRAME_RATE
+        """把若干重叠段的 frame 序列按 hop 对齐拼回，重叠帧取均值。
+
+        Args:
+            outs: 各段 `[B, T_seg, feat]`。
+            starts: 各段在原始波形里的起始**样本**偏移。
+            hop_samples: 段间 hop（样本数）；仅作调用方语义记录，本函数按
+                `starts` 反推帧偏移。
+            frame_rate: 输出帧率 Hz；**必须**传 :meth:`output_frame_rate()`
+                的返回值，默认值只是兜底。
+        """
 
         total_frames = 0
         for seg, start_s in zip(outs, starts, strict=True):

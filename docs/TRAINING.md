@@ -1,345 +1,434 @@
 # BeatMorph 训练操作手册
 
-> 本文档是 Phase 1 「环境 → 数据下载 → 预处理 → MERT 离线提取 → Stage1 训练」的**端到端操作手册**,
-> 并说明各产物如何供 VQ-VAE(Plan 02)与 AR Transformer(Plan 04)开发衔接。
-> 设计依据见 [`BasePlan.md`](BasePlan.md) §4/§5/§7 与各 [plans/](plans/README.md);数据获取见 [RFC-0024](decisions/RFC-0024-sayobot-data-source.md)。
+> **版本**：v3.0（Phigros 范式，对齐 [BasePlan v3.0](BasePlan.md) 与 [RFC-0029](decisions/RFC-0029-phigros-continuous-chart-generation.md)）
+> 本文是 **「合规裁定 → 数据 → 解析 → 特征 → 强度场 → 门禁 → 训练」** 的端到端操作手册。
+> 技术权威：[BasePlan.md](BasePlan.md) ｜ 格式事实：[knowledges/phigros-format.md](knowledges/phigros-format.md) ｜ 单位几何：[knowledges/phigros-units-and-geometry.md](knowledges/phigros-units-and-geometry.md) ｜ 数据源：[knowledges/phira-dataset-survey.md](knowledges/phira-dataset-survey.md)
 
 ---
 
-## 0. 前置约定
+## ⚠️ 0. 先读：两道**不可跳过**的顺序约束
 
-- 目标设备:**GPU 设备**(Stage1 训练需 CUDA;MERT 提取 FP16 显著加速)。CPU 仅可做数据解析/小规模冒烟。
-- 操作系统:Linux 优先(GPU 训练);Windows 亦可(uv 命令一致,PowerShell 语法略异)。
-- 包管理:统一 [`uv`](https://docs.astral.sh/uv/),**禁止直接 pip**(保证 `uv.lock` 可复现)。
-- 红线:模型权重/原始音频/全量数据集**不入库**(见 [`CLAUDE.md`](../CLAUDE.md) §3 红线 5),走 Git LFS 或各设备自行提取。
+> ### ✅ 约束一（已裁定 2026-08-05）：**数据合规由决策者承担风险，训练可启动**
+>
+> 风险事实留档：唯一可得的万级数据源（**Phira 官方 API，实测 9649 张**）其 ToU **未授予机器学习训练权利**，明示「**不保证用户拥有分发已上传内容的权利**」、禁止未经法律授权**创建衍生作品**；**代码许可证（GPL-3.0 / MIT）不覆盖用户上传内容**。
+> **裁决**：风险由决策者自行承担（定位为对 Phira 社区的贡献与共创，最终善后由决策者合规完成）。
+> **硬约束**：① **最终不发布模型权重**（裁决成立的前提，项目级承诺）② 数据可本地落盘但**不得入库** ③ 脚本须记录来源与用途 ④ 发布权重前必须重新裁定。
+> 出处：[CLAUDE.md](../CLAUDE.md) 红线 5 附注、[RFC-0029 §8.3 Q11b](decisions/RFC-0029-phigros-continuous-chart-generation.md)、[survey](knowledges/phira-dataset-survey.md) §6。
+>
+> ### 🔴 约束二：**G1-G4 门禁必须在扩数据之前跑通**
+>
+> 任何新模型/新范式，**先在 1–4 个样本上把门禁跑绿，再谈扩数据规模**；
+> 门禁实现在 [`beatmorph/infra/sanity.py`](../beatmorph/infra/sanity.py)，结果必须写入训练日志。
+> 出处：CLAUDE.md 红线 7、BasePlan §9、RFC-0029 §7 硬约束 3。
+
+**执行状态图例**（本文对每一步都标注）：
+
+| 标记 | 含义 |
+|------|------|
+| ✅ **可执行** | 命令/路径**当前仓库已存在**，可直接跑 |
+| 🟡 **部分可执行** | 骨架存在但仍是 osu!mania 版，需迁移（见 [CODE_STRUCTURE.md](CODE_STRUCTURE.md) §3.1） |
+| ⬜ **待建** | 目标组件尚未实现，本文只给**行为规范**，不给假命令 |
 
 ---
 
-## 1. 环境准备
+## 1. 环境准备 ✅
 
-```bash
-# 1.1 clone(含 LFS,拉取 data/dev_sample 小型冒烟样本)
+### 1.1 获取仓库与安装依赖
+
+```powershell
 git clone https://github.com/HechaoYannet/BeatMorph.git BeatMorph
 cd BeatMorph
-git lfs install        # 首次启用 LFS(若未全局启用)
-git lfs pull           # 拉取 LFS 大文件(当前仅 data/dev_sample/charts.parquet)
 
-# 1.2 安装依赖(GPU 训练全量组)
-uv sync --extra audio --extra train --extra rag --extra data --group dev
+# 全量开发环境（audio + train + data + dev 组）
+uv sync --extra audio --extra train --extra data --group dev
 ```
 
-**依赖组说明**(`pyproject.toml [project.optional-dependencies]`):
+**依赖组说明**（`pyproject.toml [project.optional-dependencies]`）：
 
-| extra | 含 | 何时需要 |
+| extra / group | 含 | 何时需要 |
 |-------|----|---------|
-| `audio` | transformers / **modelscope** / peft / soundfile / librosa | MERT 编码器、音频加载(Stage0/提取) |
-| `train` | pytorch-lightning / wandb / pyarrow / datasets | Stage1 训练、Parquet 读写 |
-| `rag` | faiss-cpu | Phase2 RAG(Phase1 可不装) |
-| `data` | httpx | `scripts/download_sayobot.py` 数据下载 |
-| `dev`(默认组) | ruff / pytest / mypy / pre-commit | 开发/测试 |
+| `audio` | transformers / **modelscope** / peft / soundfile / librosa | MERT 权重与音频加载（Stage 0 / 特征提取） |
+| `train` | pytorch-lightning / wandb / datasets / pyarrow / tensorboard | 训练栈、Parquet 读写 |
+| `rag` | faiss-cpu | Phase 3 待重估（可不装） |
+| `data` | httpx | 数据获取脚本的 HTTP 客户端 |
+| `dev`（默认组） | ruff / pytest / mypy / pre-commit / respx | 开发与测试 |
 
-> **CUDA PyTorch**:`pyproject.toml [tool.uv]` 已配 `pytorch-cu130` index,`uv sync` 自动选 CUDA 轮子。
-> 若设备 CUDA 版本不匹配 13.0,按 [PyTorch 官网](https://pytorch.org/) 指引调整 index。
+> **包管理纪律**：统一 `uv`，**禁止直接 pip**（保证 `uv.lock` 可复现）。
+> CUDA 轮子由 `pyproject.toml [tool.uv]` 的 `pytorch-cu130` index 选择；CUDA 版本不匹配时按 [PyTorch 官网](https://pytorch.org/) 调整 index。
 
-### 环境变量
+### 1.2 环境变量
 
-```bash
-export BEATMORPH_RAW_DIR=data/raw           # 原始 .osu+音频 落地根(默认)
-export BEATMORPH_DATA_DIR=data/processed    # 预处理产物 + embeddings 根(默认)
-export BEATMORPH_RUNS_DIR=runs              # 训练产出(ckpt/log)根(默认)
-# MERT 权重 cache(二选一,见 §2):
-export HF_HOME=$HOME/.cache/huggingface     # HuggingFace cache
-# 或 ModelScope cache(国内推荐):export MODELSCOPE_CACHE=$HOME/.cache/modelscope
+```powershell
+$env:BEATMORPH_DATA_DIR  = "data/processed"   # 预处理产物 + 特征缓存根
+$env:BEATMORPH_RUNS_DIR  = "runs"             # 训练产出（ckpt / log）根
+$env:BEATMORPH_CACHE_DIR = ".cache"
+$env:BEATMORPH_MODELS_DIR = "models/pretrained"
+$env:BEATMORPH_RAW_DIR   = "data/raw"         # 原始谱面包落地根（v2.x 为 .osu + 音频）
+$env:CUDA_VISIBLE_DEVICES = "0"
+
+# MERT 权重缓存（二选一）
+$env:HF_HOME = "$HOME/.cache/huggingface"
+# 或（国内推荐）: $env:MODELSCOPE_CACHE = "$HOME/.cache/modelscope"
 ```
 
-### 冒烟验证
+> 完整样例见 [`.env.example`](../.env.example)。**权重 / 原始音频 / 全量数据集绝不入库**（红线 5）。
 
-```bash
-uv run pre-commit install        # 提交钩子
-make test-fast                   # 快测试(跳过 slow/gpu/e2e):应全绿
-uv run ruff check . && uv run mypy beatmorph   # lint + 类型:应 0 error
-```
+### 1.3 MERT 权重就位 ✅（本机已缓存于 `models/pretrained/m-a-p/MERT-v1-330M`）
 
-> `tests/unit/audio/test_mert.py` 与 `tests/integration/test_audio_to_plan.py` 标 `@pytest.mark.gpu`,
-> 且会在 MERT 权重未缓存时 **skip**(不失败)。权重就位后(见 §2)自动解除 skip。
-
----
-
-## 2. MERT 权重获取
-
-MERT-v1-330M(~1.3GB)从 **ModelScope → HuggingFace fallback** 拉取(`configs/model/mert.yaml: source: modelscope`)。
-
-```bash
-# 方式 A:ModelScope(国内可达性最好,默认)
+```powershell
+# 方式 A：ModelScope（国内可达性最好）
 uv run python -c "from modelscope import snapshot_download; print(snapshot_download('m-a-p/MERT-v1-330M'))"
 
-# 方式 B:HuggingFace(海外)
+# 方式 B：HuggingFace
 uv run python -c "from transformers import AutoModel; AutoModel.from_pretrained('m-a-p/MERT-v1-330M', trust_remote_code=True)"
 ```
 
-权重落到 `$HF_HOME` 或 `$MODELSCOPE_CACHE`。`MERTAdapter` 构造时按 `source` 优先级自动解析本地缓存,**不再联网**(除非 cache 缺失)。
+### 1.4 冒烟验证 ✅
 
-**验证权重就位**(应返回 True,且随后 MERT 测试不再 skip):
-
-```bash
-uv run python -c "from transformers import AutoConfig; print(AutoConfig.from_pretrained('m-a-p/MERT-v1-330M', trust_remote_code=True) is not None)"
-uv run pytest tests/unit/audio/test_mert.py -q     # 权重+GPU 就位后不再 skip
+```powershell
+uv run pre-commit install                 # 提交钩子
+make test-fast                            # 快测试（跳过 slow/gpu/e2e）：应全绿
+uv run ruff check . ; uv run mypy beatmorph   # lint + 类型：应 0 error
 ```
+
+### 1.5 ★ 帧率 / 单位自检（**每次动过音频侧代码后都要跑**）✅
+
+这是 25 Hz 事件的收尾证据工具：只依赖 torch，直接按官方 `config.json` 的 `conv_kernel`/`conv_stride` 搭卷积栈实测帧数，并交叉核对真实 checkpoint 的卷积核形状。
+
+```powershell
+uv run python scripts/verify_mert_frame_rate.py --model-dir models/pretrained/m-a-p/MERT-v1-330M
+```
+
+**期望输出**（关键行）：
+
+```
+[config] conv_stride = [5, 2, 2, 2, 2, 2, 2]  -> prod = 320
+[derive] frame rate  = 24000/320 = 75.0 Hz
+[torch ]  1.0s ->    74 frames = 74.00 Hz
+[torch ]  2.0s ->   149 frames = 74.50 Hz
+[torch ]  5.0s ->   374 frames = 74.80 Hz
+[assert] 5s 窗口应为 374 帧（75Hz），实测 374 帧 -> OK
+[ckpt  ] conv_layers.0.weight: (512, 1, 10) ; encoder.layers.0.attention.k_proj.weight: (1024, 1024)  (hidden = 1024)
+```
+
+- ✅ **判据**：5 s → **374 帧**；帧率 **75 Hz**（`24000 / 320`，±1 帧来自卷积取整）。
+- 契约侧对应测试（**不依赖权重与 GPU，默认 CI 内跑**）：`uv run pytest tests/unit/audio/test_frame_rate_contract.py -q`。
+- 参考实现：[POSTMORTEM-2026-08-05](POSTMORTEM-2026-08-05-frame-rate-misalignment.md) §2.1。
 
 ---
 
-## 3. 真实数据下载(sayobot.cn 镜像,RFC-0024)
+## 2. 数据合规（**已由决策者裁定，2026-08-05**）✅
 
-```bash
-# 列表模式:按 offset 翻页抓 osu!mania 4K 谱面集(默认 --only-4k --skip-unranked)
-uv run python scripts/download_sayobot.py \
-    --list-mode \
-    --max-sets 5000 \
-    --raw-dir data/raw \
-    --rate-delay 1.0
+### 2.1 风险事实留档（不因裁定而消失；只陈述公开声明，不构成法律意见）
 
-# 或关键字搜索
-uv run python scripts/download_sayobot.py --keyword "felys" --max-sets 50
-```
+| 事实 | 出处 |
+|------|------|
+| Phira ToU：「对于用户上传内容，Phira **不保证用户拥有分发已上传内容的权利**」 | [survey](knowledges/phira-dataset-survey.md) §6.1 |
+| ToU：用户「只有在获得明确授权的情况下才能使用此内容」，禁止未经法律授权**创建衍生作品** | 同上 |
+| DMCA 页：平台自认「**may not be observed in some cases**」（存在未获授权的上传） | [survey](knowledges/phira-dataset-survey.md) §6.2 |
+| 音频与曲绘**随谱 100% 捆绑分发**（196/196 实测）→ 版权风险与谱面作者授权是**两层** | [survey](knowledges/phira-dataset-survey.md) §4.3/§6.5 |
+| 代码许可证（`TeamFlos/phira` GPL-3.0、`phira-web` MIT）**不覆盖用户上传内容** | [survey](knowledges/phira-dataset-survey.md) §6.4 |
+| 解析器侧：prpr **GPL-3.0**、phichain **LGPL-3.0** → **只读行为规范、独立实现**，逐行移植有衍生作品风险 | RFC-0029 §4.2 |
 
-**产物**(`$BEATMORPH_RAW_DIR`,均 gitignored):
-- `data/raw/{sid}/*.osu` + 引用的音频(`audio.mp3`/`.ogg`)
-- `data/raw/manifest.jsonl`:每行一个 set 的集级元数据(`sid/stars/play_count/approved/...`),供 §4 激活质量过滤
+### 2.2 裁决（2026-08-05）与由此产生的硬约束
 
-**关键参数**(对照 [`configs/data/download.yaml`](../configs/data/download.yaml)):
-- `--only-4k` / `--no-only-4k`:仅保留含 4K mania diff 的 set(奠基 §1.1 4K 优先)
-- `--skip-unranked` / `--no-skip-unranked`:跳过未 Ranked/Pending(`order=0` 或 `approved=3`,§4.3 本就会剔,此为省带宽)
-- `--rate-delay`:每 set 间隔秒(礼貌限流,默认 1.0)
-- `--retries`:连接级重试(默认 3)
-- `--no-verify`:`cmcc.sayobot.cn:25225` 证书链 httpx 默认验不过,脚本遇 `SSLCertVerificationError` 自动降级 `verify=False` 并 warn;`--no-verify` 全程不校验
+**裁决**：由**决策者自行承担全部数据合规风险**——本项目定位为对 Phira 社区的**贡献与共创**行为，最终处理与善后由决策者以合规方式完成。**训练可启动。**
 
-**吞吐建议**:10K set 单线程 + 1s 限流约 3-4 小时(含下载+解压)。sayobot 为非官方镜像,
-若遇 429/封禁,增大 `--rate-delay` 或换时段。断点续传:重跑同命令,已下载的 `{sid}/` 自动跳过。
+**项目级硬约束**（红线 5 附注 / RFC-0029 §7 硬约束 7）：
 
-> TOS/版权:训练数据仅学术研究用途(BasePlan §4.3)。下载产物不入库(红线 5)。
+| # | 约束 |
+|---|------|
+| 1 | **最终不发布模型权重** —— 本裁决成立的前提条件，属**项目级承诺** |
+| 2 | 谱面与音乐数据**允许本地落盘**，但**不得入库**（红线 5） |
+| 3 | 获取与处理脚本须**记录来源与用途**，便于追溯与善后 |
+| 4 | **发布权重前必须重新裁定** —— 本裁决不覆盖任何分发场景 |
+
+> **对操作的影响**：第 3–7 节现在可以执行到"落音频 / 开训"。但**第 3 节的数据获取脚本必须实现约束 3 的来源记录**，且必须确认数据目录未被版本控制纳入（红线 5）。
 
 ---
 
-## 4. 数据预处理(PreprocessPipeline,§4.2 Step1-2)
+## 3. 数据获取：Phira API ⬜（脚本待建）
 
-```bash
-uv run python -c "
-from pathlib import Path
-from beatmorph.data.pipeline.embed import PreprocessPipeline
+> ⚠️ **当前 `scripts/` 下只有 `download_sayobot.py`（v2.x，已退役）与 `verify_mert_frame_rate.py`（§1.5 仍有效）**——
+> **Phira 获取脚本尚不存在**。本节给的是**必须实现的行为规范**，不是可复制粘贴的命令。
+> 实现依据：[survey](knowledges/phira-dataset-survey.md) §7.6 / §9。
 
-pipe = PreprocessPipeline(
-    raw_dir=Path('data/raw'),
-    out_dir=Path('data/processed'),
-    manifest_path=Path('data/raw/manifest.jsonl'),   # 传入才激活 §4.3 质量过滤
-)
-pipe.run()           # 解析 .osu → Chart + 清理 + §4.3 过滤 + compute_section_stats 伪标签
-pipe.write_stats()   # 写 data/processed/stats.json
-"
-```
+### 3.1 元数据枚举（322 页）
 
-**产物**(`$BEATMORPH_DATA_DIR`):
-- `charts.parquet`(主)+ `charts.jsonl`(pyarrow 缺失时兜底):每行一个 Chart IR,含 `notes` / `bpm_points` / `sections`(伪标签) / `meta`(含注入的 `difficulty_rating`/`playcount`/`audio_duration`)
-- `stats.json`:`{total, parsed, passed_filter, skipped_mode, failed}`
+- 入口：`GET https://api.phira.cn/chart`；**响应键是 `results`**（不是 C 级文档写的 `result`）。
+- **`pageNum` 上限 30**（31 → HTTP 400）；`page` 从 1 到 **322**，末页 19 条 → 总数 **9649**。
+- **没有按定数（`difficulty`）过滤的参数**，分层只能本地做；`level` 是自由文本，**只能用 `difficulty`（f32）做数值分层**（且比较前 round 到 0.1）。
+- 每次请求之间加 sleep（0.3–1 s；未观测到限流，但**是否有限流未查证**）。
+- 落盘字段：`id, name, level, difficulty, charter, composer, tags, created, updated, chartUpdated, file, preview, illustration`。
+- **"上架/ranked"与"全部"必须显式决策**：`stable=true` 仅 627 张、`type=2`（unstable）9022 张 → 建议全用（`type=3`）但把 `stable/ranked` 作为**元数据特征**保留，便于做"只在高质子集上训练"的消融。
 
-**发生了什么**:
-1. `parse_osu`:`OsuManiaReader` 解析 `.osu` → `Chart`;多编码兜底;负时间/越界 lane Note 清理。
-2. **manifest 注入**(RFC-0024):按 `beatmap_set_id` 把集级 `difficulty_rating`/`playcount` 注入 `Chart.meta`(只加不覆盖)。
-3. **§4.3 质量过滤**:传入 manifest 后,`≥3 星 且 play_count > 500` 真正生效;未传入则走「Phase 1 relaxed pass」(宽松通过,用于无元数据的 fixture 测试)。
-4. **音频时长注入**:`soundfile.info` 读音频全长 → `meta["audio_duration"]`,使 Section 边界与推理同源。
-5. `compute_section_stats`:按 `bpm_points` 切每 4 小节一个 `Section`,回填 `density_target/energy_level/rest_probability/sections_type`(Stage1 伪标签,零标注)。
-6. **mode 诚实标记**(RFC-0025):非 4K mania 标真实 K 数落盘,**不降级 4K**;4K 主路径靠训练层 `mode==MANIA_4K` 过滤守 R-6(见 §6 `PlannerDataset`)。
+### 3.2 全库预筛（**必须先做，省约 90% 带宽**）
 
-> 多 K 谱面(5/6/7/8K)会在此步骤落盘到 `charts.parquet`,但 `PlannerDataset` 训练时会过滤掉,只吃 4K。
+- 谱面包 CDN **支持 HTTP Range**（`Range: bytes=0-1023` → `206`）；全量直抓约 **76 GB**（推断）。
+- 流程：① `HEAD`/`Range: bytes=0-0` 取总长 → ② 抓 zip **尾部 ~200 KB** 定位 EOCD（`PK\x05\x06`）读**中央目录** → ③ 读 `info.yml` 条目拿 `chart`（谱面文件名）与 `music`（音频名）→ ④ **只 `Range` 取谱面条目前 24 KB 压缩字节**做格式嗅探。
+- **格式嗅探启发式**（实测有效但非权威）：出现 `"eventLayers"` → **RPE**；出现 `"notesAbove"`/`"notesBelow"`/`"formatVersion"` → **官谱 JSON**；文本且符合 PEC 行结构 → **PEC**；其余（PBC 等）**直接拒收并记账**。
+- 产出直方图（格式 / 大小 / 是否有音频 / 判定线数量）**再决定下载策略**。
+- 实测吞吐参考：单线程 ~30 s/张 → 8 线程 ~1.8 s/张；**务必自行限速**。
 
----
+### 3.3 选择性下载
 
-## 5. MERT 离线提取(§4.2 Step3)
+- ⚠️ **必须按 `info.yml.chart` 定位谱面文件**，**不要"取最大的 .json"**（实测有包内 `.json` 解压总量 294 MB，而谱面文件只有 3.25 MB）。
+- ⚠️ **必须按 `info.yml.music` 定位音频**（音频文件名无规律），并按 **sha1 去重**（同曲多谱共享一份音频）。
+- ⚠️ **必须重试**：200 张扫描中 7 张（3.5%）出现超时/连接重置 → 指数退避 + Range 断点续传。
+- ⚠️ **落盘不要用原始文件名**（实测含全角字符），用 `<chart_id>/<chartfile>`；音频与谱面**分目录存放**，便于"只训结构 / 联合训练"切换。
 
-```bash
-uv run python -c "
-from pathlib import Path
-from beatmorph.data.pipeline.embed import PreprocessPipeline
+### 3.4 三类静默陷阱（**错了不会报错，只会静默错位**）
 
-pipe = PreprocessPipeline(raw_dir=Path('data/raw'), out_dir=Path('data/processed'))
-pipe.extract_mert_embeddings(
-    audio_dir=Path('data/raw'),       # rglob *.osu,按 .osu 父目录解析 chart.audio_path
-    source='modelscope',              # 权重来源优先级
-    device='auto',                    # CUDA 可用则用
-    limit=None,                       # None=全量
-)
-"
-```
-
-**产物**:`$BEATMORPH_DATA_DIR/embeddings/mert_v1_330m/{beatmap_set_id}.pt`(按 set 去冗余,同 set 多难度共享一份),每个 `[T_seq, 1024]` float32
-(`T_seq ≈ duration_s × 25`)。`adapter='none'`(纯冻结主干表征,离线提取不训 Adapter)、FP16、**断点续抽**(已存在 `.pt` 跳过)。
-
-**校验**:
-
-```bash
-uv run python -c "
-import torch, glob
-for p in sorted(glob.glob('data/processed/embeddings/mert_v1_330m/*.pt'))[:3]:
-    e = torch.load(p, map_location='cpu', weights_only=True)
-    print(p, tuple(e.shape), e.dtype)   # 期望 (T_seq, 768) float32
-"
-```
-
-**耗时/显存**:单曲 T4 FP16 约 0.3-0.5s(单曲);10K 约 1-2 小时。长音频按 5s 窗/1s 重叠滑窗 + 重叠区平均。离线一次产出多次训练复用(§4.2「节省训练时算力」)。
-
-> 若跳过本步,`PlannerDataset` 会因缺 embedding 把该样本 skip(`n_missing` 计数入日志)。
+| # | 陷阱 | 证据 |
+|---|------|------|
+| 1 | **文件后缀完全不可信**：`.json` 里可能是 PEC 文本 | 实测 `chart/7039` 的 `24432296.json` 内容是 PEC |
+| 2 | **`info.yml.format` 实测恒为 `null`**，且 196/196 张的谱面文件都**不叫** `chart.json` → 必须按**内容**判型 + 读 `info.yml.chart` 定位 | [survey](knowledges/phira-dataset-survey.md) §4.2/§5.3 |
+| 3 | **note `type` 数字在两套格式中含义不同**（RPE 1 Tap/2 Hold/3 Flick/4 Drag；官谱 2 Drag/3 Hold/4 Flick）→ 混用会**静默全员错位** | [phigros-format.md](knowledges/phigros-format.md) §5.2 |
 
 ---
 
-## 6. Stage1 密度规划训练(奠基 §7 Phase1)
+## 4. RPEJSON 解析 → Chart IR ⬜（`io/formats/rpejson/` 待建）
 
-```bash
-# Hydra 驱动,配置见 configs/stage1_planner.yaml
-uv run python -m beatmorph.cli.train --config-name stage1_planner
+> 目标模块 `beatmorph/io/formats/rpejson/` **当前不存在**（`io/formats/` 下只有 `base.py`/`osu.py`/`sm.py`）。
+> **实现纪律**：只读 prpr / phichain 的**行为规范**，**独立实现**，不逐行移植（GPL-3.0 / LGPL-3.0 风险，RFC-0029 §4.2）。
 
-# 常用覆盖:
-uv run python -m beatmorph.cli.train --config-name stage1_planner \
-    experiment.max_steps=50000 \
-    train.batch_size=4 \
-    trainer.devices=1
-```
+### 4.1 解析必须处理的语义
 
-**配置**(见 [`configs/stage1_planner.yaml`](../configs/stage1_planner.yaml) + [`configs/model/planner.yaml`](../configs/model/planner.yaml)):
-- 数据:`data.charts_path` + `data.embeddings_dir`(默认 `$BEATMORPH_DATA_DIR/charts.jsonl` 与 `.../embeddings/mert_v1_330m`)
-- 模型:6 层双向 Transformer,`dim=768`(与 MERT 对齐免投影),3 回归头 + 5 类段落类型头
-- 训练:`bf16-mixed` + 梯度裁剪 1.0 + AdamW(lr 3e-4);`Huber×3 + TV + CE(type)` 多任务损失
-- ckpt:`$BEATMORPH_RUNS_DIR/checkpoints`,每 2000 步存 top-1
+| 项 | 规则 | 出处 |
+|----|------|------|
+| 时间 | `beat = [1]/[2] + [0]`；`秒 = 60/BPM × beat`；多 BPM 段按 `BPMList` 分段积分（须 `beat2sec(sec2beat(x)) == x` 单测） | [phigros-format.md](knowledges/phigros-format.md) §7.1 |
+| 侧别 | **`above == 1 ? FRONT : BACK`**（不得当布尔）；实测取值 `{0,1,2}`，0 与 2 都是背面 | [phigros-format.md](knowledges/phigros-format.md) §5.1/§5.3 |
+| 类型 | 按格式分派映射表，**RPE 与官谱不可共用** | [units](knowledges/phigros-units-and-geometry.md) §6.7 |
+| 事件轨 | **跨层求和**（不是取最上层）；`null` 层 / 缺失字段 / 缺失 `eventLayers` **三者同一化**；事件间隙**补洞** | [phigros-format.md](knowledges/phigros-format.md) §4.1/§4.3 |
+| 嵌套线 | `father != -1` 时位置 = 自身 + 父线（可嵌套）；实测 **26%** 的谱面含嵌套 → **不可跳过** | [phigros-format.md](knowledges/phigros-format.md) §6.3；[survey](knowledges/phira-dataset-survey.md) §7.3 |
+| 越界 | `\|positionX\| > 675` **只统计不钳位**（钳位会改变落点分布，违红线 3） | [units](knowledges/phigros-units-and-geometry.md) §7.5 |
 
-**数据集**(`PlannerDataset`,自动配对 charts + embeddings):
-- 读 `charts.jsonl`,每行 `Chart`;**跳过 `mode != MANIA_4K`**(守 R-6,日志记 `n_non_4k`)
-- 跳过无 sections / 无对应 `.pt` 的样本(日志记 `n_missing`)
-- 每样本 yield:`audio_emb [T_seq,768]` + `target{density,energy,rest,type}` + `difficulty` + `section_bounds [S+1]`
+### 4.2 契约断言（Phase 1 必做，**默认 CI 内运行、不依赖权重**）
 
-**数据集空怎么办**:`train.py` 会 `raise RuntimeError("PlannerDataset 空...")`。原因通常是:
-- `charts_path` 指错(应是 `data/processed/charts.jsonl` 而非 `.parquet`——**注意**:训练读 jsonl,`PreprocessPipeline` 默认产 parquet,需设 `cache_format='jsonl'` 或手动转换)
-- embeddings 未提取(先跑 §5)
-- 全是 non-4K(检查下载 `--only-4k`)
+| 断言 | 依据 |
+|------|------|
+| `above ∈ {0,1,2}` | 实测两轮同时出现 0 与 2 |
+| `type ∈ {1,2,3,4}` | RPE A 级源码 |
+| `\|positionX\| ≤ 675` | 12674 个 note 实测极值 ±675.000 |
+| `1 ≤ len(eventLayers) ≤ 5` | 实测层数直方图 `{1:506, 2:190, 3:9, 4:92, 5:60}` |
+| 帧率派生：`T_seq == round(duration_s × rate)`，`rate` 由 config 派生 | 红线 7 / G4 |
 
-> **重要**:`PlannerDataset` 读 **`charts.jsonl`**(`Chart.model_validate_json` 逐行反序列化),
-> 而 `PreprocessPipeline` 默认写 `charts.parquet`。生产流程请让 pipeline 写 jsonl
-> (`cache_format='jsonl'`),或用 pyarrow 读 parquet 转 jsonl。dev_sample 提供了 parquet 样式
-> 供 VQ-VAE/AR 参考(见 §7)。
+### 4.3 微缩夹具
 
-**W&B**:Phase1 默认 `logger=False`(`build_trainer`),Phase2 接入(见 `infra.trainer`)。
+用 **`chart/1000`**（标准 RPE：71 条判定线 / 1659 note / `above` 含 2）与 **`chart/7039`**（伪装成 `.json` 的 PEC，完美负样本）。
+⚠️ **必须裁成微缩样本再入库**（红线 5），夹具与 mock **不得固化物理常量**（RFC-0029 §7 硬约束 6）。
 
 ---
 
-## 7. 产物与下一步衔接(VQ-VAE / AR 开发)
+## 5. MERT 特征离线提取 🟡
 
-### 各 Stage 产物清单
+**目标口径**（RFC-0029 §6 第 2 条 / §7 硬约束 2）：
 
-| 产物 | 路径 | 由谁产出 | 下游消费者 |
-|------|------|---------|-----------|
-| `charts.{parquet,jsonl}` | `data/processed/` | §4 PreprocessPipeline | VQ-VAE 训练(Plan02)、AR 训练(Plan04)、PlannerDataset |
-| MERT embeddings `.pt` | `data/embeddings/mert_v1_330m/{beatmap_set_id}.pt`(按 set 去冗余) | §5 extract_mert | PlannerDataset、AR Cross-Attention |
-| Stage1 planner ckpt | `runs/checkpoints/` | §6 train.py | AR 规划条件(Plan04) |
-| MERT+Adapter ckpt | (Phase1 可选,`adapter='none'` 离线提取不含 Adapter) | `--config-name stage0_mert` | Stage0 推理 |
+- 帧率 **75 Hz**，由模型 config **派生并断言**（`MERTAdapter.output_frame_rate()`，不可读时回落契约常量并**告警**）；
+- 缓存**必须带元数据** `{rate, sample_rate, layer, model_rev, duration_s}` 并在**加载时校验**；
+- 音频统一重采样到 **24000 Hz**，并在元数据里记录**原始**采样率与时长；
+- 长音频按 **5 s 窗 / 1 s 重叠**滑窗，重叠区**按帧率对齐**平均。
 
-### VQ-VAE(Plan 02)开发需要什么
+**当前状态**：`beatmorph/data/pipeline/embed.py` 的 `extract_mert_embeddings` **存在但仍是 .osu 版**（按 `.osu` 父目录解析谱面对音频），需迁移为"按 `info.yml.music` 定位 + 按 sha1 去重"。
 
-- **输入**:`Chart`(含 `notes`/`bpm_points`),来自 `charts.jsonl` 或 `data/dev_sample/charts.parquet`
-- **栅格化**:按 `bpm_points` 分段推小节边界(RFC-0005),把 Note 投到 `(lane, time_bins)` 网格
-- **冒烟样本**:`data/dev_sample/charts.parquet`(2 首 fixture 4K Chart,走 LFS),用法见 [`data/dev_sample/README.md`](../data/dev_sample/README.md)
-- **验收目标**:重建准确率 > 95%(Plan02 M2)、`codebook_usage() ≥ 0.5`(R-2)
-
-### AR Transformer(Plan 04)开发需要什么
-
-- **输入**:VQ-VAE encode 的 `TokenSeq` + audio_emb + Stage1 planner 的 `list[Section]` + RAG 前缀(Phase2)
-- **依赖**:VQ-VAE tokenizer 训练完成(Plan02)、Stage1 planner ckpt(§6 产出)
-- **上下文**:256 tokens(`AR_CONTEXT_TOKENS`)
-
-### dev_sample 用法(开发期冒烟,无需跑全量)
-
-```bash
-git lfs pull    # 拿 data/dev_sample/charts.parquet
-uv run python -c "
-import pyarrow.parquet as pq
-from beatmorph.core.contracts import Chart
-rows = pq.read_table('data/dev_sample/charts.parquet').to_pylist()
-charts = [Chart.model_validate_json(r['chart_json']) for r in rows]
-print(len(charts), 'charts for VQ-VAE/AR shape smoke')
-"
-```
-
-> dev_sample 仅 2 首 fixture,够验形状/往返,**不可训练**。embedding 需 GPU 设备补齐(见 `data/dev_sample/README.md`)。
-
-### 全量产物在设备间传递
-
-**不通过 git**——全量 charts/embeddings/ckpt 体量数十 GB,超 GitHub LFS 免费 1GB 配额。
-各 GPU 设备按 §3-§6 自行下载→处理→提取→训练。LFS 仅承载 `data/dev_sample` 微样本。
-若需跨设备传训练好的 ckpt,用外部对象存储(OSS/S3)或 `rsync`/`scp`,见 RFC-0023(开放)。
-
----
-
-## 8. 故障排查
-
-| 现象 | 原因 / 解决 |
-|------|------------|
-| `test_mert.py` 全 skip | MERT 权重未缓存或无 CUDA。跑 §2 拉权重,确认 `AutoConfig.from_pretrained` 可解析 |
-| `PlannerDataset 空` | 见 §6「数据集空怎么办」;常见为 charts_path 指向 parquet(应 jsonl)、embeddings 未提取、全 non-4K |
-| 质量过滤「Phase 1 relaxed pass」反复出现 | 未传 `manifest_path` 或 manifest 不含对应 `beatmap_set_id`。确认 §3 产 manifest 且 §4 传入了 `manifest_path` |
-| sayobot `SSL: CERTIFICATE_VERIFY_FAILED` | 脚本自动降级 `verify=False`;或显式 `--no-verify` |
-| sayobot 429/连接被拒 | 增大 `--rate-delay`(如 2.0-3.0),换时段,或减少并发(脚本单线程) |
-| `compute_section_stats` 产出 0 sections | `bpm_points` 为空(检查 `.osu` TimingPoints 有非继承红线)或 `notes` 为空;pipeline 会兜底 `bpm=120` |
-| `extract_mert_embeddings` 大量 `no audio` skip | `chart.audio_path`(basename)在 `.osu` 父目录找不到音频;确认 §3 解压完整(音频与 .osu 同 set 目录) |
-| mypy `unused section: module = ['pyarrow.*']` | 良性告警——当前环境未装 pyarrow 时报;`uv sync --extra train` 后消失 |
-| LFS `smudge error` / clone 后 parquet 是指针 | 未跑 `git lfs pull`;或 LFS 配额耗尽(检查 GitHub 账户 LFS 用量) |
-
----
-
-## 9. 一期训练最小可跑序列(cheatsheet)
-
-```bash
-# 0. 环境
-git clone https://github.com/HechaoYannet/BeatMorph.git BeatMorph && cd BeatMorph
-git lfs pull
-uv sync --extra audio --extra train --extra data --group dev
-export BEATMORPH_RAW_DIR=data/raw BEATMORPH_DATA_DIR=data/processed BEATMORPH_RUNS_DIR=runs
-
-# 1. MERT 权重(一次性)
-uv run python -c "from modelscope import snapshot_download; snapshot_download('m-a-p/MERT-v1-330M')"
-
-# 2. 下载数据(先小规模验证:50 set)
-uv run python scripts/download_sayobot.py --list-mode --max-sets 50 --rate-delay 1.0
-
-# 3. 预处理(产 charts + sections;cache_format 设 jsonl 供训练读)
-uv run python -c "
-from pathlib import Path
-from beatmorph.data.pipeline.embed import PreprocessPipeline
-p = PreprocessPipeline(Path('data/raw'), Path('data/processed'), cache_format='jsonl', manifest_path=Path('data/raw/manifest.jsonl'))
-p.run(); p.write_stats()
-"
-
-# 4. MERT 离线提取
+```powershell
+# 现状调用形态（v2.x 输入；迁移后输入将改为 Phira 谱面包，接口形态待 v3.0 plan 定稿）
 uv run python -c "
 from pathlib import Path
 from beatmorph.data.pipeline.embed import PreprocessPipeline
 PreprocessPipeline(Path('data/raw'), Path('data/processed')).extract_mert_embeddings(Path('data/raw'))
 "
-
-# 5. Stage1 训练
-uv run python -m beatmorph.cli.train --config-name stage1_planner experiment.max_steps=10000
-
-# 6. 验收:三关绿 + 训练 loss 下降
-make test-fast
 ```
 
-> 一期先小规模(50 set)跑通全链路,再扩到 10K(set `--max-sets 10000` + `experiment.max_steps=100000`)。
+> 提取后**先做形状/帧率抽检**（`T_seq ≈ duration_s × 75`），再进入 §6。若跳过本步，下游数据集会把缺少特征的样本 skip 并计数入日志。
+
+---
+
+## 6. 强度场构建（`field/`）⬜（待建）
+
+| 要点 | 规则 | 出处 |
+|------|------|------|
+| 网格 | `Δx = RPE_STAGE_WIDTH / N`，**默认 N = 128 → 10.546875 RPE-x 单位**；常量**必须派生**，不得写死 `10.546875` | RFC-0029 §3.1 |
+| 共格碰撞 | 先统计「同线 + 同刻 + 同侧」note 对的**最小 \|ΔpositionX\|**，再定 N（否则 128 只是新魔数）；须补 **N ∈ {64,128,256,512} 消融** | [units](knowledges/phigros-units-and-geometry.md) §7.3 |
+| 积分 | **两条路径互校**：① 与强度场**同网格**的数值积分；② **累积强度 Λ(t)** 参数化（Omi et al. 2019）——同一场上二者的 NLL 必须一致到给定容差 | BasePlan §3.4；RFC-0029 §3.2 |
+| 目标构建 | 按**事件**遮盖（不是按帧）；**必须显式产出 mask 通道** | BasePlan §3.3 |
+| 越界 | 生成侧 `\|x\| > 675` 区域的 λ 置 0（或加越界惩罚），使舞台外落点概率为 0 | [units](knowledges/phigros-units-and-geometry.md) §7.5 |
+| G3 基线 | 常数基线是 **`λ = N/\|Ω\|`**，**不是 λ = 0**（后者泊松 NLL = +∞，应写成契约断言） | RFC-0029 §3.2 |
+
+---
+
+## 7. 训练 🟡
+
+### 7.1 ★ 门禁 G1-G4 —— **扩数据之前必须全绿**
+
+门禁模块 [`beatmorph/infra/sanity.py`](../beatmorph/infra/sanity.py) **范式中立**：只吃调用方给的 `step_fn`（跑一步优化并返回标量 loss），不 import torch、不认识任何模型/数据集，因此在最小环境下也能跑，**也就不会被"依赖缺失"跳过**（这正是 G4 当年失败的方式）。
+
+**四道门禁与判据**：
+
+| 门禁 | 函数 | 判据（默认参数） | 抓什么 |
+|:---:|------|-----------------|--------|
+| **G1** 单 batch 过拟合 | `overfit_single_batch(step_fn, steps=300, target_loss=0.05, target_ratio=0.1)` | 末步 loss `<= max(0.05, 0.1 × 首步)` | 通路断、梯度断、loss 用错 |
+| **G2** 打乱标签对照 | `shuffled_target_control(step_fn_real, step_fn_shuffled, steps=300, min_gap_ratio=0.05)` | 打乱后末步 loss `>= 真实 × 1.05` | 输入对目标**零信息**（帧率/对齐类 bug 在此当场现形） |
+| **G3** 常数基线 | `constant_baseline_gate(model_loss, baseline_loss, min_improvement=0.1)` | 模型 loss `<= 基线 × 0.9` | 模型其实什么都没学到（停在均值地板上） |
+| **G4** 契约断言 | `frame_rate_gate(frames, duration_s, frame_rate, tol_frames=2)` | `frames ≈ duration_s × frame_rate`（`frame_rate` **必须由 config 派生**） | 单位/帧率/采样率漂移 |
+
+**操作步骤（在 1–4 个样本上跑，任一失败都不得扩数据）**：
+
+```python
+from beatmorph.infra.sanity import (
+    constant_baseline_gate,
+    frame_rate_gate,
+    overfit_single_batch,
+    shuffled_target_control,
+    summarize,
+)
+
+def step_real() -> float:
+    """一步优化并返回标量 loss（调用方负责 backward/step）。"""
+    loss = train_step(model, batch)
+    return float(loss)
+
+def step_shuffled() -> float:
+    """同模型/同输入，但目标被 shuffle。"""
+    return float(train_step(model, shuffle_targets(batch)))
+
+results = [
+    overfit_single_batch(step_real),                                      # G1
+    shuffled_target_control(step_real, step_shuffled),                    # G2
+    constant_baseline_gate(model_loss, baseline_loss),                    # G3：λ = N/|Ω|
+    frame_rate_gate(emb.shape[1], duration_s, encoder.output_frame_rate()),  # G4
+]
+
+log = summarize(results)      # 可直接贴进训练日志的多行文本
+assert all(results), results  # 未全绿 → 停止，不要扩数据
+```
+
+- 门禁本身的单测（✅ 可执行）：`uv run pytest tests/unit/infra/test_sanity.py -q`。
+- **记录要求**：门禁结果必须**写入训练日志**（RFC-0029 §7 硬约束 3）；
+  **门禁未绿而扩数据规模**是本项目已经付过一次代价的错误模式（见 §8.1）。
+
+### 7.2 训练启动
+
+| 项 | 状态 |
+|----|------|
+| ✅ 现有入口 | `uv run beatmorph-train --config-name stage1_planner experiment.max_steps=10000` —— **这是 v2.x 的 planner stage，不可用于 v3.0 训练** |
+| 🟡 训练栈 | `infra/trainer.py`（Lightning + bf16-mixed + 梯度裁剪）与 Hydra 分发骨架**可复用** |
+| ⬜ 待建 | v3.0 的模型配置与训练 stage（掩码补全 Enc-Dec + 泊松 NLL + mask 通道），须由 infra-agent 在 `configs/` 落地（AGENTS.md §3.4） |
+
+**训练目标的硬约束**（实现时逐条对照，BasePlan §3.4 / RFC-0029 §3.2）：
+
+1. `L = −Σ_n log λ_{k(n)}(e_n) + Σ_k ∫∫∫ λ_k dt dx ds`，`∫λ` **必须与强度场同网格**且分辨率**显式声明**；
+2. 强度用 softplus / 指数参数化保证 **λ ≥ 0**；事件项与积分项**同量纲**（都是"计数"）；
+3. **不要用 Monte-Carlo 估计 ∫λ**（Jensen 不等式引入偏差）；
+4. **热图 focal 与泊松 NLL 不兼容**（目标 y 未归一化，`∫y ≠ 事件数`）→ B1 是**独立消融臂**，损失不得混用；
+5. 评估与解码一律在**原始时间域（秒）**。
+
+### 7.3 对照臂 B1-B6（全部必须实现）
+
+| 臂 | 内容 |
+|----|------|
+| **B1** | 热图 + focal loss（文献主流，**正式消融臂而非稻草人**） |
+| **B2** | **主线**：泊松 NLL 强度场 + 掩码补全 |
+| **B3** | 离散 event token + 自回归（以 GOCT 配置为骨架） |
+| **B4** | **自回归上界臂**（arXiv 2510.03289 对并行采样的质疑要求一个 AR 上界；**不可省**） |
+| **B5** | 掩码**离散**扩散（absorbing-state） |
+| **B6** | 解码策略消融：`find_peaks` vs **Ogata thinning** |
+
+> 消融**必须指明对照层级**（训练目标 vs 采样/解码策略），否则不可解释（RFC-0029 §3.3）。
+
+### 7.4 评估协议要点
+
+- 事件级 F1 **双容差报告**（±20ms 对 DDC / ±50ms 对 GenéLive!）+ **单独报全谱相位偏移** + **单独报背面 recall**（`side` 强不平衡）；
+- **NLL 只作校准指标，不得作质量分数**（ChartGenEval 实测 perplexity 在"常见图案重写"下下降 37%）；
+- "响应音乐（能量相关性）"是**探索性指标**，不得作模型选择主判据；
+- 贪心一对一匹配，**未匹配的生成事件留在分母**；按谱平均与 micro 平均都报；
+- 合法性：同刻按键上限、Hold 区间合法性、**跨线几何冲突**、越界；
+- 人评：MIREX 2026 三段式。详见 RFC-0029 §5。
+
+---
+
+## 8. 常见问题（排障 cheatsheet）
+
+### 8.1 ⚠️ 警示案例：25 Hz 事件（**必读**）
+
+| 项 | 内容 |
+|----|------|
+| **症状** | 119 样本时 loss 1.8 → 0.369，被判"收敛正常"；**扩到万级样本后训练集 loss 完全不可下降**（纹丝不动，不是不收敛也不是过拟合） |
+| **根因** | MERT-v1-330M 真实帧率 **75 Hz**（`24000/320`），代码在**三个互相独立的位置**硬编码 **25 Hz**（契约常量、`mert.py` 滑窗拼接、`planner/density.py` 秒→帧换算），且提取路径**不做任何降采样** → "秒→帧"映射整体**错 3×** |
+| **后果** | 120 s 的曲子落盘 9000 帧，代码以为时长 360 s：段落 [8,16] s 取到的帧真实时间是 [2.67,5.33] s，最后一段取到 [37.3,40.0] s → **模型在每个段落上看到的是歌曲前 1/3 的音频**，且错位随段落漂移 |
+| **为什么没暴露** | ① 唯一能证伪的测试带 `@pytest.mark.gpu` + 权重守卫 → `make test-fast` **永远不跑它**；② mock/fixture 里 4 处**断言 25 Hz 是正确的**（`round(dur*25)`）→ **测试套件在断言这个 bug 是不变量**；③ 没有单 batch / 打乱标签 / 常数基线门禁 |
+| **修复** | 契约改为派生式（`MERT_SAMPLE_RATE_HZ / MERT_CONV_STRIDE_PRODUCT`），`MERTAdapter.output_frame_rate()` 从 config 推导，删除复制的第三份常量；**唯一能证伪的断言进默认 CI** |
+| **制度化** | 新增 **G1-G4 门禁**（`infra/sanity.py`）与 **红线 7**（物理常量必须派生 + 断言；新范式必须过门禁）；**mock 不得固化物理常量** |
+| **一句话** | **一个被 mock 覆盖了的物理常量，等价于一个被伪装成事实的假设。** |
+
+出处：[POSTMORTEM-2026-08-05](POSTMORTEM-2026-08-05-frame-rate-misalignment.md)。
+
+### 8.2 其它常见问题
+
+| 现象 | 原因 / 解决 |
+|------|------------|
+| `verify_mert_frame_rate.py` 报 `MISMATCH` | `--model-dir` 指向的 `config.json` 不是 MERT-v1-330M（`conv_stride` 累乘必须为 320）；核对权重目录 |
+| 特征张量帧数 ≠ `时长 × 75` | 音频未重采样到 24 kHz、或滑窗拼接用了错误的帧率换算 → 跑 §1.5 自检 + 检查 `output_frame_rate()` 是否被绕过 |
+| 缓存特征加载时报元数据不匹配 | 设计如此（RFC-0029 §7 硬约束 2）：缓存必须带 `{rate, sample_rate, layer, model_rev, duration_s}`，元数据不符即**拒绝加载**并重抽 |
+| 训练 loss 完全不动（万级数据） | 先跑 **G2 打乱标签对照**：若打乱后 loss 不变 → 输入对目标零信息（对齐/帧率类 bug），**不要**先调学习率或换模型 |
+| 训练 loss 迅速塌到"全 0" | 稀疏目标的经典塌陷 → 确认用的是**泊松 NLL**（积分项惩罚全 0），而不是朴素 BCE/MSE 热图；对照 **G3 常数基线** `λ = N/\|Ω\|` |
+| 解析后 `type` 分布明显偏离实测（Tap 52–63%） | 大概率是**官谱/RPE 的 type 数字混用**（§3.4 陷阱 3）→ 检查是否按格式分派映射表 |
+| `side` 全为正面 | `above` 被当布尔解析（`!= 0`）/ 或背面样本被过滤 → 必须写 `above == 1 ? FRONT : BACK`，并在评估中单独报背面 recall |
+| 事件值在间隙期间为 0 / 跳变 | `eventLayers` 未补洞，或**取了最上层而不是跨层求和**（[phigros-format.md](knowledges/phigros-format.md) §4.3） |
+| 判定线位置整体偏移 | `father != -1` 的嵌套线未合成父线位置（实测 26% 的谱面含嵌套） |
+| 谱面文件读不出来 / JSON 解析失败 | 文件后缀不可信（`.json` 可能是 PEC）→ 改为按**内容**判型 + 读 `info.yml.chart` 定位 |
+| `PreprocessPipeline` 报大量 "no audio" | 现状实现按 `.osu` 父目录找音频（v2.x 逻辑）；迁移后应按 `info.yml.music` 定位并做 sha1 去重 |
+| `pytest` 里 MERT 相关用例全 skip | 需要权重 + CUDA（`@pytest.mark.gpu`）；但**契约级测试不得依赖权重或 GPU**，帧率断言应在默认 CI 内跑（§1.5） |
+| 想跳过门禁直接扩数据 | **不允许**：CLAUDE.md 红线 7 —— 新范式必须先过 G1-G4，结果写入训练日志 |
+
+---
+
+## 9. 最小可跑序列（cheatsheet）
+
+### 9.1 今天就能跑的部分 ✅（不需要合规裁定，不落音频、不训练）
+
+```powershell
+# 0. 环境
+uv sync --extra audio --extra train --extra data --group dev
+$env:BEATMORPH_DATA_DIR = "data/processed"; $env:BEATMORPH_RUNS_DIR = "runs"
+
+# 1. 帧率 / 单位自检（期望 5s -> 374 帧 = 75Hz）
+uv run python scripts/verify_mert_frame_rate.py --model-dir models/pretrained/m-a-p/MERT-v1-330M
+
+# 2. 契约级测试（不依赖权重/GPU，默认 CI 内跑）
+uv run pytest tests/unit/audio/test_frame_rate_contract.py tests/unit/infra/test_sanity.py -q
+
+# 3. 全仓快测试 + lint + 类型
+make test-fast
+uv run ruff check . ; uv run mypy beatmorph
+```
+
+### 9.2 待建后才有（前置：合规裁定 + 组件落地）
+
+```
+[裁定数据合规 RFC]                      ← 🔴 在此之前不得训练
+   ↓
+[Phira 获取脚本]  元数据 322 页 → Range 预筛 → 格式嗅探 → 选择性下载   (⬜ 待建)
+   ↓
+[RPEJSON 解析器]  io/formats/rpejson/ + beat→秒 + 契约断言            (⬜ 待建)
+   ↓
+[MERT 特征离线提取]  75Hz 派生 + 缓存元数据校验                        (🟡 迁移中)
+   ↓
+[强度场构建]  field/：网格 + 两条 ∫λ 路径互校                          (⬜ 待建)
+   ↓
+[门禁 G1-G4 全绿]  ← 🔴 门禁未绿不得扩数据                             (✅ 模块就绪，待接入新范式)
+   ↓
+[训练]  掩码补全 Enc-Dec + 泊松 NLL → B1-B6 对照 → 评估                (⬜ 待建)
+```
 
 ---
 
 ## 相关文档
 
-- [BasePlan.md](BasePlan.md) §4(数据)/ §5(基础设施)/ §7(路线图)— 技术权威
-- [plans/01-audio-encoder.md](plans/01-audio-encoder.md) — MERT 编码器
-- [plans/03-planner-density.md](plans/03-planner-density.md) — Stage1 密度规划
-- [plans/08-data-pipeline.md](plans/08-data-pipeline.md) — 数据流水线
-- [plans/09-infra-cli-api.md](plans/09-infra-cli-api.md) — 训练基础设施
-- [decisions/RFC-0024](decisions/RFC-0024-sayobot-data-source.md) — sayobot 数据源
-- [decisions/RFC-0003](decisions/RFC-0003-adapter-lora-vs-mlp.md) — MERT LoRA Adapter
-- [decisions/RFC-0005](decisions/RFC-0005-bpm-timepoints.md) — 变速 bpm_points
-- [decisions/RFC-0025](decisions/RFC-0025-multikey-data-r6.md) — 多 K 数据与 4K 训练过滤
+- [BasePlan.md](BasePlan.md) §4 数据 / §5 基础设施 / §7 路线图 / §9 门禁 —— 技术权威
+- [CLAUDE.md](../CLAUDE.md) §3 红线 / §6 当前状态
+- [decisions/RFC-0029](decisions/RFC-0029-phigros-continuous-chart-generation.md) —— 范式权威（§6 路线 / §7 硬约束 / §8.3 Q11b 合规）
+- [POSTMORTEM-2026-08-05](POSTMORTEM-2026-08-05-frame-rate-misalignment.md) —— 25 Hz 事件全文与门禁由来
+- [knowledges/phira-dataset-survey.md](knowledges/phira-dataset-survey.md) —— 数据源实测（§6 合规 / §7 多线统计 / §9 流水线建议）
+- [knowledges/phigros-format.md](knowledges/phigros-format.md) ｜ [knowledges/phigros-units-and-geometry.md](knowledges/phigros-units-and-geometry.md)
+- [CODE_STRUCTURE.md](CODE_STRUCTURE.md) ｜ [glossary.md](glossary.md)

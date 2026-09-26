@@ -10,7 +10,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from beatmorph.core.contracts import MERT_DEFAULT_FEAT_DIM
+from beatmorph.core.contracts import MERT_DEFAULT_FEAT_DIM, MERT_FRAME_RATE_HZ
 
 pytestmark = [pytest.mark.gpu]
 
@@ -76,18 +76,20 @@ class TestMERTAdapterStructure:
         assert out.shape == (2, 10, MERT_DEFAULT_FEAT_DIM)
 
     def test_merge_overlapping_shape(self) -> None:
-        from beatmorph.audio.encoder.mert import _TARGET_SR, MERTAdapter
+        from beatmorph.audio.encoder.mert import _FRAME_RATE, _TARGET_SR, MERTAdapter
 
         # 两段，每段 [B=1, T=125, feat]，第二段从 4s 处开始（hop=4s）
         feat = MERT_DEFAULT_FEAT_DIM
         seg1 = torch.ones(1, 125, feat)
         seg2 = torch.ones(1, 125, feat) * 2.0
         # starts/hop 用样本数表达 4s，必须用 _TARGET_SR（GPU 修复后 24kHz，见 TRAINING_LOG Bug1）
-        starts = [0, int(4.0 * _TARGET_SR)]
-        merged = MERTAdapter._merge_overlapping([seg1, seg2], starts, int(4.0 * _TARGET_SR))
-        # 总帧数 = 第二段尾 = 100帧(4s*25) + 125 = 225
+        hop = int(4.0 * _TARGET_SR)
+        starts = [0, hop]
+        merged = MERTAdapter._merge_overlapping([seg1, seg2], starts, hop, _FRAME_RATE)
+        # 总帧数 = 第二段尾 = round(4s × 派生帧率) + 125；帧率不再写死（75Hz → 425）
+        expected = round(4.0 * _FRAME_RATE) + 125
         assert merged.shape[0] == 1
-        assert merged.shape[1] == 225
+        assert merged.shape[1] == expected == 425
         assert merged.shape[-1] == feat
 
 
@@ -111,8 +113,14 @@ class TestMERTAdapterReal:
         assert emb.dim() == 3
         assert emb.shape[0] == 1
         assert emb.shape[-1] == MERT_DEFAULT_FEAT_DIM
-        # 帧率 ≈ dur*25，允许 ±1 帧
-        expected = round(dur_s * 25)
+        # 帧率必须由主干 config 派生（MERT-v1-330M: prod(conv_stride)=320 → 24000/320=75Hz），
+        # 且 T_seq ≈ dur × 派生帧率（±1 帧，卷积取整）。
+        # 此前写死 25Hz，使这条唯一的真实断言与实现同错，漏检 3× 偏差。
+        frame_rate = adapter.output_frame_rate()
+        assert frame_rate == MERT_FRAME_RATE_HZ, (
+            f"派生帧率 {frame_rate} != 契约 {MERT_FRAME_RATE_HZ}"
+        )
+        expected = round(dur_s * frame_rate)
         assert abs(emb.shape[1] - expected) <= 1, f"T_seq={emb.shape[1]}, expected~{expected}"
 
     def test_backbone_frozen_no_adapter(self, require_mert: None) -> None:

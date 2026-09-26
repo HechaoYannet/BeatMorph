@@ -321,14 +321,14 @@ class MERTAdapter(nn.Module):
         from transformers import AutoFeatureExtractor
 
         try:
-            return AutoFeatureExtractor.from_pretrained(self.model_name)  # type: ignore[no-untyped-call,no-any-return]
+            return AutoFeatureExtractor.from_pretrained(self.model_name)  # type: ignore[no-any-return]
         except Exception:
             # ModelScope 本地路径兜底
             try:
                 from modelscope import snapshot_download
 
                 local_dir = snapshot_download(self.model_name)
-                return AutoFeatureExtractor.from_pretrained(local_dir)  # type: ignore[no-untyped-call,no-any-return]
+                return AutoFeatureExtractor.from_pretrained(local_dir)  # type: ignore[no-any-return]
             except Exception as exc:
                 logger.warning("特征提取器加载失败，回退裸 waveform: %s", exc)
                 return _DummyProcessor()
@@ -370,7 +370,7 @@ class MERTAdapter(nn.Module):
             target_modules=target_modules,
             bias="none",
         )
-        self.backbone = get_peft_model(self.backbone, cfg)  # type: ignore[arg-type]
+        self.backbone = get_peft_model(self.backbone, cfg)
         trainable = sum(p.numel() for p in self.backbone.parameters() if p.requires_grad)
         logger.info("LoRA 注入完成：可训参数 %d（rank=%d）", trainable, rank)
 

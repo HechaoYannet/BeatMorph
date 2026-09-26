@@ -86,6 +86,15 @@ models/pretrained/
 .cache/huggingface/
 
 # ── 数据集（百万级谱面 / embedding，禁止入库）──
+# ⚠️ plan 02 M8 硬约束②（数据合规裁定 2026-08-05）：谱面与音乐**允许本地落盘、
+# 不得入库**。整个 data/ 一律忽略，只放行微型夹具与占位文件；新增可入库内容
+# 必须同时改这里与本注释（tests/fixtures/** 同理，见下）。
+data/**
+!data/fixtures/
+!data/fixtures/**
+!data/examples/
+!data/examples/**
+!data/README.md
 data/raw/
 data/processed/
 data/embeddings/

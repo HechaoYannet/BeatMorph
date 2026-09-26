@@ -52,10 +52,7 @@ def geometry_check(model_dir: Path) -> float:
         x = torch.zeros(1, 1, int(duration_s * sample_rate))
         with torch.no_grad():
             frames = net(x).shape[-1]
-        print(
-            f"[torch ] {duration_s:>4.1f}s -> {frames:>5d} frames "
-            f"= {frames / duration_s:.2f} Hz"
-        )
+        print(f"[torch ] {duration_s:>4.1f}s -> {frames:>5d} frames = {frames / duration_s:.2f} Hz")
     with torch.no_grad():
         return net(torch.zeros(1, 1, 5 * sample_rate)).shape[-1]
 
@@ -104,7 +101,9 @@ def main() -> None:
     if not (args.model_dir / "config.json").exists():
         raise SystemExit(f"config.json 不存在：{args.model_dir}")
     frames = geometry_check(args.model_dir)
-    print(f"[assert] 5s 窗口应为 374 帧（75Hz），实测 {frames} 帧 -> {'OK' if frames == 374 else 'MISMATCH'}")
+    print(
+        f"[assert] 5s 窗口应为 374 帧（75Hz），实测 {frames} 帧 -> {'OK' if frames == 374 else 'MISMATCH'}"
+    )
     checkpoint_cross_check(args.model_dir)
     if args.forward:
         optional_forward(args.model_dir)

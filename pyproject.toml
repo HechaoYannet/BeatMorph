@@ -56,8 +56,14 @@ rag = [
     # faiss-gpu 按需另外安装
 ]
 data = [
-    # 数据下载（sayobot 谱面集抓取，RFC-0024）
-    "httpx>=0.27",                # 下载脚本 HTTP 客户端
+    # 数据下载（Phira 谱面集抓取，plan 02 §3.2；RFC-0024 的 sayobot 路径已退役）
+    "httpx>=0.27",                # 下载脚本 HTTP 客户端（Range / 流式）
+    "PyYAML>=6.0",                # info.yml 解析（谱面文件定位的唯一依据）
+    "pyarrow>=15.0",              # 清单/manifest 落盘（plan 02 M8 provenance）
+]
+viz = [
+    # 强度场可视化（plan 03 §4.9 / M8：无权重、无 GPU 即可产出确定性 PNG）
+    "matplotlib>=3.9",
 ]
 dev = [
     "ruff>=0.5.0",
@@ -117,6 +123,9 @@ dev = [
     "pre-commit>=3.7",
     "httpx>=0.27",                # 下载脚本单测（mock，需 import）
     "respx>=0.21",                # httpx mock（tests/unit/scripts）
+    "PyYAML>=6.0",                # plan 02：info.yml 定位单测
+    "pyarrow>=15.0",              # plan 02 M8：manifest 落盘与 provenance 校验
+    "matplotlib>=3.9",            # plan 03 M8：可视化契约测试（不得靠 skip 变绿）
 ]
 
 # ─────────────────────────────────────────────────────────────
@@ -125,12 +134,19 @@ dev = [
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+# ⚠️ 模式必须**锚定仓库根**：裸写 "data" 会匹配任意层级的 data/，
+# 从而静默跳过 beatmorph/data/**（plan 02 的整包）——这是「不报错但全错」型
+# 门禁失效，已由 data-agent 用植入探针实测确认。改模式前请先跑该探针。
 extend-exclude = [
-    "data",
-    "models",
-    "runs",
-    "outputs",
-    "docs",
+    "/data",
+    "/models",
+    "/runs",
+    "/outputs",
+    "/docs",
+    # ⚠️ ruff format 会格式化 Markdown 里的 python 代码块，而目录级排除对它不生效
+    # （实测："make format" 会顺手改动 docs/ 下 6 份文档）。文档产出按 AGENTS.md §3.6
+    # 属各自作者所有，工具不得越界改写，因此显式排除全部 Markdown。
+    "**/*.md",
 ]
 
 [tool.ruff.lint]
@@ -208,7 +224,9 @@ python_version = "3.11"
 strict = true
 warn_unused_configs = true
 ignore_missing_imports = true        # torch/transformers 等无 stub
-exclude = "(data|models|runs|outputs)/"
+# ⚠️ 必须用 ^ 锚定：不锚定的 "(data|models|runs|outputs)/" 会命中 beatmorph/data/，
+# 使 mypy 静默少检查 10 个文件（27 vs 38）。同上，属门禁失效而非风格问题。
+exclude = "^(data|models|runs|outputs)/"
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]

@@ -19,9 +19,11 @@
 
     from beatmorph.infra.sanity import overfit_single_batch, shuffled_target_control
 
+
     def step() -> float:
-        loss = train_step(model, batch)   # 调用方自己的一步优化
+        loss = train_step(model, batch)  # 调用方自己的一步优化
         return float(loss)
+
 
     results = [overfit_single_batch(step), ...]
     assert all(r.passed for r in results), results
@@ -181,5 +183,7 @@ def summarize(results: list[GateResult]) -> str:
     lines = ["健全性门禁（G1-G4）："]
     lines += [f"  [{'PASS' if r.passed else 'FAIL'}] {r.name}: {r.detail}" for r in results]
     n_fail = sum(1 for r in results if not r.passed)
-    lines.append(f"  => {'全部通过' if n_fail == 0 else f'{n_fail} 项未通过'}（共 {len(results)} 项）")
+    lines.append(
+        f"  => {'全部通过' if n_fail == 0 else f'{n_fail} 项未通过'}（共 {len(results)} 项）"
+    )
     return "\n".join(lines)

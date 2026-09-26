@@ -24,6 +24,7 @@ train/val/test，**同曲多谱必须落在同一 split**（否则 val 泄漏）
 
 from __future__ import annotations
 
+import os
 import random
 import statistics
 from collections import Counter
@@ -580,6 +581,15 @@ def build_pairs(
             skipped_no_chart += 1
             logger.warning("清单行 chart_id=%s 的谱面文件不存在，跳过", row.get("chart_id"))
             continue
+        # ⚠️ 清单里的 `chart_path` 语义是「**相对** chart_dir」（DatasetConfig 的契约），
+        # 这里只把它**解析**出来做存在性校验，写回时必须保持相对形式：
+        # 实测 2026-09-27 曾把已解析的路径写进清单，ChartPairDataset 再拼一次 chart_dir
+        # ⇒ 拼出 `data/processed/charts/data/processed/charts/...`，20/20 行判为
+        # 「谱面缺失」，真实数据通路的门禁整个装配失败。
+        raw_relative = row.get("chart_path")
+        relative_text = (
+            str(raw_relative) if raw_relative else os.path.relpath(chart_path, chart_root)
+        )
         feature_key = row.get("feature_key")
         if feature_key:
             npz_path, _meta = feature_cache_paths(feature_root, str(feature_key))
@@ -598,7 +608,7 @@ def build_pairs(
                     chart_id=_optional_int(row.get("chart_id")),
                     song_key=song_key,
                     split="",
-                    chart_path=str(chart_path),
+                    chart_path=relative_text,
                     feature_key=None if feature_key is None else str(feature_key),
                     difficulty=_optional_float(row.get("difficulty")),
                     fmt=str(row.get("format") or ChartFormat.RPE),

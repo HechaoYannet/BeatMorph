@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from beatmorph.core.logging import get_logger
 from beatmorph.data.phira.client import (
@@ -46,6 +46,23 @@ INFO_TXT_NAME: str = "info.txt"
 
 #: 条目读取器：给定包内条目名，返回其解压字节。
 EntryReader = Callable[[str], bytes]
+
+#: 文本字段集合：真实 `info.yml` 里它们**经常是 null**（不是空串）。
+#: ⚠️ `format` 不在其中——它实测恒为 null，且模型里声明为 `Any`（只记录不使用，R3）。
+_TEXT_FIELDS: frozenset[str] = frozenset(
+    {
+        "name",
+        "level",
+        "charter",
+        "composer",
+        "illustrator",
+        "chart",
+        "music",
+        "illustration",
+        "intro",
+        "tip",
+    },
+)
 
 
 class ChartPackageError(ValueError):
@@ -86,6 +103,35 @@ class ChartInfo(BaseModel):
     preview_end: float | None = Field(default=None, alias="previewEnd")
     intro: str = ""
     tip: str = ""
+
+    @model_validator(mode="before")
+    @classmethod
+    def _text_fields_tolerate_null_and_scalars(cls, data: object) -> object:
+        """把文本字段的 `null` / 数值 / 布尔归一成字符串。
+
+        **实测（2026-09-27，全库 9651 张）**：`tip: null` 极常见（`level` / `charter`
+        等同样可能是 null），另有少量把数字或布尔写进文本字段的包：
+        `tip: 282033473720393`、`tip: False`、`charter: 55544462`、`composer: 416`。
+        原实现把它们声明成裸 `str`，于是 pydantic 直接拒绝整个 `info.yml`
+        ⇒ 首批 20 张里 10 张、全库里 5 张谱面在 `package` 阶段被误判为「结构错误」。
+
+        **缺失的可选文本字段是 null；填错的元数据是标量**——这是数据事实，不是容错妥协：
+        这些字段只用于留痕与 `song_key` 分组，把标量转成字符串不掩盖任何结构性错误
+        （真正用于**定位**的 `chart` 为 null/缺失/写错时，`ChartPackage` 仍会因
+        找不到条目而报错——见 `__post_init__`）。
+        """
+        if isinstance(data, dict):
+            normalized: dict[object, object] = {}
+            for key, raw_value in data.items():
+                value: object = raw_value
+                if key in _TEXT_FIELDS:
+                    if value is None:
+                        value = ""
+                    elif isinstance(value, (int, float, bool)):
+                        value = str(value)
+                normalized[key] = value
+            return normalized
+        return data
 
     @property
     def difficulty_round(self) -> float | None:

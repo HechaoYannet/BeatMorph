@@ -65,8 +65,20 @@ CHART_FILE_FIELD: str = "chart"
 CHART_MUSIC_FIELD: str = "music"
 #: /chart 的 type 参数：3 = any（= 全部 9649）。
 CHART_TYPE_ANY: int = 3
+#: 强制 IPv4 的本地绑定地址（`None` = 不强制，交给系统 getaddrinfo）。
+#:
+#: **实测（2026-09-27，本机）**：不指定时 httpx/httpcore 会把 getaddrinfo 的地址**串行**试一遍，
+#: 而本机 IPv6 路由黑洞 ⇒ 每次连接先等满 connect 超时（实测同一 URL：ConnectTimeout /
+#: ConnectError / 11.3 s 才拿到 2 MB），抓取退化成 ~0.2 MB/s。强制 IPv4 后同一 URL
+#: **0.10–0.27 s / 2 MB（≈20 MB/s）**。Phira CDN 的 A 记录只有 IPv4（101.35.254.112），
+#: 所以这不是「优化」而是可用性——不修就是 100 倍的差距。
+IPV4_LOCAL_ADDRESS: str = "0.0.0.0"
+
 #: 单条目下载的分块大小（I/O 粒度，非物理常量）。
-DOWNLOAD_CHUNK_BYTES: int = 1024 * 1024
+#: 实测调参（2026-09-27）：1 MB 分块让一个 20 MB 的 WAV 变成 20 次 Range 往返，
+#: 网络抖动下每个分块都可能触发一次退避重试——RTT 成了吞吐瓶颈。4 MB 把往返数压到
+#: 1/4，同时保留断点续传粒度（8 并发 × 4 MB 峰值内存可接受）。
+DOWNLOAD_CHUNK_BYTES: int = 4 * 1024 * 1024
 
 #: zip 结构签名与定长头（PKWARE APPNOTE 定义）。
 _EOCD_SIGNATURE = b"PK\x05\x06"
@@ -87,7 +99,26 @@ T = TypeVar("T")
 
 
 class PhiraApiError(RuntimeError):
-    """Phira API / HTTP Range 层的可读错误（含 HTTP 状态与请求参数）。"""
+    """Phira API / HTTP Range 层的可读错误（含 HTTP 状态与请求参数）。
+
+    `status_code` 只在**服务端真的回了响应**时填写；它是重试策略的判据：
+    4xx（429 除外）是确定性拒绝（参数错、越界、资源不存在），重试只是白等
+    ——实测 2026-09-27：全量枚举跑到第 54 页时读超时，而分页路径当时**没有**重试，
+    整轮 322 页枚举直接报废。
+    """
+
+    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+    @property
+    def retryable(self) -> bool:
+        """是否值得重试：传输层错误（无状态码）与 5xx / 429 值得，其余 4xx 不值得。"""
+        if self.status_code is None:
+            return True
+        if self.status_code == httpx.codes.TOO_MANY_REQUESTS:
+            return True
+        return self.status_code >= httpx.codes.INTERNAL_SERVER_ERROR
 
 
 class PhiraZipError(RuntimeError):
@@ -530,6 +561,16 @@ def parse_local_header(data: bytes) -> tuple[int, int, int]:
 # ══════════════════════════════════════════════════════════════
 
 
+def build_http_client(timeout_s: float) -> httpx.Client:
+    """构造默认 HTTP 客户端：**强制 IPv4** + 跟随重定向。
+
+    注入自定义客户端的调用方（单测用 `MockTransport`）不受影响：本函数只在
+    `client=None` 时使用。详见 :data:`IPV4_LOCAL_ADDRESS` 的实测记录。
+    """
+    transport = httpx.HTTPTransport(local_address=IPV4_LOCAL_ADDRESS)
+    return httpx.Client(timeout=timeout_s, follow_redirects=True, transport=transport)
+
+
 class PhiraClient:
     """Phira API 客户端：分页枚举 + Range 预筛 + 单条目下载。
 
@@ -561,7 +602,7 @@ class PhiraClient:
         self.retry_backoff_s = retry_backoff_s
         self.total_expected = total_expected
         self._owns_client = client is None
-        self._client = client or httpx.Client(timeout=timeout_s, follow_redirects=True)
+        self._client = client or build_http_client(timeout_s)
 
     # ── 生命周期 ──────────────────────────────────────────────
 
@@ -660,21 +701,33 @@ class PhiraClient:
     # ── HTTP 原语 ─────────────────────────────────────────────
 
     def _get_json(self, path: str, *, params: Mapping[str, Any]) -> dict[str, Any]:
-        """GET 并解析 JSON 对象；任何非 200 都抛可读错误。"""
+        """GET 并解析 JSON 对象；任何非 200 都抛可读错误。
+
+        **带指数退避重试**（与 Range 路径同一套）：分页枚举是长跑（322 页），
+        单次读超时就让整轮报废是不可接受的——实测 2026-09-27 第 54 页读超时。
+        4xx（429 除外）不重试：那是确定性拒绝，重试只是白等。
+        """
         url = f"{self.base_url}{path}" if path.startswith("/") else path
-        try:
-            response = self._client.get(url, params=dict(params))
-        except httpx.HTTPError as exc:
-            raise PhiraApiError(f"请求失败 {url} params={dict(params)}: {exc}") from exc
-        if response.status_code != httpx.codes.OK:
-            raise PhiraApiError(_http_error_message(response, params))
-        try:
-            payload = response.json()
-        except ValueError as exc:
-            raise PhiraApiError(f"{url} 响应不是合法 JSON: {exc}") from exc
-        if not isinstance(payload, dict):
-            raise PhiraApiError(f"{url} 响应顶层不是对象，得到 {type(payload).__name__}")
-        return payload
+
+        def load() -> dict[str, Any]:
+            try:
+                response = self._client.get(url, params=dict(params))
+            except httpx.HTTPError as exc:
+                raise PhiraApiError(f"请求失败 {url} params={dict(params)}: {exc}") from exc
+            if response.status_code != httpx.codes.OK:
+                raise PhiraApiError(
+                    _http_error_message(response, params),
+                    status_code=response.status_code,
+                )
+            try:
+                payload = response.json()
+            except ValueError as exc:
+                raise PhiraApiError(f"{url} 响应不是合法 JSON: {exc}") from exc
+            if not isinstance(payload, dict):
+                raise PhiraApiError(f"{url} 响应顶层不是对象，得到 {type(payload).__name__}")
+            return payload
+
+        return self._with_retries(f"GET {url}", load)
 
     def _request_range(self, url: str, start: int, end: int) -> tuple[int, bytes]:
         """取字节区间，返回 `(实际起点, 字节)`。
@@ -692,6 +745,7 @@ class PhiraClient:
         if response.status_code != httpx.codes.PARTIAL_CONTENT:
             raise PhiraApiError(
                 f"Range 请求 {url} [{start}, {end}] 得到 HTTP {response.status_code}",
+                status_code=response.status_code,
             )
         content_range = response.headers.get("content-range")
         actual = start
@@ -703,13 +757,20 @@ class PhiraClient:
         return actual, response.content
 
     def _with_retries(self, label: str, operation: Callable[[], T]) -> T:
-        """指数退避重试（实测 200 张扫描有 ~3.5% 网络失败）。"""
+        """指数退避重试（实测 200 张扫描有 ~3.5% 网络失败）。
+
+        4xx（429 除外）**不重试**：服务端已经明确拒绝，重试只会把确定性失败放大成
+        三倍等待（见 :attr:`PhiraApiError.retryable`）。
+        """
         last: Exception | None = None
         for attempt in range(self.max_retries + 1):
             try:
                 return operation()
             except (httpx.HTTPError, PhiraApiError) as exc:
                 last = exc
+                if isinstance(exc, PhiraApiError) and not exc.retryable:
+                    logger.warning("%s 被服务端拒绝（HTTP %s），不重试", label, exc.status_code)
+                    break
                 if attempt >= self.max_retries:
                     break
                 delay = self.retry_backoff_s * (2**attempt)
@@ -718,7 +779,11 @@ class PhiraClient:
                 )
                 if delay > 0:
                     time.sleep(delay)
-        raise PhiraApiError(f"{label} 重试 {self.max_retries} 次后仍失败：{last}") from last
+        raise PhiraApiError(
+            f"{label} 重试 {self.max_retries} 次后仍失败：{last}",
+            # 包装异常也带上最后一次的状态码：调用方（与测试）据此判断「是不是确定性拒绝」
+            status_code=last.status_code if isinstance(last, PhiraApiError) else None,
+        ) from last
 
     # ── §3.2 预筛：中央目录 + 前缀 ────────────────────────────
 
@@ -738,7 +803,10 @@ class PhiraClient:
         if response.status_code == httpx.codes.OK:
             return len(response.content)
         if response.status_code != httpx.codes.PARTIAL_CONTENT:
-            raise PhiraApiError(f"取长度 {file_url} 得到 HTTP {response.status_code}")
+            raise PhiraApiError(
+                f"取长度 {file_url} 得到 HTTP {response.status_code}",
+                status_code=response.status_code,
+            )
         content_range = response.headers.get("content-range", "")
         try:
             return int(content_range.rsplit("/", 1)[1])

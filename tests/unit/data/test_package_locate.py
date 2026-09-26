@@ -169,6 +169,30 @@ def test_parse_info_yaml_rejects_non_mapping() -> None:
         parse_info_yaml(b"- just\n- a list\n")
 
 
+def test_parse_info_yaml_tolerates_null_and_scalar_text_fields() -> None:
+    """真实 `info.yml` 的文本字段可能是 null、数字或布尔（实测 2026-09-27，全库 9651 张）。
+
+    - `tip: null` 极常见（首批 20 张里 10 张）；
+    - 另有 `tip: 282033473720393` / `tip: False` / `charter: 55544462` / `composer: 416`
+      这类把标量写进文本字段的包。
+
+    原实现用裸 `str` 声明 ⇒ pydantic 拒绝整个 `info.yml` ⇒ 整张谱面在 package 阶段被误判为
+    「结构错误」。这些字段只用于留痕与 `song_key` 分组，转成字符串不掩盖结构性错误。
+    """
+    info = parse_info_yaml(
+        b"name: x\ntip: null\nlevel: null\ncharter: 55544462\ncomposer: false\n"
+        b"chart: a.json\nmusic: b.mp3\ndifficulty: 15.5\n",
+    )
+    assert info.tip == ""
+    assert info.level == ""
+    assert info.charter == "55544462"
+    assert info.composer == "False"
+    assert info.chart == "a.json"
+    assert info.song_key == "x|False"
+    # format 恒为 null 且**不得**被归一化掉（R3：只记录不使用）
+    assert parse_info_yaml(b"name: x\nformat: null\n").format is None
+
+
 def test_parse_info_yaml_keeps_unknown_fields() -> None:
     info = parse_info_yaml(b"name: x\nchart: a.json\ncustomField: 42\n")
     assert info.name == "x"

@@ -73,6 +73,57 @@ def test_pec_with_truncated_last_line_still_matches(pec_masquerade_bytes: bytes)
     assert sniff_format(truncated) is ChartFormat.PEC
 
 
+#: 真实旧谱面里实测出现的 PEC 行（**手工重写的等价文本**，不含任何真实谱面内容）。
+#: 2026-09-27 全库抓取时对 74 张 sniff 拒收样本逐个复核得到：未识别行首的频次是
+#: `&` 80198 / `cf` 49280 / `cr` 41644 行——它们与调研样例里的 10 个命令同族。
+_PEC_LEGACY_GRAMMAR = (
+    "75\r\n"
+    "bp 0.000 175.000\r\n"
+    "n1 0 14.000 307.200 1 0\r\n"
+    "# 1.00\r\n"
+    "& 1.00\r\n"
+    "cf 0 1.000 1.00\r\n"
+    "cr 0 2.000 1.00\r\n"
+    "n3 3.000 -102.400 1.0 1\r\n"
+)
+
+
+def test_legacy_pec_command_family_is_pec_not_unknown() -> None:
+    """旧谱面的 PEC 语法族（`&` / `cf` / `cr`）必须判为 PEC。
+
+    判错的代价不是丢数据（v1 拒收 PEC），而是**格式占比统计被污染**：
+    实测全库抽样里这类文件的量级远超调研样例暗示的比例。
+    """
+    fmt, evidence = sniff_format_with_evidence(_PEC_LEGACY_GRAMMAR.encode("utf-8"))
+    assert fmt is ChartFormat.PEC
+    assert "&" in evidence
+
+
+def test_json_with_unknown_keys_is_not_pec() -> None:
+    """保守判定的下界仍在：JSON 类内容（PBC 未查证）不得被 PEC 规则吃掉。"""
+    payload = json.dumps(
+        {
+            "formatVersion": 1,
+            "judgeLineList": [
+                {"numOfNotes": 3, "notes": [{"type": 1, "time": 0.5, "floorPosition": 0.0}]},
+            ],
+        },
+    ).encode()
+    # 该样本同时命中官谱特征字段 ⇒ OFFICIAL；关键在于**不能**误判成 PEC
+    fmt, _evidence = sniff_format_with_evidence(payload)
+    assert fmt is not ChartFormat.PEC
+
+
+def test_json_without_any_marker_stays_unknown_even_with_pec_like_tokens() -> None:
+    """没有已知标记的 JSON（PBC 结构未查证）仍归 UNKNOWN 记账。"""
+    payload = json.dumps(
+        {"numOfNotes": 3, "notes": [{"type": 1, "time": 0.5, "floorPosition": 0.0}]},
+    ).encode()
+    fmt, evidence = sniff_format_with_evidence(payload)
+    assert fmt is ChartFormat.UNKNOWN
+    assert "PBC" in evidence
+
+
 def test_rpe_root_key_combination_is_detected_without_event_layers() -> None:
     """兜底规则：前缀里没有 eventLayers（所有层级为空时该字段不出现）仍要判为 RPE。"""
     payload = json.dumps(

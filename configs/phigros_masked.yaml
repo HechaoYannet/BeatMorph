@@ -17,13 +17,14 @@ data:
   split_train: train
   split_val: val
   provenance:
-    # ⚠️ 合规硬约束③：来源与用途必须如实填写，缺一即启动失败
+    # ⚠️ 合规硬约束③：来源与用途必须如实填写，缺一即启动失败。
+    # 这里的值与 data/processed/charts.jsonl 的行级 provenance 必须一致（逐张可追溯）。
     source: "https://api.phira.cn/chart（Phira 官方 API，见 docs/knowledges/phira-dataset-survey.md）"
-    query: "type=3 全量分页 pageNum<=30（322 页，实测 count=9649）"
-    fetched_at: "2026-09-27T00:00:00+00:00"
+    query: "type=3（any）全量分页 pageNum=30（322 页，实测 9651 张）；逐张预筛 + 选择性下载；全库口径，记账见 data/processed/fetch_report.json"
+    fetched_at: "2026-09-26T15:22:18.020816+00:00"
     purpose: train
     script: "scripts/fetch_phira.py"
-    script_version: "待落地"
+    script_version: "1.0.0"
   t_window: 192
   x_bins: 128
   k_max: 128
@@ -55,5 +56,15 @@ gates:
   smoke_max_samples: 8
   overfit_steps: 300
   overfit_target_ratio: 0.1
+  # ⚠️ 真实批次的内存随 shuffle_samples **线性**增长：
+  #    批元素数 ≈ samples × K × T × X × S × C（本配置 x_bins=128、t_window=192；
+  #    真实谱面 K 中位 25 / P75 41，批内取最大 K）。
+  #    实测 2026-09-27：samples=16 时门禁装配在 model forward 上申请 5.4 GB 连续内存直接失败
+  #    （DefaultCPUAllocator: not enough memory）；samples=4 时进程私有内存涨到 **32 GB**
+  #    并开始换页（本机 31 GB RAM）⇒ 仍不可用。**2 是本轮实测能跑完的取值**。
+  #    代价：G2 的样本数变少 ⇒「打乱臂直接背样本」的风险回升（plan 07 §9-12），
+  #    因此这一项在真实数据上属**待复核**：要么换更大内存的机器，要么给门禁加分批
+  #    （G2 现在是一次性 collate 全部样本再前向）。
+  shuffle_samples: 2
   shuffle_steps: 100
   initial_head_bias: 20.0

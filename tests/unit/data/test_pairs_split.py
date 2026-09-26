@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from beatmorph.data.dataset import load_pairs
 from beatmorph.data.phira.client import (
     Manifest,
     ManifestError,
@@ -210,6 +212,27 @@ def test_missing_chart_file_is_skipped(tmp_path: Path) -> None:
     splits = build_pairs(table, charts, features)
     assert splits.skipped_no_chart == 1
     assert splits.skipped_total == 1
+
+
+def test_manifest_chart_path_stays_relative_to_chart_dir(tmp_path: Path) -> None:
+    """回归（实测 2026-09-27）：清单里的 `chart_path` 必须**保持相对 chart_dir**。
+
+    `build_pairs` 曾经把**已解析**的路径写进清单，而 `ChartPairDataset` 会再拼一次
+    chart_dir ⇒ 拼出 `data/processed/charts/data/processed/charts/...`，
+    20/20 行判为「谱面缺失」，真实数据通路的门禁整体装配失败（退出码 7）。
+    这里锁定的是**跨模块往返**：清单 → `load_pairs` → 按 chart_dir 解析 → 文件必须存在。
+    """
+    rows = _four_songs()
+    table, charts, features = _prepare(tmp_path, rows)
+    splits = build_pairs(table, charts, features)
+    manifest = tmp_path / "pairs.json"
+    manifest.write_text(json.dumps(splits.to_dict()), encoding="utf-8")
+
+    loaded = load_pairs(manifest, "train")
+    assert loaded
+    for pair in loaded:
+        assert not Path(pair.chart_path).is_absolute()
+        assert (charts / pair.chart_path).is_file(), pair.chart_path
 
 
 def test_invalid_split_name_raises() -> None:

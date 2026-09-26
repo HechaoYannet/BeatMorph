@@ -30,6 +30,7 @@ from beatmorph.generation.masks import (
     assert_hold_pairs_not_split,
     build_occlusion,
     build_occlusion_batch,
+    close_hold_pairs,
     flat_counts_sum,
     mask_semantics,
     neighbor_leak_rate,
@@ -184,6 +185,53 @@ def test_event_granularity_never_splits_hold_pairs(ratio: float, seed: int) -> N
     # 门禁不得空转：构造的 Hold 起止对必须全部配对成功
     assert stats.n_hold_pairs == K_LINES
     assert stats.n_hold_unpaired == 0
+    assert_hold_pairs_not_split(counts, mask)
+
+
+def test_long_hold_spanning_tokens_is_closed_after_expansion() -> None:
+    """回归（实测 2026-09-27，真实谱面）：扩张到 token 之后，跨 token 的 Hold 配对必须收口。
+
+    机制：Hold 的起点在 token t1、终点在 token t2（长 Hold）。t1 里**另有**一个独立事件
+    被选中时，`expand_to_tokens` 会把 t1 整体遮住，而 t2 不动 ⇒ 配对只遮一半。
+    这里先复现这个半遮形态，再断言 `close_hold_pairs` 在 **token 级**把它收口。
+    """
+    grid = _grid()
+    counts = _empty(1, grid)
+    start, end, x_bin, side = 1, grid.t_bins - 1, 0, 0
+    other_t = 1  # 与起点同 token 的独立事件（终点在另一个 token）
+    counts[0, start, x_bin, side, _TAP] = 1
+    counts[0, other_t, x_bin + 1, side, _TAP] = 1
+    _hold(counts, k=0, start=start, end=end, x=x_bin, s=side)
+
+    # 半遮形态：只遮起点所在 token（模拟扩张把 t1 整体遮住、t2 未选中）
+    half = torch.zeros_like(counts, dtype=torch.bool)
+    half[0, start, :, :, :] = True
+    with pytest.raises(AssertionError, match="hold 配对点被拆散"):
+        assert_hold_pairs_not_split(counts, half)
+
+    closed = close_hold_pairs(counts, half)
+    assert_hold_pairs_not_split(counts, closed)
+    # 收口是 **token 级**：终点所在 token 整体被遮（不留半遮 token 的泄漏）
+    assert bool(closed[0, end, :, :, :].all().item())
+    # 未发生拆分时原样返回（不复制、不改语义）
+    both = torch.zeros_like(counts, dtype=torch.bool)
+    both[0, start, :, :, :] = True
+    both[0, end, :, :, :] = True
+    assert close_hold_pairs(counts, both) is both
+
+
+@pytest.mark.parametrize("ratio", RATIOS)
+@pytest.mark.parametrize("seed", range(8))
+def test_build_occlusion_never_splits_a_multi_token_hold(ratio: float, seed: int) -> None:
+    """同一构造下扫多个种子：`build_occlusion` 的产物不得拆散配对（收口在管线内生效）。"""
+    grid = _grid()
+    counts = _empty(1, grid)
+    start, end, x_bin, side = 1, grid.t_bins - 1, 0, 0
+    counts[0, start, x_bin, side, _TAP] = 1
+    counts[0, start, x_bin + 1, side, _TAP] = 1
+    _hold(counts, k=0, start=start, end=end, x=x_bin, s=side)
+    mask, stats = build_occlusion(counts, ratio=ratio, granularity="event", seed=seed)
+    assert stats.n_hold_pairs == 1
     assert_hold_pairs_not_split(counts, mask)
 
 

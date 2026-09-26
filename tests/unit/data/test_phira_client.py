@@ -154,6 +154,58 @@ def test_http_400_is_reported_readably() -> None:
     assert "pageNum" in message
 
 
+def test_transient_read_timeout_is_retried() -> None:
+    """传输层故障必须重试。
+
+    实测 2026-09-27：全量枚举跑到第 54 页时单次读超时，而分页路径当时没有重试
+    ⇒ 322 页的一轮枚举整体报废。长跑任务的传输重试不是「优化」，是可用性前提。
+    """
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise httpx.ReadTimeout("模拟读超时", request=request)
+        return _paged_handler({1: [_meta_payload(1)]}, count=1)(request)
+
+    client = PhiraClient(
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+        max_retries=2,
+        retry_backoff_s=0.0,
+    )
+    metas = list(client.iter_chart_meta(sleep_s=0.0))
+    assert [meta.id for meta in metas] == [1]
+    assert calls["n"] == 2
+
+
+def test_http_400_is_not_retried() -> None:
+    """4xx（429 除外）是确定性拒绝：不得重试，否则一次参数错误被退避放大成三倍等待。"""
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(400, text="bad request")
+
+    client = PhiraClient(
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+        max_retries=3,
+        retry_backoff_s=0.0,
+    )
+    with pytest.raises(PhiraApiError) as excinfo:
+        list(client.iter_chart_meta(sleep_s=0.0))
+    assert calls["n"] == 1
+    assert excinfo.value.status_code == 400
+    assert excinfo.value.retryable is False
+
+
+def test_retryable_flag_classifies_transport_and_server_errors() -> None:
+    """重试判据：无状态码（传输层）/ 5xx / 429 可重试，其余 4xx 不可。"""
+    assert PhiraApiError("boom").retryable is True
+    assert PhiraApiError("boom", status_code=503).retryable is True
+    assert PhiraApiError("boom", status_code=429).retryable is True
+    assert PhiraApiError("boom", status_code=404).retryable is False
+
+
 def test_count_mismatch_between_pages_raises() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         page = int(dict(request.url.params)["page"])

@@ -320,15 +320,22 @@ class MERTAdapter(nn.Module):
         """加载音频特征提取器（Wav2Vec2 风格，做归一化）。"""
         from transformers import AutoFeatureExtractor
 
+        # 装了 transformers 之后这行才真正被 mypy 检查：
+        # `from_pretrained` 在 transformers 里无类型标注（no-untyped-call），返回值是 Any
+        # （no-any-return）。两处都是第三方库缺 stub 的老问题，不是本模块的类型错误。
         try:
-            return AutoFeatureExtractor.from_pretrained(self.model_name)  # type: ignore[no-any-return]
+            return AutoFeatureExtractor.from_pretrained(  # type: ignore[no-untyped-call,no-any-return]
+                self.model_name
+            )
         except Exception:
             # ModelScope 本地路径兜底
             try:
                 from modelscope import snapshot_download
 
                 local_dir = snapshot_download(self.model_name)
-                return AutoFeatureExtractor.from_pretrained(local_dir)  # type: ignore[no-any-return]
+                return AutoFeatureExtractor.from_pretrained(  # type: ignore[no-untyped-call,no-any-return]
+                    local_dir
+                )
             except Exception as exc:
                 logger.warning("特征提取器加载失败，回退裸 waveform: %s", exc)
                 return _DummyProcessor()
@@ -370,7 +377,9 @@ class MERTAdapter(nn.Module):
             target_modules=target_modules,
             bias="none",
         )
-        self.backbone = get_peft_model(self.backbone, cfg)
+        # peft 的签名要求 `PreTrainedModel`，而本模块把主干当 `nn.Module` 持有
+        # （离线直出路径根本不装 peft，这里只是可选 Adapter）——运行时契约由 peft 自己校验。
+        self.backbone = get_peft_model(self.backbone, cfg)  # type: ignore[arg-type]
         trainable = sum(p.numel() for p in self.backbone.parameters() if p.requires_grad)
         logger.info("LoRA 注入完成：可训参数 %d（rank=%d）", trainable, rank)
 

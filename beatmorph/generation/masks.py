@@ -264,6 +264,44 @@ def dilute_with_empty_tokens(counts: Tensor, occlusion: Tensor, *, seed: int) ->
     return diluted.reshape(k_dim, t_dim, 1, 1, 1).expand_as(counts).clone()
 
 
+def close_hold_pairs(counts: Tensor, occlusion: Tensor) -> Tensor:
+    """把遮盖在 **token 级**收口：Hold 配对两端的 token 必须同遮或同不遮。
+
+    动机（实测 2026-09-27，真实谱面）：`expand_to_tokens` 按 `(k, tau)` token 扩张，
+    而长 Hold 的起点与终点可以落在不同 token。只要起点所在 token 里**另有**一个事件被选中，
+    扩张就把该 token 整体遮住，而终点所在的 token 未被选中 ⇒ 配对只被遮了一半。
+
+    收口口径是 **token 级**而不是格子级：格子级补遮会在未被遮的 token 里留下
+    「被遮的孤立格子」，那正是 `expand_to_tokens` 要消除的 mask 泄漏。
+
+    Args:
+        counts: `(K, T, X, S, C)` 计数张量。
+        occlusion: 同形状的遮盖（**假定已是 token 级**）。
+
+    Returns:
+        同形状的遮盖；未发生拆分时**原样返回**（不复制）。
+    """
+    pairs, _unpaired = _hold_pairs(counts)
+    if not pairs:
+        return occlusion
+    shape = counts.shape
+    k_dim, t_dim = int(shape[0]), int(shape[1])
+    cells_per_token = int(shape[2]) * int(shape[3]) * int(shape[4])
+    per_token = occlusion.reshape(k_dim, t_dim, -1).any(dim=-1)
+    flat_tokens = per_token.reshape(-1)
+    changed = False
+    for left, right in pairs:
+        left_token = left // cells_per_token
+        right_token = right // cells_per_token
+        if bool(flat_tokens[left_token]) != bool(flat_tokens[right_token]):
+            flat_tokens[left_token] = True
+            flat_tokens[right_token] = True
+            changed = True
+    if not changed:
+        return occlusion
+    return per_token.reshape(k_dim, t_dim, 1, 1, 1).expand_as(counts).clone()
+
+
 def expand_to_tokens(counts: Tensor, occlusion: Tensor) -> Tensor:
     """把格子级遮盖扩张到整个 `(k, tau)` token（含该 token 的全部空格）。
 
@@ -321,6 +359,15 @@ def build_occlusion(
             occlusion = expand_to_tokens(counts, occlusion)
             if dilute:
                 occlusion = dilute_with_empty_tokens(counts, occlusion, seed=seed + 977)
+            # ⚠️ 扩张是**按 (k, tau) token** 做的，而一个 Hold 的起点与终点可以落在
+            # **不同 token**（长 Hold / 慢段落）。同一 token 里的另一个事件被选中时，
+            # 扩张会把这个 token 整体遮住 ⇒「配对只有一端被遮」。实测（2026-09-27，真实谱面）：
+            # 数据集在 index=12 的窗口上直接抛「hold 配对点被拆散」，真实数据通路的门禁装配失败。
+            # 因此扩张之后必须**收口**（token 级，不产生半遮 token）。
+            # ⚠️ 只对**契约路径** `granularity="event"` 收口：`cell` / `frame` 是消融臂，
+            # 它们的「实际 r ≈ 请求 r」契约优先于「Hold 配对不拆散」（那两条臂本就不以配对为单位）。
+            if granularity == "event":
+                occlusion = close_hold_pairs(counts, occlusion)
     n_occluded = int(flat_counts_sum(counts, occlusion))
     n_masked_cells = int(occlusion.sum().item())
     n_masked_with_event = int((occlusion & (counts > 0)).sum().item())
@@ -468,6 +515,7 @@ __all__ = [
     "assert_hold_pairs_not_split",
     "build_occlusion",
     "build_occlusion_batch",
+    "close_hold_pairs",
     "dilute_with_empty_tokens",
     "expand_to_tokens",
     "flat_counts_sum",

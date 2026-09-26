@@ -47,8 +47,16 @@ RPE_ROOT_KEY_MARKERS: tuple[bytes, ...] = (b'"BPMList"', b'"judgeLineList"')
 OFFICIAL_MARKERS: tuple[bytes, ...] = (b'"notesAbove"', b'"notesBelow"', b'"formatVersion"')
 
 #: PEC 命令行首 token（PhiEditer 旧格式；pgrfm wiki PEC 条目 + 调研 §4.4 实测样例）。
+#:
+#: ⚠️ **2026-09-27 扩表（实测证据）**：对全库抓取中 74 张 sniff 拒收样本逐个复核后，
+#: 发现旧谱面（低 chart id）里的 PEC 远不止调研样例里的那 10 个命令——未识别行首的
+#: 频次统计是 `&` 80198 行 / `cf` 49280 行 / `cr` 41644 行，三者都属于
+#: 「符号命令 + 数值参数」的同一族语法。原表把它们判成 UNKNOWN，
+#: 后果不是丢数据（v1 主路径本来就拒收 PEC），而是**格式占比统计被污染**
+#: （Q-1「全库精确格式占比」会把这些 PEC 记成 unknown）。
+#: `#` 行按注释丢弃（实测 `# 1.00` 形态），保持原行为。
 PEC_COMMANDS: frozenset[str] = frozenset(
-    {"bp", "cp", "cm", "cd", "ca", "cv", "n1", "n2", "n3", "n4"},
+    {"bp", "cp", "cm", "cd", "ca", "cv", "cf", "cr", "&", "n1", "n2", "n3", "n4"},
 )
 
 #: PEC 至少必须出现的命令：一个 BPM 行 + 至少一个 note 行（否则不是谱面）。

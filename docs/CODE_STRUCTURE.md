@@ -6,12 +6,13 @@
 
 ---
 
-## 0. 先读这一段：当前仓库仍是 osu!mania 版
+## 0. 先读这一段：迁移已开始（契约 / 数据 / 强度场已落地）
 
 RFC-0029（2026-08-05 采纳）把目标游戏由 osu!mania 4K 改为 **Phigros**，生成范式改为
 **判定线局部系多线标记点过程 + 掩码补全 + 非齐次泊松 NLL**，主路径格式锁定 **RPEJSON**。
-但**代码尚未迁移**：`beatmorph/` 下的实现基本仍是 v2.x 的 osu!mania 形态
-（见 [CLAUDE.md](../CLAUDE.md) §6「代码尚未迁移」）。
+**迁移自 2026-09-27 起已经开始**：`core/contracts`、`data/`、`field/`、`generation/`（主干 M1–M4/M6）
+四块已按 v3.0 落地，其余模块（`decoder/`、`io/formats/rpejson/` 写侧、`eval/`、`infra/` 训练栈）仍待建。
+逐模块进度以 [plans/](plans/README.md) 各 plan 的里程碑状态列为准，本文件只描述结构。
 
 | 标记 | 含义 |
 |------|------|
@@ -22,11 +23,14 @@ RFC-0029（2026-08-05 采纳）把目标游戏由 osu!mania 4K 改为 **Phigros*
 
 **三类最关键的差距**：
 
-1. **契约里没有 Phigros**：`core/contracts` 无 `JudgeLine` / `PhigrosNote` / `PhigrosChart` / `ChartField`，
-   `GameMode` 只有 `MANIA_4K`，无 `PHIGROS`（RFC-0029 §4.3 要求扩展）。
-2. **三个目标模块整体不存在**：`field/`、`eval/`、`io/formats/rpejson/`。
-3. **生成主干不对**：现存 `generation/ar_transformer.py` 是**逐 token 自回归**，
-   而目标主选是**掩码补全 Encoder-Decoder**（AR 降级为对照臂 B3/B4）。
+1. ~~**契约里没有 Phigros**~~ ✅ **已解决**：`core/contracts/phigros.py` 定义了 `JudgeLine` / `PhigrosNote` /
+   `PhigrosChart` / `BpmPoint` / `Side` / `NoteType`，`field.py` 定义了 `ChartFieldSpec` / `ChartField` /
+   `ChartTargetField`，`tensors.py` 只留音频侧常量；`GameMode.PHIGROS` 已存在（plan 00 已交付）。
+2. ~~**三个目标模块整体不存在**~~ 🟡 **部分解决**：`field/`（plan 03）、`data/`（plan 02）与
+   `generation/`（plan 04 主干）已落地；`eval/` 与 `io/formats/rpejson/` **写侧**仍待建（plan 05 / plan 06）。
+3. ~~**生成主干尚未开始**~~ 🔵 **主路径已落地**：`generation/` 是掩码补全 Encoder-Decoder +
+   非齐次泊松 NLL + 迭代并行解码（plan 04 M1–M4/M6，G1–G4 门禁实跑全绿）；
+   消融臂 B1/B3/B4/B5 与离散 token 化待后续（plan 04 M7–M11）。
 
 > ✅ **残留已清**（2026-08-05）：契约常量已是派生式 75 Hz
 > （`core/contracts/tensors.py`：`MERT_FRAME_RATE_HZ = MERT_SAMPLE_RATE_HZ / MERT_CONV_STRIDE_PRODUCT`），
@@ -59,6 +63,17 @@ BeatMorph/
 ├── AGENTS.md             # 子 agent 协作约定（v3.0）
 └── LICENSE               # Apache-2.0
 ```
+
+### 1.1 ⚠️ 工具链陷阱（易复发，勿回退）
+
+- **排除模式必须锚定仓库根**：`pyproject.toml` 的 `[tool.ruff].extend-exclude` 与 `[tool.mypy].exclude`
+  原为未锚定模式（裸写 `"data"`），会匹配**任意层级**的 `data/`，导致 `make lint` / `make typecheck`
+  **静默跳过整个 `beatmorph/data/`**（mypy 少查 10 个文件：27 vs 37）。已改为锚定形式
+  （ruff `"/data"`；mypy `"^(data|models|runs|outputs)/"`）。改动这些模式后请用「植入一个 F401 探针文件」
+  的方式复验覆盖率——这类失效**不会报错**，只会让门禁空转（与 25 Hz 事件同类）。
+- **物理常量防线**：`tests/unit/core/test_derived_constants.py` 用 AST 扫描 `beatmorph/` 下的**数值字面量**
+  （注释与 docstring 中的说明性数字不会误报），黑名单含 1350 / 900 / 675 / 450 / 10.546875 / 0.83175 /
+  75.0 / 320 / 24000 / (1÷48) / 120.23。新增物理量时改 `core/contracts/` 并在黑名单登记，**不要**在别处写字面量。
 
 ## 2. 目标包结构（`beatmorph/`）—— CLAUDE.md §2 的逐模块职责
 
@@ -94,20 +109,27 @@ beatmorph/
 
 ### 3.1 已存在但不是目标形态（🟡【改造】）
 
+> 本轮（2026-09-27）已把 `core/contracts` 全量换成 v3.0 形态；该表其余行描述的是**尚未迁移**的模块。
+
 | 路径 | 现状 | 目标形态 / 差距 |
 |------|------|----------------|
-| `core/contracts/events.py` | `NoteType`(TAP/HOLD/MINE/ROLL/FAKE)、`Note`(time,lane,type,duration)、`Chart`、`GameMode.MANIA_4K` | 新增 `JudgeLine` / `PhigrosNote(line_id,t,positionX,side,type,hold_time,speed,is_fake)` / `PhigrosChart`；`GameMode` 增 `PHIGROS`（RFC-0029 §4.3） |
-| `core/contracts/tensors.py` | MERT 三常量已是派生式（24000/320=75Hz）✅，但同文件仍含 `CODEBOOK_*`、`BPE_*`、`DEFAULT_LANE_COUNT` 等 v2.x 常量 | 增 `RPE_STAGE_WIDTH` / `X_BINS` / `DX = RPE_STAGE_WIDTH / X_BINS`；v2.x 常量随归档移除 |
+| ~~`core/contracts/events.py`~~ | ✅ **已删除**（v2.x 的 `Note`/`Chart`/`Section`/`EventToken` 随 osu!mania 退役） | 由 `phigros.py` 取代；`GameMode` 现在只有 `PHIGROS`（红线 4：单一目标） |
+| `core/contracts/tensors.py` | ✅ **已收敛**：只留 `MERT_SAMPLE_RATE_HZ` / `MERT_CONV_STRIDE_PRODUCT` / `MERT_FRAME_RATE_HZ`（派生）/ `MERT_DEFAULT_FEAT_DIM` 与 `AudioEmbedding` | 已完成；谱面侧常量移入 `phigros.py` / `field.py` |
 | `audio/encoder/mert.py` | MERT + LoRA、滑窗拼接、`output_frame_rate()` 从 config 派生 ✅ | 基本可复用；仅需明确长音频窗与事件级对齐口径 |
 | `audio/separation/demucs.py` | 四轨分离（可选增强） | v3.0 未列入主路径（BasePlan §3.1 不再提 Demucs），去留待定 |
 | `data/parsers/osu_path.py` | `.osu` 解析 + 段落统计 | 换成 RPEJSON 解析（含 `father` 嵌套、事件跨层求和、补洞） |
 | `data/pipeline/embed.py` | `PreprocessPipeline`（4 步）+ `extract_mert_embeddings`（按 `.osu` 父目录找音频） | 骨架可留，输入改为 Phira 谱面包 + `info.yml.chart`/`info.yml.music` 定位 |
 | `data/manifest.py` | sayobot 集级元数据注入 + 质量过滤 | 换为 Phira 元数据（`difficulty`/`tags`/`stable`/`ranked`）；阈值须待全库统计后重定 |
 | `data/datasets.py` | `PlannerDataset`（按 `mode == MANIA_4K` 过滤） | 换为强度场样本数据集（含 mask 通道） |
-| `generation/ar_transformer.py` | AR Transformer 逐 token 生成 | 主选改掩码补全 Enc-Dec；AR 保留为**对照臂 B3/B4** |
+| ~~`generation/ar_transformer.py`~~ | ✅ **已删除**（v2.x 的 AR Transformer） | 主选改掩码补全 Enc-Dec；AR 保留为**对照臂 B3/B4**，将按 v3.0 的离散 token 化重写 |
+| `generation/batch.py` | ✅ **已交付**：`FieldBatch` / `FieldOutput` 契约与形状断言（含「普通轨必须先跨层求和」的 5 vs 20 断言） | plan 04 §3.1/§3.2 |
+| `generation/masks.py` | ✅ **已交付**：三 mask 语义、按事件遮盖（hold 配对同遮）、**防 mask 泄漏的 token 块遮盖 + 稀释**、抄邻居/泄漏诊断 | plan 04 §4.2/§4.5 |
+| `generation/losses.py` | ✅ **已交付**：`full_poisson_loss` / `masked_poisson_loss`（HT 重标定）、排列敏感性与「无 line 分类损失」契约、B1/B5 的目标函数 | plan 04 §3.3/§4.3 |
+| `generation/model.py` | ✅ **已交付**：掩码补全 Enc-Dec（滑动窗口 + 周期全局层、难度 AdaLN、轨道/音频 cross-attention、可变 K、因子化 λ 头 + **直连 skip**） | plan 04 §4.1/§4.2 |
+| `generation/sampling.py` | ✅ **已交付**：迭代并行解码（`steps >= 2` 契约、单调 schedule、三种连续场置信度） | plan 04 §4.4 |
 | `decoder/postprocess/constraints.py` | osu 语汇的物理红线校验（lane 相关） | 换成 Phigros 红线：同刻按键上限、Hold 区间、越界、**跨线几何冲突**（红线 3：只校验/钳位，不改落点分配） |
 | `io/formats/osu.py` / `sm.py` / `base.py` | `.osu`（Reader/Writer 完整）、`.sm`、抽象基类 | `base.py` 可复用；`osu.py`/`sm.py` 归档；新增 `rpejson/` |
-| `core/eval.py` | `measure_reconstruction_accuracy`（贪心匹配，**lane 精确** + ±20ms） | 贪心一对一匹配可复用，但匹配键须改为 (line_id, t, positionX, side, type)，并补 ±50ms 双报、side recall、跨线合法性、NLL 校准 |
+| ~~`core/eval.py`~~ | ✅ **已删除**（v2.x tokenizer 往返度量，属退役范式） | `eval/`（plan 06）重建为事件级 F1 / 校准 / 合法性 |
 | `infra/trainer.py` | `PlannerLitModule` + `build_trainer`（Lightning/bf16/梯度裁剪） | `build_trainer` 可复用；LitModule 换成掩码补全 + 泊松 NLL |
 | `infra/config/` | 空目录（仅 `.gitkeep`） | Hydra 封装（待 infra-agent 落地） |
 | `cli/train.py` | `beatmorph-train --config-name stage1_planner`（按 `experiment.name` 分发） | 保留入口形态，新增 v3.0 stage（数据/特征/门禁/训练） |
@@ -119,12 +141,12 @@ beatmorph/
 
 | 路径 | 要交付什么 | 依据 |
 |------|-----------|------|
-| `core/contracts/`（Phigros 部分） | `JudgeLine` / `PhigrosNote` / `PhigrosChart` / `ChartField` + 断言常量 | RFC-0029 §2.3/§3.1 |
+| ~~`core/contracts/`（Phigros 部分）~~ | ✅ **已交付**：`phigros.py` + `field.py` + 不变量断言（plan 00） | RFC-0029 §2.3/§3.1 |
 | `io/formats/rpejson/` | RPEJSON Reader/Writer（独立实现，**只读 prpr/phichain 行为规范，不逐行移植**） | RFC-0029 §4.2（GPL-3.0 / LGPL-3.0 风险） |
-| `field/` | 网格化、目标构建、**两条 ∫λ 路径 + 一致性测试**、可视化 | BasePlan §3.4 |
+| ~~`field/`~~ | ✅ **已交付**：网格 / 目标构建 / 两条 ∫λ 路径互校 / 共格碰撞 / 可视化（plan 03） | BasePlan §3.4 |
 | `eval/` | 事件级 F1 / MAE / side 与 type 准确率 / 合法性 / NLL 校准 / 人评协议 | RFC-0029 §5.1 |
-| `generation/`（掩码补全） | Enc-Dec + 显式 mask 通道 + 按事件遮盖 | BasePlan §3.3 |
-| 数据获取脚本 | Phira API 枚举（322 页）+ Range 预筛 + 选择性下载 | [survey](knowledges/phira-dataset-survey.md) §9 |
+| ~~`generation/`（掩码补全）~~ | ✅ **已交付**：Enc-Dec + 显式 mask 通道 + 按事件遮盖（plan 04 M1–M4/M6；G1–G4 门禁全绿） | BasePlan §3.3 |
+| ~~数据获取脚本~~ | ✅ **已交付**：Phira API 枚举 + Range 预筛 + 选择性下载 + RPEJSON 解析 + 质检（plan 02） | [survey](knowledges/phira-dataset-survey.md) §9 |
 | v3.0 配置 | 数据 / 特征 / 场 / 模型 / 训练 配置组 | CLAUDE.md §4（`configs/` 由 infra-agent 维护） |
 
 ### 3.3 v2.x 退役资产（🗄️【归档】→ `archive/osu-mania` 分支）

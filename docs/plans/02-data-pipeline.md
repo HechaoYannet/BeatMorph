@@ -1,6 +1,6 @@
 # Plan 02 — 数据流水线：Phira 谱面获取 + RPEJSON 解析 + 质检 + 特征离线提取
 
-> 状态：🟡 草案 ｜ 阶段：Phase 1 ｜ 负责：数据组（data-agent）
+> 状态：🔵 实施中（M1–M10 代码与默认 CI 测试已落地；逐条实施状态见 §6 里程碑表的「实施状态」列） ｜ 阶段：Phase 1 ｜ 负责：数据组（data-agent）
 > 对应代码：`beatmorph/data/`（`phira/client.py`、`phira/package.py`、`parsers/sniff.py`、`parsers/rpejson.py`、`qc.py`、`pipeline/embed.py`） ｜ 对应奠基章节：§4、§3.2.4、§9
 
 ## 1. 目标与范围
@@ -55,21 +55,23 @@
 ```python
 PHIRA_API_BASE: str = "https://api.phira.cn"
 CHART_LIST_ENDPOINT: str = "/chart"
-CHART_LIST_RESULTS_KEY: str = "results"     # ⚠️ 非文档写的 "result"（实测）
-CHART_PAGE_SIZE_MAX: int = 30                # 实测 pageNum=31 → HTTP 400
-CHART_TOTAL_EXPECTED: int = 9649             # 2026-09-26 实测 count；作为枚举完整性断言，非硬编码语义
-RANGE_PREFIX_BYTES: int = 24 * 1024          # 谱面条目嗅探用的压缩前缀（实测有效）
-ZIP_TAIL_BYTES: int = 200 * 1024             # 中央目录读取窗口（实测有效）
-REQUEST_INTERVAL_S: float = 0.5             # 自限速：未观测到限流 ≠ 无限流（调研 Q-2）
-CHART_FILE_FIELD: str = "chart"              # info.yml 中定位谱面文件的字段（不得按名猜）
-CHART_MUSIC_FIELD: str = "music"             # 音频文件名的唯一来源
+CHART_LIST_RESULTS_KEY: str = "results"  # ⚠️ 非文档写的 "result"（实测）
+CHART_PAGE_SIZE_MAX: int = 30  # 实测 pageNum=31 → HTTP 400
+CHART_TOTAL_EXPECTED: int = 9649  # 2026-09-26 实测 count；作为枚举完整性断言，非硬编码语义
+RANGE_PREFIX_BYTES: int = 24 * 1024  # 谱面条目嗅探用的压缩前缀（实测有效）
+ZIP_TAIL_BYTES: int = 200 * 1024  # 中央目录读取窗口（实测有效）
+REQUEST_INTERVAL_S: float = 0.5  # 自限速：未观测到限流 ≠ 无限流（调研 Q-2）
+CHART_FILE_FIELD: str = "chart"  # info.yml 中定位谱面文件的字段（不得按名猜）
+CHART_MUSIC_FIELD: str = "music"  # 音频文件名的唯一来源
 ```
 
 ### 3.2 客户端与包访问（`beatmorph/data/phira/client.py`、`package.py`）
 
 ```python
 class PhiraClient:
-    def iter_chart_meta(self, type: int = 3, sleep_s: float = REQUEST_INTERVAL_S) -> Iterator[ChartMeta]:
+    def iter_chart_meta(
+        self, type: int = 3, sleep_s: float = REQUEST_INTERVAL_S
+    ) -> Iterator[ChartMeta]:
         """分页枚举全部谱面元数据。type=3 为 any（= 全部 9649）；每页 pageNum=CHART_PAGE_SIZE_MAX。
 
         断言：results 键存在；累计条数 == count（最后一页的 count 与首页一致）。
@@ -88,9 +90,11 @@ class PhiraClient:
 ```python
 class ChartPackage:
     """一个谱面包 = zip：info.yml + 谱面文件 + 音频 + 曲绘（+ 可选 extra.json/贴图/着色器）。"""
-    chart_file: str        # **只来自** info.yml[CHART_FILE_FIELD]；不得按后缀或大小猜
-    music_file: str        # **只来自** info.yml[CHART_MUSIC_FIELD]
+
+    chart_file: str  # **只来自** info.yml[CHART_FILE_FIELD]；不得按后缀或大小猜
+    music_file: str  # **只来自** info.yml[CHART_MUSIC_FIELD]
     entries: dict[str, ZipEntry]
+
     def chart_bytes(self) -> bytes: ...
 ```
 
@@ -107,7 +111,12 @@ class ChartPackage:
 
 ```python
 class ChartFormat(StrEnum):
-    RPE = "rpe"; PEC = "pec"; OFFICIAL = "official"; PBC = "pbc"; UNKNOWN = "unknown"
+    RPE = "rpe"
+    PEC = "pec"
+    OFFICIAL = "official"
+    PBC = "pbc"
+    UNKNOWN = "unknown"
+
 
 def sniff_format(data: bytes) -> ChartFormat:
     """**只按内容**判定（第一非空字节 / 关键字段名 / 行结构）。签名不接受文件名或后缀。
@@ -125,11 +134,13 @@ def sniff_format(data: bytes) -> ChartFormat:
 def parse_rpejson(data: bytes, source: ChartSource) -> PhigrosChart:
     """RPEJSON → plan 00 的 PhigrosChart 契约。**只读行为规范，不移植任何 GPL/LGPL 源码。**"""
 
+
 def beat_to_seconds(beats: float, bpm_points: Sequence[BpmPoint]) -> float:
     """**格式层**换算（RPE 原生 beat 三元组 → 契约秒）；分段积分：Σ (Δbeats × 60 / bpm)。
     断言 round-trip：beat2sec(sec2beat(x)) == x（容差内）。
     ⚠️ 与「场网格秒↔τ」的关系：数学同源（τ 即拍），红线 7 要求 beat-aligned 换算只在 field/ 内实现
     → 二者的接缝须裁定，本模块**不得**成为第二份独立实现（RFC-0029 §7-8、plan 03 §9-13）。"""
+
 
 def seconds_to_beat(t_s: float, bpm_points: Sequence[BpmPoint]) -> float: ...
 ```
@@ -154,12 +165,14 @@ def seconds_to_beat(t_s: float, bpm_points: Sequence[BpmPoint]) -> float: ...
 class QcReport:
     chart_id: int
     passed: bool
-    n_lines: int; n_notes: int
+    n_lines: int
+    n_notes: int
     fmt: ChartFormat
-    out_of_visible_range: int      # |position_x| > RPE_STAGE_HALF_WIDTH 的事件数（**只统计，不钳位**）
-    out_of_audio_window: int       # 事件时刻超出音频时长的事件数
-    errors: list[str]              # schema 级硬错误 → 隔离
+    out_of_visible_range: int  # |position_x| > RPE_STAGE_HALF_WIDTH 的事件数（**只统计，不钳位**）
+    out_of_audio_window: int  # 事件时刻超出音频时长的事件数
+    errors: list[str]  # schema 级硬错误 → 隔离
     warnings: list[str]
+
 
 def quality_check(chart: PhigrosChart, audio_duration_s: float | None) -> QcReport: ...
 ```
@@ -173,12 +186,16 @@ def quality_check(chart: PhigrosChart, audio_duration_s: float | None) -> QcRepo
 ### 3.6 特征提取与配对（`beatmorph/data/pipeline/embed.py`）
 
 ```python
-def extract_features(audio_path: Path, out_dir: Path, encoder: "MertAudioEncoder") -> FeatureCacheMeta:
+def extract_features(
+    audio_path: Path, out_dir: Path, encoder: "MertAudioEncoder"
+) -> FeatureCacheMeta:
     """重采样到 MERT_SAMPLE_RATE_HZ → plan 01 encode → 写 `.npz` + `.meta.json`；
     元数据含 {rate, sample_rate, layer, model_rev, duration_s, original_sample_rate, feat_dim, dtype, adapter}。"""
 
+
 def build_pairs(meta_table: Path, chart_dir: Path, feature_dir: Path) -> "datasets.Dataset":
     """按曲目归组后切分 train/val/test（同曲多谱同 split）；输出 (audio_emb, chart IR) 对。"""
+
 
 def dataset_stats(table: Path) -> DatasetStats:
     """唯一曲目数、同曲重复率、格式分布、线数分布、type/above 分布、越界率、共格碰撞率。"""
@@ -217,18 +234,18 @@ def dataset_stats(table: Path) -> DatasetStats:
 
 ## 6. 里程碑与验收标准
 
-| 里程碑 | 验收（可量化、可测试） |
-|--------|----------------------|
-| **M1 元数据枚举** | 322 页分页全部成功；累计条数 == `count` == 9649（与实测一致，偏差必须解释）；落盘 parquet 含 `id/name/level/difficulty/charter/composer/tags/created/updated/file`；**负样本单测（mock，不发真实请求）**：把响应键改成 `result` 必须报错；`pageNum = CHART_PAGE_SIZE_MAX + 1` 必须以 HTTP 400 语义失败并给出可读错误 |
-| **M2 微缩夹具入库** | 三个夹具（§3.7）存在且体积达标（单文件 ≤ 32 KB）；`README.md` 记录来源 chart id / 裁剪方式 / 哈希；夹具**不含音频与曲绘** |
-| **M3 ⚠️ 陷阱 1：后缀不可信** | `sniff_format(` 对 `pec_masquerade.json`（内容为 PEC、后缀为 `.json`）返回 `PEC`；`parse_chart_package()` 对其**拒收并记账**（`format=PEC`），**绝不**进入 RPE 解析路径；反向用例：把 RPE 内容存成 `.pec` 后缀也必须嗅探为 `RPE`；`sniff_format` 的签名不含文件名参数（签名级约束） |
-| **M4 ⚠️ 陷阱 2：必须读 `info.yml.chart`** | 用 `pkg_min` 夹具（谱面文件**不叫** `chart.json`，且包内存在一个**更大的**干扰 json）断言：选中的是 `info.yml.chart` 指定的条目（R1/R2）；把 `info.yml.chart` 指向不存在条目 → 必须报错，**不得**回退到「取最大 json」或「取名为 chart.json 的文件」；引用实测基线：196/196 张的谱面文件都不叫 `chart.json` |
-| **M5 ⚠️ 陷阱 3：note type 两套数字** | `note_type_from_rpe(2) is HOLD` 且 `note_type_from_official(2) is DRAG`（同一数字语义相反）；分派**只能由 `sniff_format` 的结果驱动**；构造一个「RPE 内容 + .json 后缀 + 数字 2」的用例，断言解析结果 type == HOLD（而不是被官谱分派成 DRAG） |
-| **M6 结构语义** | ① 跨层求和：构造两层各给一半位移的夹具，断言最终位移 == 两层之和；② 补洞：事件间存在空隙时，空隙内取值 == 前一事件终值（而不是默认值）；③ 三态归一：`null` 层 / 缺字段 / 缺整段 `eventLayers` 三种输入产出同一 IR；④ `father` 递归：子线位置 == 自身 + 父线位置，成环输入被拒；⑤ beat→秒：`beat2sec(sec2beat(x)) == x` 与反向在 1e-9 容差内，多 BPM 段用例覆盖 |
-| **M7 质检** | 对夹具与**本地落盘（不入库）**的样本跑 `quality_check`：schema 违约样本 100% 进隔离区；越界样本 **`out_of_visible_range > 0` 且 `position_x` 值未被修改**（逐字段比对原 JSON）；分布统计命中调研 §7 的量级（线数中位 30 / 背面 2.4–3.0% / Tap 52–63%）区间内才算通过 |
-| **M8 ✅ 数据合规硬约束（已裁定，2026-08-05）** | **训练可启动**——原「`compliance_gate` 默认关闭 + 训练入口拒绝启动」的**阻塞闸门已解除**，改为执行四条硬约束：① **最终不发布模型权重**（项目级承诺，本模块不产出任何分发物）；② 谱面/音频**允许本地落盘、不得入库**（`.gitignore` 覆盖 `data/**`，仅 `tests/fixtures/**` 入库）；③ 获取与处理脚本**记录来源与用途**（`provenance` 随 manifest 落盘，可追溯到 chart id）；④ **发布权重前必须重新裁定**。验收：① 负样本测试——`data/` 下任何音频/谱面文件试图入库时被 `.gitignore` 拦截（CI 可验）；② 每份 manifest 的 `provenance` 字段非空且通过 schema 校验，缺失即报错；③ 源码级断言：不存在任何「权重发布/分发」代码路径。依据 [BasePlan §4.4](BasePlan.md)、[RFC-0029 §7-7/§8.3 Q11b](decisions/RFC-0029-phigros-continuous-chart-generation.md)、CLAUDE.md 红线 5 附注 |
-| **M9 特征离线提取** | 在**本地落盘（不入库，硬约束 ②）**的音频子集上：缓存文件数 == 音频数；抽样加载校验六项全过（plan 01 §3.3）；`meta.rate == MERT_FRAME_RATE_HZ`（派生量，非字面量）；篡改任一元数据字段后加载必须抛错；唯一曲目数（按音频 sha1）与同曲重复率写入 `dataset_stats` |
-| **M10 配对与切分** | 同曲多谱进同一 split（用含同曲 2 张谱的样本断言）；产出 train/val/test 三份清单，**曲目集合两两不相交**；另产出一份「同曲跨谱泛化」评测集（同曲不同难度）；报告真实 (audio, chart) 对数（< 9649） |
+| 里程碑 | 验收（可量化、可测试） | 实施状态 |
+|--------|----------------------|---------|
+| **M1 元数据枚举** | 322 页分页全部成功；累计条数 == `count` == 9649（与实测一致，偏差必须解释）；落盘 parquet 含 `id/name/level/difficulty/charter/composer/tags/created/updated/file`；**负样本单测（mock，不发真实请求）**：把响应键改成 `result` 必须报错；`pageNum = CHART_PAGE_SIZE_MAX + 1` 必须以 HTTP 400 语义失败并给出可读错误 | ✅ 代码 + mock 单测（`test_phira_client.py`，不发真实请求）；322 页全库实跑属 e2e，未执行 |
+| **M2 微缩夹具入库** | 三个夹具（§3.7）存在且体积达标（单文件 ≤ 32 KB）；`README.md` 记录来源 chart id / 裁剪方式 / 哈希；夹具**不含音频与曲绘** | ✅ 三夹具齐备（`rpe_min.json` / `pec_masquerade.json` / `pkg_min`），单文件 ≤ 11.5 KB、目录 24.6 KB；夹具**手工构造**、`pkg_min` 由文本部件确定性打包（不提交二进制） |
+| **M3 ⚠️ 陷阱 1：后缀不可信** | `sniff_format(` 对 `pec_masquerade.json`（内容为 PEC、后缀为 `.json`）返回 `PEC`；`parse_chart_package()` 对其**拒收并记账**（`format=PEC`），**绝不**进入 RPE 解析路径；反向用例：把 RPE 内容存成 `.pec` 后缀也必须嗅探为 `RPE`；`sniff_format` 的签名不含文件名参数（签名级约束） | ✅ `test_sniff_format.py`（四种后缀×内容组合 + `inspect` 签名断言）；PBC 不产出判定（结构未查证） |
+| **M4 ⚠️ 陷阱 2：必须读 `info.yml.chart`** | 用 `pkg_min` 夹具（谱面文件**不叫** `chart.json`，且包内存在一个**更大的**干扰 json）断言：选中的是 `info.yml.chart` 指定的条目（R1/R2）；把 `info.yml.chart` 指向不存在条目 → 必须报错，**不得**回退到「取最大 json」或「取名为 chart.json 的文件」；引用实测基线：196/196 张的谱面文件都不叫 `chart.json` | ✅ `test_package_locate.py`（含 decoy `chart.json` 与更大的干扰 json；指向不存在条目必报错） |
+| **M5 ⚠️ 陷阱 3：note type 两套数字** | `note_type_from_rpe(2) is HOLD` 且 `note_type_from_official(2) is DRAG`（同一数字语义相反）；分派**只能由 `sniff_format` 的结果驱动**；构造一个「RPE 内容 + .json 后缀 + 数字 2」的用例，断言解析结果 type == HOLD（而不是被官谱分派成 DRAG） | ✅ `test_note_mapping.py`（含 `above ∈ {0,1,2}` / `isFake` / `isCover`） |
+| **M6 结构语义** | ① 跨层求和：构造两层各给一半位移的夹具，断言最终位移 == 两层之和；② 补洞：事件间存在空隙时，空隙内取值 == 前一事件终值（而不是默认值）；③ 三态归一：`null` 层 / 缺字段 / 缺整段 `eventLayers` 三种输入产出同一 IR；④ `father` 递归：子线位置 == 自身 + 父线位置，成环输入被拒；⑤ beat→秒：`beat2sec(sec2beat(x)) == x` 与反向在 1e-9 容差内，多 BPM 段用例覆盖 | ✅ `test_event_layers.py` + `test_beat_time.py`（往返 1e-9，独立复算比对） |
+| **M7 质检** | 对夹具与**本地落盘（不入库）**的样本跑 `quality_check`：schema 违约样本 100% 进隔离区；越界样本 **`out_of_visible_range > 0` 且 `position_x` 值未被修改**（逐字段比对原 JSON）；分布统计命中调研 §7 的量级（线数中位 30 / 背面 2.4–3.0% / Tap 52–63%）区间内才算通过 | ✅ `test_qc.py`（越界只统计不钳位、逐字段比对原 JSON）；语料级基线区间断言落在 `dataset_stats().corpus_outliers()`，用合成数据单测 |
+| **M8 ✅ 数据合规硬约束（已裁定，2026-08-05）** | **训练可启动**——原「`compliance_gate` 默认关闭 + 训练入口拒绝启动」的**阻塞闸门已解除**，改为执行四条硬约束：① **最终不发布模型权重**（项目级承诺，本模块不产出任何分发物）；② 谱面/音频**允许本地落盘、不得入库**（`.gitignore` 覆盖 `data/**`，仅 `tests/fixtures/**` 入库）；③ 获取与处理脚本**记录来源与用途**（`provenance` 随 manifest 落盘，可追溯到 chart id）；④ **发布权重前必须重新裁定**。验收：① 负样本测试——`data/` 下任何音频/谱面文件试图入库时被 `.gitignore` 拦截（CI 可验）；② 每份 manifest 的 `provenance` 字段非空且通过 schema 校验，缺失即报错；③ 源码级断言：不存在任何「权重发布/分发」代码路径。依据 [BasePlan §4.4](BasePlan.md)、[RFC-0029 §7-7/§8.3 Q11b](decisions/RFC-0029-phigros-continuous-chart-generation.md)、CLAUDE.md 红线 5 附注 | ✅ ①②③ 均有默认 CI 测试（`test_provenance.py`）；`data/**` 已被 `.gitignore` 覆盖（含 features / manifests / audio），`assert_local_only` 守卫对域外路径仍会拦下 |
+| **M9 特征离线提取** | 在**本地落盘（不入库，硬约束 ②）**的音频子集上：缓存文件数 == 音频数；抽样加载校验六项全过（plan 01 §3.3）；`meta.rate == MERT_FRAME_RATE_HZ`（派生量，非字面量）；篡改任一元数据字段后加载必须抛错；唯一曲目数（按音频 sha1）与同曲重复率写入 `dataset_stats` | ✅ `test_embed_features.py`（假编码器，六项校验各有负样本）；真实权重通路属 slow/e2e，未执行 |
+| **M10 配对与切分** | 同曲多谱进同一 split（用含同曲 2 张谱的样本断言）；产出 train/val/test 三份清单，**曲目集合两两不相交**；另产出一份「同曲跨谱泛化」评测集（同曲不同难度）；报告真实 (audio, chart) 对数（< 9649） | ✅ `test_pairs_split.py` + `tests/integration/test_pipeline_min.py`（同曲同 split、曲目集合两两不相交、同曲跨谱泛化集） |
 
 > **G1–G4 门禁义务说明**：本模块**不引入训练目标或损失**，故无 G1–G4 全绿义务；它是 **G4 的数据侧落点**——帧率、单位、形状三项派生断言在 M7/M9 内以**默认 CI 契约测试**形式落地。任何消费本模块数据的新训练目标（`field/` / `generation/` 的 plan）在扩大数据规模之前必须先跑通 G1–G4（`beatmorph/infra/sanity.py`，[BasePlan §9](BasePlan.md)）。
 
@@ -273,3 +290,9 @@ def dataset_stats(table: Path) -> DatasetStats:
 9. **`META.offset` 的符号与作用点**（Q11 / 存疑 D10）：RPE 为毫秒、官谱为秒，且 RPE 文档表述语义缠绕；prpr 在本轮读到的源文件中未使用它。本 plan 暂**只记录不使用**，是否参与音频对齐须与 eval 的 plan 联合裁定。
 10. **RPEJSON 读 / 写的归属边界**：`docs/plans/README.md` 把 `beatmorph/io/formats/rpejson/` 的**读**归本 plan、**写**归 plan 05。两侧必须共用同一 IR 与同一份 schema 校验，且 `parse → write → parse` 的**往返等价测试**应由两份 plan 共同维护；具体测试落点待与 plan 05 联合确认。
 11. **格式层 beat↔秒 与场网格秒↔τ 的接缝（须裁定）**：`beat_to_seconds` / `seconds_to_beat`（本模块，格式层，契约层 `PhigrosNote.t` 用秒这一点不变）与 `field/` 的 τ 换算在数学上**同源**（τ 即拍）。CLAUDE.md 红线 7 要求「beat-aligned 的时间换算只在 `field/` 内实现」→ 二者是否必须共用同一实现、依赖方向如何，**未裁定**（plan 03 §9-13）。裁定前只保留本模块这一处格式层换算，**不得**出现第三处。
+   > **临时裁定（2026-09-27，实施期）**：接缝**实测确有分歧**，但只在一个畸形情形下：BPMList 首段起点 > 0 拍时，
+   > 本模块以首段为时间原点（与 Phira 官方参考实现 `beat2sec` 一致），而 `field/` 把 τ=0 当作谱面原点并在前面外推一段，
+   > 两条路径相差一个常量偏移（实测首段在第 4 拍时相差 2 秒）。RPE 规范首段是 `[0,0,1]`，故该情形只可能来自畸形谱面。
+   > **处置**：不静默二选一，而是把「首段必须起于 0 拍」提升为 `qc.py` 的 **schema 违约 → 隔离区**；
+   > 首段起于 0 拍时两条路径在默认 CI 的 `tests/integration/test_time_conversion_seam.py` 中逐点一致（含多 BPM 段、段界、往返无损、改写 BPMList 必变）。
+   > 仍需 RFC 决定的是**统一实现**（依赖方向 `data → field`？或把分段积分上提到 `core/contracts`）——在裁定前不得出现第三处换算。

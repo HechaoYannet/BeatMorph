@@ -1,7 +1,11 @@
 # Plan 00 — 核心契约：判定线 / 音符 / 谱面 / 强度场张量
 
-> 状态：🟡 草案 ｜ 阶段：Phase 1 ｜ 负责：契约组（contracts-agent）
+> 状态：🔵 实施中（**M1–M8 全部落地**：`tests/unit/core/` 62 项默认 CI 全绿，`ruff` 零告警，`mypy beatmorph/core` strict 零错误）｜ 阶段：Phase 1 ｜ 负责：契约组（contracts-agent）
 > 对应代码：`beatmorph/core/contracts/`（新增 `phigros.py`、`field.py`；音频常量沿用 `tensors.py`） ｜ 对应奠基章节：§2、§3.2、§3.4、§9
+>
+> **实施记录（2026-09-27，契约组）**：v2.x 契约（`events.py` 的 `Note/Chart/Section/EventToken` 与 `core/eval.py`）已删除；
+> 主路径唯一定义处为 `phigros.py` + `field.py`，音频常量留在 `tensors.py`。契约测试 `tests/unit/core/`（62 项）默认 CI 全绿、`ruff` 零告警。
+> 落地时出现三处需要裁定的细节，已按「服从红线 7 / 服从格式事实」处理并记入 §9-11…§9-13。
 
 ## 1. 目标与范围
 
@@ -30,7 +34,7 @@
 ## 2. 与奠基文档的对应
 
 | 契约项 | 奠基依据 | 偏离 | 理由 |
-|--------|---------|------|------|
+|--------|------------------------------|------|
 | `JudgeLine`：4 层普通轨 + `extended` 第 5 层 | [BasePlan §3.2.2](BasePlan.md) 事件空间、[RFC-0029 §8.1](decisions/RFC-0029-phigros-continuous-chart-generation.md) 裁定 | 见偏离 1 | 实测 `eventLayers` 长度 1–5 且 `extended` 独立存在，契约须兼容两种读法 |
 | `PhigrosNote` 八个标记字段 | [BasePlan §3.2.2](BasePlan.md) / [RFC-0029 §2.3](decisions/RFC-0029-phigros-continuous-chart-generation.md) | — | 直接采用 |
 | `side` = ±1 枚举，不得当布尔 | [RFC-0029 §8.1](decisions/RFC-0029-phigros-continuous-chart-generation.md) Q3、[phigros-format.md §5.3](knowledges/phigros-format.md) | 见偏离 3 | 语义是「`above == 1` → 正面，**其余值** → 背面」，实测取值 `{0,1,2}` |
@@ -58,31 +62,42 @@
 ```python
 # ── RPE 舞台几何 ──（外部权威源常量，A 级：prpr parse/rpe.rs:22-23 RPE_WIDTH / RPE_HEIGHT）
 # 这两个数只允许在本文件出现一次；其余一切（675 / Δx / 场边界）必须由它们派生。
-RPE_STAGE_WIDTH: float = 1350.0                       # prpr RPE_WIDTH，全域 = 舞台宽
-RPE_STAGE_HEIGHT: float = 900.0                       # prpr RPE_HEIGHT
-RPE_STAGE_HALF_WIDTH: float = RPE_STAGE_WIDTH / 2.0   # 可见范围 = [-此值, +此值]（可见边界，非合法值域）
+RPE_STAGE_WIDTH: float = 1350.0  # prpr RPE_WIDTH，全域 = 舞台宽
+RPE_STAGE_HEIGHT: float = 900.0  # prpr RPE_HEIGHT
+RPE_STAGE_HALF_WIDTH: float = (
+    RPE_STAGE_WIDTH / 2.0
+)  # 可见范围 = [-此值, +此值]（可见边界，非合法值域）
 RPE_STAGE_HALF_HEIGHT: float = RPE_STAGE_HEIGHT / 2.0
 
 # ── x 网格（RFC-0029 §3.1 裁定 Δx = RPE_STAGE_WIDTH / N，默认 N = 128；须补 N 消融）──
 RPE_X_GRID_BINS: int = 128
-RPE_X_GRID_DX: float = RPE_STAGE_WIDTH / RPE_X_GRID_BINS        # 禁止在别处写 10.546875
+RPE_X_GRID_DX: float = RPE_STAGE_WIDTH / RPE_X_GRID_BINS  # 禁止在别处写 10.546875
 RPE_X_GRID_MIN: float = -RPE_STAGE_HALF_WIDTH
 RPE_X_GRID_MAX: float = +RPE_STAGE_HALF_WIDTH
-RPE_X_GRID_BIN_SWEEP: tuple[int, ...] = (64, 128, 256, 512)     # 必做消融（红线 7）
+RPE_X_GRID_BIN_SWEEP: tuple[int, ...] = (64, 128, 256, 512)  # 必做消融（红线 7）
 
 # ── 速度单位 ──（A 级：prpr core.rs SPEED_RATIO = 10/45/HEIGHT_RATIO；出处存疑 D3）
-RPE_HEIGHT_RATIO: float = 0.83175                               # prpr HEIGHT_RATIO（D3 未查证）
-RPE_SPEED_RATIO: float = 10.0 / 45.0 / RPE_HEIGHT_RATIO         # 世界系 y 单位 / 秒 / 速度单位
-RPE_SPEED_UNIT_RPE_Y_PER_SEC: float = RPE_STAGE_HALF_HEIGHT * RPE_SPEED_RATIO   # 禁写 120.23
+RPE_HEIGHT_RATIO: float = 0.83175  # prpr HEIGHT_RATIO（D3 未查证）
+RPE_SPEED_RATIO: float = 10.0 / 45.0 / RPE_HEIGHT_RATIO  # 世界系 y 单位 / 秒 / 速度单位
+RPE_SPEED_UNIT_RPE_Y_PER_SEC: float = RPE_STAGE_HALF_HEIGHT * RPE_SPEED_RATIO  # 禁写 120.23
 
 # ── 事件层 ──
-RPE_MAX_EVENT_LAYERS: int = 5          # 实测长度 1..5
-RPE_NORMAL_EVENT_LAYERS: int = 4       # RFC-0029 §8.1 文档口径（非归一化依据，见偏离 1）
+RPE_MAX_EVENT_LAYERS: int = 5  # 实测长度 1..5
+RPE_NORMAL_EVENT_LAYERS: int = 4  # RFC-0029 §8.1 文档口径（非归一化依据，见偏离 1）
 RPE_NORMAL_TRACKS: tuple[str, ...] = (
-    "moveXEvents", "moveYEvents", "rotateEvents", "alphaEvents", "speedEvents",
+    "moveXEvents",
+    "moveYEvents",
+    "rotateEvents",
+    "alphaEvents",
+    "speedEvents",
 )
 RPE_EXTENDED_TRACKS: tuple[str, ...] = (
-    "scaleXEvents", "scaleYEvents", "colorEvents", "textEvents", "gifEvents", "inclineEvents",
+    "scaleXEvents",
+    "scaleYEvents",
+    "colorEvents",
+    "textEvents",
+    "gifEvents",
+    "inclineEvents",
 )
 
 # ── 时间 ──
@@ -107,11 +122,14 @@ class Side(IntEnum):
     BACK  = -1：**其余任何值**（实测 0 与 2 都出现）
     两侧几何上是关于判定线局部 X 轴的 Y 镜像。
     """
+
     FRONT = +1
     BACK = -1
 
+
 class NoteType(IntEnum):
     """RPEJSON note type（A 级源码确证：prpr parse/rpe.rs 1/2/3/4 = Click/Hold/Flick/Drag）。"""
+
     TAP = 1
     HOLD = 2
     FLICK = 3
@@ -125,11 +143,13 @@ def side_from_above(above: int) -> Side:
     """above == 1 → FRONT，其余值 → BACK。不得写成 bool(above) 或 above != 0。"""
     return Side.FRONT if above == 1 else Side.BACK
 
+
 def side_index(side: Side) -> int:
     """场通道索引：FRONT → 0，BACK → 1（索引与枚举值**不同**，必须用本函数）。"""
     return 0 if side is Side.FRONT else 1
 
-def note_type_from_rpe(raw: int) -> NoteType: ...       # 主路径：1/2/3/4 = Tap/Hold/Flick/Drag
+
+def note_type_from_rpe(raw: int) -> NoteType: ...  # 主路径：1/2/3/4 = Tap/Hold/Flick/Drag
 def note_type_from_official(raw: int) -> NoteType: ...  # 官谱 JSON（C 级）：2/3/4 = Drag/Hold/Flick
 ```
 
@@ -140,37 +160,46 @@ def note_type_from_official(raw: int) -> NoteType: ...  # 官谱 JSON（C 级）
 ```python
 class Beat(BaseModel):
     """RPE beat 三元组：beats = i + n / d（A 级 prpr Triple(i32,u32,u32)）。"""
-    i: int; n: int = 0; d: int = 1
+
+    i: int
+    n: int = 0
+    d: int = 1
+
     def to_beats(self) -> float: ...
+
 
 class EventKeyframe(BaseModel):
     start_time: Beat
     end_time: Beat
-    start: float | str | tuple[int, int, int]     # 数值 / 文本(textEvents) / RGB(colorEvents)
-    end:   float | str | tuple[int, int, int]
-    easing_type: int = 1                          # 1..29（非 int → 1；越界 → 末端值）
+    start: float | str | tuple[int, int, int]  # 数值 / 文本(textEvents) / RGB(colorEvents)
+    end: float | str | tuple[int, int, int]
+    easing_type: int = 1  # 1..29（非 int → 1；越界 → 末端值）
     bezier: bool = False
     bezier_points: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
-    easing_left: float = 0.0                      # ∈ [0,1]
-    easing_right: float = 1.0                     # ∈ [0,1]
+    easing_left: float = 0.0  # ∈ [0,1]
+    easing_right: float = 1.0  # ∈ [0,1]
     link_group: int = 0
+
 
 class EventLayer(BaseModel):
     """一个普通事件层级：5 条轨。缺失字段 / null 层 / 缺 eventLayers 三者归一为空列表。"""
+
     layer_index: int
-    move_x: list[EventKeyframe] = []      # 已按 startTime 排序并**补洞**（见 §4）
+    move_x: list[EventKeyframe] = []  # 已按 startTime 排序并**补洞**（见 §4）
     move_y: list[EventKeyframe] = []
     rotate: list[EventKeyframe] = []
-    alpha:  list[EventKeyframe] = []
-    speed:  list[EventKeyframe] = []      # 仅 startTime/endTime/start/end/linkgroup 五字段
+    alpha: list[EventKeyframe] = []
+    speed: list[EventKeyframe] = []  # 仅 startTime/endTime/start/end/linkgroup 五字段
+
 
 class ExtendedLayer(BaseModel):
     """第 5 层（`extended` 字段），独立于 `event_layers`。"""
+
     scale_x: list[EventKeyframe] = []
     scale_y: list[EventKeyframe] = []
-    color:   list[EventKeyframe] = []
-    text:    list[EventKeyframe] = []
-    gif:     list[EventKeyframe] = []
+    color: list[EventKeyframe] = []
+    text: list[EventKeyframe] = []
+    gif: list[EventKeyframe] = []
     incline: list[EventKeyframe] = []
 ```
 
@@ -178,30 +207,34 @@ class ExtendedLayer(BaseModel):
 
 ```python
 class JudgeLine(BaseModel):
-    line_id: int                                  # = judgeLineList 索引；**不是对称标签**（不可互换）
+    line_id: int  # = judgeLineList 索引；**不是对称标签**（不可互换）
     group: int = 0
     name: str = "Untitled"
     texture: str = "line.png"
-    anchor: tuple[float, float] = (0.5, 0.5)      # 只影响贴图绘制，不改变判定线位置
-    event_layers: list[EventLayer]                # 1 <= len <= RPE_MAX_EVENT_LAYERS（原样保留，见偏离 1）
+    anchor: tuple[float, float] = (0.5, 0.5)  # 只影响贴图绘制，不改变判定线位置
+    event_layers: list[EventLayer]  # 1 <= len <= RPE_MAX_EVENT_LAYERS（原样保留，见偏离 1）
     extended: ExtendedLayer = ExtendedLayer()
-    father: int = -1                              # -1 = 无父线；实测 26% 的谱面含嵌套线
+    father: int = -1  # -1 = 无父线；实测 26% 的谱面含嵌套线
     rotate_with_father: bool = True
-    is_cover: int = 1                             # **1 = 遮罩，其余 = 不遮罩**（同 above 类陷阱，禁 bool()）
+    is_cover: int = 1  # **1 = 遮罩，其余 = 不遮罩**（同 above 类陷阱，禁 bool()）
     z_order: int = 0
     attach_ui: str | None = None
-    bpm_factor: float = 1.0                       # 存储但**不参与换算**：prpr 标为 TODO（存疑 D4）
-    num_of_notes_raw: int = 0                     # 冗余字段，仅供解析期交叉校验，不参与语义
+    bpm_factor: float = 1.0  # 存储但**不参与换算**：prpr 标为 TODO（存疑 D4）
+    num_of_notes_raw: int = 0  # 冗余字段，仅供解析期交叉校验，不参与语义
 
     def pose_at(self, t_s: float, chart: "PhigrosChart") -> "LinePose": ...
     def local_to_stage(self, t_s: float, chart: "PhigrosChart") -> "Transform": ...
 
+
 class LinePose(BaseModel):
     """判定线在 t（秒）时刻的舞台系位姿（**跨层求和**后的结果）。"""
-    x: float; y: float                            # RPE 舞台系坐标
-    rotate_deg: float                             # 度（正方向见存疑 D1）
-    alpha: float                                  # Σ_layers(alphaEvents) 归一化后的不透明度
-    scale_x: float = 1.0; scale_y: float = 1.0
+
+    x: float
+    y: float  # RPE 舞台系坐标
+    rotate_deg: float  # 度（正方向见存疑 D1）
+    alpha: float  # Σ_layers(alphaEvents) 归一化后的不透明度
+    scale_x: float = 1.0
+    scale_y: float = 1.0
 ```
 
 **求值语义（契约级，所有模块必须一致）**：
@@ -216,21 +249,23 @@ class LinePose(BaseModel):
 
 ```python
 class PhigrosNote(BaseModel):
-    line_id: int                 # 所属判定线索引
-    t: float                     # **秒**（判定时刻 = startTime beat → 秒）；禁止存 beat 或帧索引
-    position_x: float            # RPE 舞台系 x 坐标单位；可见范围 [-RPE_STAGE_HALF_WIDTH, +RPE_STAGE_HALF_WIDTH]
-    side: Side                   # FRONT / BACK（由 above 唯一映射，见 §3.2）
-    type: NoteType               # tap / drag / hold / flick
-    hold_time: float = 0.0       # 秒；仅 HOLD 有意义（= endTime - startTime），其余恒为 0
-    speed: float = 1.0           # 音符流速倍率（实际速度 = 判定线速度 × 本值）
-    is_fake: bool = False        # isFake == 1 → 假音符（1 为假、其余为真 → 只认 == 1）
+    line_id: int  # 所属判定线索引
+    t: float  # **秒**（判定时刻 = startTime beat → 秒）；禁止存 beat 或帧索引
+    position_x: (
+        float  # RPE 舞台系 x 坐标单位；可见范围 [-RPE_STAGE_HALF_WIDTH, +RPE_STAGE_HALF_WIDTH]
+    )
+    side: Side  # FRONT / BACK（由 above 唯一映射，见 §3.2）
+    type: NoteType  # tap / drag / hold / flick
+    hold_time: float = 0.0  # 秒；仅 HOLD 有意义（= endTime - startTime），其余恒为 0
+    speed: float = 1.0  # 音符流速倍率（实际速度 = 判定线速度 × 本值）
+    is_fake: bool = False  # isFake == 1 → 假音符（1 为假、其余为真 → 只认 == 1）
     # ── 以下为**无损往返**所需的原始字段（不参与建模，导出时必须原样写回）──
-    above_raw: int = 1           # 实测 ∈ {0,1,2}；0 与 2 都必须保留原值
+    above_raw: int = 1  # 实测 ∈ {0,1,2}；0 与 2 都必须保留原值
     type_raw: int = 1
     is_fake_raw: int = 0
-    y_offset: float = 0.0        # RPE-y 单位，实际偏移 = y_offset × speed（A 级源码）
-    visible_time: float = 999999.0   # 秒（默认值三方一致裁定，见知识文档 §6.4）
-    alpha: int = 255             # 0..255
+    y_offset: float = 0.0  # RPE-y 单位，实际偏移 = y_offset × speed（A 级源码）
+    visible_time: float = 999999.0  # 秒（默认值三方一致裁定，见知识文档 §6.4）
+    alpha: int = 255  # 0..255
     size: float = 1.0
 ```
 
@@ -241,17 +276,17 @@ class PhigrosNote(BaseModel):
 
 ```python
 class PhigrosChart(BaseModel):
-    version: str = "phigros-ir-1"                 # IR schema 版本，破坏性变更升号
-    mode: GameMode = GameMode.PHIGROS             # RFC-0029 §4.3：GameMode 增 PHIGROS
-    lines: list[JudgeLine]                        # K >= 1（v1 不限制 K）
-    notes: list[PhigrosNote]                      # N >= 0
-    bpm_points: list[BpmPoint]                    # >= 1 个，按 time_beats 升序
-    meta: ChartMeta                               # META.*（offset 毫秒 / RPEVersion / chartTime 秒）
-    source: ChartSource                           # chart_id / 包哈希 / 格式 / 内容嗅探依据
+    version: str = "phigros-ir-1"  # IR schema 版本，破坏性变更升号
+    mode: GameMode = GameMode.PHIGROS  # RFC-0029 §4.3：GameMode 增 PHIGROS
+    lines: list[JudgeLine]  # K >= 1（v1 不限制 K）
+    notes: list[PhigrosNote]  # N >= 0
+    bpm_points: list[BpmPoint]  # >= 1 个，按 time_beats 升序
+    meta: ChartMeta  # META.*（offset 毫秒 / RPEVersion / chartTime 秒）
+    source: ChartSource  # chart_id / 包哈希 / 格式 / 内容嗅探依据
 
-    def duration_s(self) -> float: ...                      # 以**音频时长**为准（见下）
-    def sorted_notes(self) -> list[PhigrosNote]: ...        # (t, line_id, position_x) 确定性排序
-    def notes_per_line(self) -> list[int]: ...              # 长度 K 的每线 note 数
+    def duration_s(self) -> float: ...  # 以**音频时长**为准（见下）
+    def sorted_notes(self) -> list[PhigrosNote]: ...  # (t, line_id, position_x) 确定性排序
+    def notes_per_line(self) -> list[int]: ...  # 长度 K 的每线 note 数
     def out_of_visible_range(self) -> OutOfRangeStats: ...  # 只统计，无钳位
 ```
 
@@ -269,16 +304,17 @@ class PhigrosChart(BaseModel):
 @dataclass(frozen=True)
 class ChartFieldSpec:
     """强度场网格规格（**唯一**的网格元数据来源，缺一不可断言）。"""
-    k: int                 # 判定线条数（运行期可变，**不得**写进任何输出层维度）
-    t_bins: int                      # T = τ 轴格数（由 BPMList + 时长派生，见上「时间轴口径」）
-    d_tau: float = TAU_GRID_DT       # = 1 / SUBDIVISIONS_PER_BEAT（派生，禁止写 1/48）
-    bpm_points: tuple[BpmPoint, ...] = ()   # τ ↔ 秒 换算的**唯一依据**；换算函数本身由 field/ 实现
-    x_bins: int = RPE_X_GRID_BINS              # X = 128（默认；消融见 RPE_X_GRID_BIN_SWEEP）
-    dx: float = RPE_X_GRID_DX                  # = RPE_STAGE_WIDTH / x_bins
-    x_min: float = RPE_X_GRID_MIN              # = -RPE_STAGE_HALF_WIDTH
-    x_max: float = RPE_X_GRID_MAX              # = +RPE_STAGE_HALF_WIDTH
-    sides: int = len(Side)                     # S = 2（FRONT → 0 / BACK → 1）
-    channels: int = len(NoteType) + 1          # C = 5：tap / drag / hold / flick / hold-end
+
+    k: int  # 判定线条数（运行期可变，**不得**写进任何输出层维度）
+    t_bins: int  # T = τ 轴格数（由 BPMList + 时长派生，见上「时间轴口径」）
+    d_tau: float = TAU_GRID_DT  # = 1 / SUBDIVISIONS_PER_BEAT（派生，禁止写 1/48）
+    bpm_points: tuple[BpmPoint, ...] = ()  # τ ↔ 秒 换算的**唯一依据**；换算函数本身由 field/ 实现
+    x_bins: int = RPE_X_GRID_BINS  # X = 128（默认；消融见 RPE_X_GRID_BIN_SWEEP）
+    dx: float = RPE_X_GRID_DX  # = RPE_STAGE_WIDTH / x_bins
+    x_min: float = RPE_X_GRID_MIN  # = -RPE_STAGE_HALF_WIDTH
+    x_max: float = RPE_X_GRID_MAX  # = +RPE_STAGE_HALF_WIDTH
+    sides: int = len(Side)  # S = 2（FRONT → 0 / BACK → 1）
+    channels: int = len(NoteType) + 1  # C = 5：tap / drag / hold / flick / hold-end
 
     def assert_grid(self) -> None:
         """dx * x_bins == RPE_STAGE_WIDTH；d_tau * SUBDIVISIONS_PER_BEAT == 1；bpm_points 非空且按 time 升序。失败即抛，不得降级为日志。"""
@@ -351,16 +387,17 @@ def x_bin_index(x: float, spec: ChartFieldSpec) -> int | None:
 
 ## 6. 里程碑与验收标准
 
-| 里程碑 | 验收（可量化、可在默认 CI 跑） |
-|--------|------------------------------|
-| **M1 契约冻结 v1** | `from beatmorph.core.contracts import PhigrosChart, JudgeLine, PhigrosNote, ChartField, ChartTargetField, ChartFieldSpec` 可导入；`tests/unit/core/test_phigros_contracts.py` 全绿 |
-| **M2 类型检查** | `uv run mypy beatmorph/core` strict 零错误 |
-| **M3 无损往返** | `model_validate_json(model_dump_json())` 等价；`above_raw ∈ {0,1,2}`、`type_raw`、`is_fake_raw` 往返不变（I10） |
-| **M4 单位派生断言（G4 落点）** | I1/I2 全部断言通过；**源码扫描测试**：`beatmorph/` 下除 `core/contracts/` 外不得出现 675 / 10.546875 / 120.23 / 帧率 75 作为**数值字面量**；该测试在**默认 CI**（`-m "not slow and not gpu"`）内运行 |
-| **M5 side 语义** | I4/I5 全绿：0/1/2 → BACK/FRONT/BACK；两侧均为真值；`side_index` 映射为 0/1 且与枚举值不同 |
-| **M6 type 双格式分派** | I6 全绿：同一数字 2 在 RPE / 官谱分派下分别为 HOLD / DRAG；分派函数签名**不接受**文件后缀/文件名参数（签名级约束） |
-| **M7 场契约** | 形状 `(B,K,T,X,S,C)` 断言；`channels == len(NoteType) + 1`；`x_bin_index(+x_max) == x_bins - 1`；域外返回 None 且 `out_of_window` 递增（**无钳位**）；G3 基线 `λ ≡ N/|Ω|` 有限、`λ ≡ 0` → NLL = +∞（断言） |
-| **M8 最小闭环（不依赖解析器）** | 用**手写的最小 IR 夹具**（Python dict，≤ 32 KB，不含音频/曲绘）构造 `PhigrosChart` → `ChartFieldSpec` + `ChartTargetField`；`Σ counts == 窗口内事件数`；`Σ counts · dt · dx == 同一数` |
+| 里程碑 | 验收（可量化、可在默认 CI 跑） | 状态 |
+|--------|------------------------------|------|
+| **M1 契约冻结 v1** | `from beatmorph.core.contracts import PhigrosChart, JudgeLine, PhigrosNote, ChartField, ChartTargetField, ChartFieldSpec` 可导入；`tests/unit/core/test_phigros_contracts.py` 全绿 | ✅ |
+| **M2 类型检查** | `uv run mypy beatmorph/core` strict 零错误 | ✅ |
+| **M3 无损往返** | `model_validate_json(model_dump_json())` 等价；`above_raw ∈ {0,1,2}`、`type_raw`、`is_fake_raw` 往返不变（I10） | ✅ |
+| **M4 单位派生断言（G4 落点）** | I1/I2 全部断言通过；**源码扫描测试**：`beatmorph/` 下除 `core/contracts/` 外不得出现 675 / 10.546875 / 120.23 / 帧率 75 作为**数值字面量**；该测试在**默认 CI**（`-m "not slow and not gpu"`）内运行 | ✅ |
+| **M5 side 语义** | I4/I5 全绿：0/1/2 → BACK/FRONT/BACK；两侧均为真值；`side_index` 映射为 0/1 且与枚举值不同 | ✅ |
+| **M6 type 双格式分派** | I6 全绿：同一数字 2 在 RPE / 官谱分派下分别为 HOLD / DRAG；分派函数签名**不接受**文件后缀/文件名参数（签名级约束） | ✅ |
+| **M7 场契约** | 形状 `(B,K,T,X,S,C)` 断言；`channels == len(NoteType) + 1`；`x_bin_index(+x_max) == x_bins - 1`；域外返回 None 且 `out_of_window` 递增（**无钳位**）；G3 基线 `λ ≡ N/|Ω|` 有限、`λ ≡ 0` → NLL = +∞（断言） | ✅ |
+| ↑ M7 附注 | G3 基线（`λ ≡ N/\|Ω\|` 闭式、`λ ≡ 0` → NLL = +∞）的**数值实现**落在 plan 03 的 `beatmorph/field/loss.py`；本 plan 只固定测度与形状 | ✅（plan 03）|
+| **M8 最小闭环（不依赖解析器）** | 用**手写的最小 IR 夹具**（Python dict，≤ 32 KB，不含音频/曲绘）构造 `PhigrosChart` → `ChartFieldSpec` + `ChartTargetField`；`Σ counts == 窗口内事件数`；`Σ counts · dt · dx == 同一数` | ✅ |
 
 > **G1–G4 门禁义务说明**：本 plan **不引入训练目标或损失**，故无 G1–G4 全绿义务；但它是 **G4（契约断言）的落点**——帧率、`Δx`、形状、量纲四项派生断言在本 plan 的 M4/M7 内以**默认 CI 契约测试**形式落地（[RFC-0029 §7](decisions/RFC-0029-phigros-continuous-chart-generation.md) 硬约束 1/4/6，红线 7）。泊松 NLL 目标实现与掩码补全主干的 G1–G4 全绿义务由 `field/` 与 `generation/` 的 plan 承担，且**必须在扩大数据规模之前完成**（[BasePlan §9](BasePlan.md)）。
 
@@ -398,3 +435,18 @@ def x_bin_index(x: float, spec: ChartFieldSpec) -> int | None:
 8. **旋转正方向的屏幕含义（存疑 D1）**：影响 `local_to_stage` 的符号；目前只影响可视化与跨线几何检查，不影响 note 建模（事件轨是条件输入）。若后续做跨线几何合法性判定，须先裁定。
 9. **`RPE_X_GRID_BINS` 的最终取值**：默认 128 由 RFC 裁定，但「共格碰撞率」（同线 + 同刻 + 同侧的最小 |ΔpositionX|）尚无数据。契约提供 `RPE_X_GRID_BIN_SWEEP` 与 `assert_grid()`；**N 的最终值待 plan 02 的统计出来后再定**（红线 7：128 不能成为新魔数）。
 10. ~~**`|Ω|`（场体积）定义需与其它 plan 互认**~~ ✅ **已裁决（RFC-0029 §8.4 R-a，2026-08-05）**：统一为**全 K 条线、格元总数** `|Ω| = k * t_bins * x_bins * sides * channels`（无量纲，λ 单位 = 每格元事件数），**空线计入**。契约层定义以本 plan §3.7 为准，plan 03/06/07 **只引用同一符号、不得各自定义**；跨谱汇总报 per-chart NLL 与 NLL/N 两栏。改口径须同步本 plan 并走 RFC（红线 2）。
+
+11. **事件轨求值放在契约层，且形参用「拍」而不是秒**（实现裁定）：plan §3.4 既要求「求值语义契约级一致」，
+    又把 `pose_at(t_s, chart)` 写成秒；但秒 ↔ 拍换算按红线 7 / 本 plan §3.6 **只能在 `field/` 内实现**，
+    契约层调用它会造成 `contracts → field` 的反向依赖。**落地取「形参是拍」**：`EventKeyframe.value_at(t_beats)` /
+    `JudgeLine.pose_at(t_beats, chart)`，缓动 1–29 全表、补洞、跨层求和、父线递归都在契约层实现一次，
+    `data/` 与 `field/` 只调用不复制（缓解 R-7 的「第二份缓动表」漂移）。
+12. **`easingLeft/Right` 切割公式按三条工作实例重建**（实现裁定）：知识文档给出的公式在转录中丢失了归一化分母，
+    直接照抄会使事件终点取不到 `end` 值（Out Quad 在 r=0.5 时终点仅 0.5625）。实现取
+    `g(t) = (f(l + t·(r−l)) − f(l)) / (f(r) − f(l))`——它是唯一同时满足该文档给出的三条工作实例
+    （Linear 切割不起作用 / Out Quad 改左边界不起作用 / In Quad 改右边界不起作用）的形式，并有对应契约测试。
+
+13. **契约模型一律 `extra="forbid"`**（实现裁定）：RPE 的键名是 camelCase 而 IR 是 snake_case，
+    若沿用 pydantic 默认的 `ignore`，「解析器把 `startTime` 写成 `start_time` 之外的名字」会**静默丢掉整条事件轨**
+    而毫无提示——与 25 Hz 事件同属「不报错但全错」型故障（POSTMORTEM-2026-08-05）。
+    因此未知键一律 `ValidationError`，字段名映射错误必须立刻可见。

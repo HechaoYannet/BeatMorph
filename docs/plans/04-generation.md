@@ -1,6 +1,7 @@
 # Plan 04 — 生成主干：掩码补全 Encoder-Decoder
 
-> 状态：🟡 草案 ｜ 阶段：Phase 2 ｜ 负责：gen-agent（生成组）
+> 状态：🔵 实施中（M1–M4、M6 机制落地并自检通过，2026-09-27；**G1–G4 门禁实跑全绿**；
+> M5 的 F1 对照与 M7–M12 待 plan 05/06；两处范式级发现见 §9-17/§9-18）｜ 阶段：Phase 2 ｜ 负责：gen-agent（生成组）
 > 对应代码：`beatmorph/generation/` ｜ 对应奠基章节：§1.2 / §2 / §3.3 / §3.4 / §3.5
 
 ## 1. 目标与范围
@@ -222,18 +223,18 @@ L_train = -(1/(1-r)) · Σ_{n ∈ occluded} log λ(e_n) + Σ_k ∫ λ_k        �
 
 | # | 里程碑 | 验收（可量化） |
 |---|---|---|
-| M1 | 契约与形状冻结 | `FieldBatch`/`FieldOutput` 形状断言全绿；三个 mask 语义分离测试通过；**无权重、无 GPU**；`uv run mypy beatmorph/generation` strict 零错误 |
-| M2 | 可变 K 前向 | 同一组权重跑通 `K = 1 / 30 / 82`（中位与实测极值）与批量内混合 K（padding + `line_mask`）；`line_mask=False` 的线对输出与 loss 贡献恰为 0 |
-| M3 | **G1–G4 门禁全绿** | G1 单 batch 过拟合：1–4 样本上末步 loss ≤ `max(0.05, 0.1×首步)`；G2 打乱标签：shuffled ≥ real × 1.05；G3：模型 ≤ 0.9 × 常数基线；G4：`frames ≈ duration × frame_rate`（±2 帧）。四项结果文本入训练日志 |
-| M4 | 遮盖重标定契约 | 合成场上：未重标定损失（`r = 0.5`）优化得到的全场积分 `Σ_k ∫λ_k` ≈ `0.5 ×` 真值（±5%），重标定后回到 `真值 ±5%`；`r = 0` 时 `L_train == L_full`（相对误差 ≤ 1e-6） |
-| M5 | **按事件 vs 按帧遮盖**消融 | 同一模型/数据/步数下，事件遮盖臂在 held-out 的 F1@±20ms 更高，且「抄邻居」诊断指标（被遮盖事件邻域的事件命中率）更低；两维（粒度 × 比例 `r`）各报一组 |
-| M6 | 迭代并行解码跑通 + 步数消融 | `steps ≥ 2` 契约；给出 `{steps} × {F1@±20ms, F1@±50ms, 平均耗时}` 的质量–速度曲线；`steps = 1` 的失败被记录（对齐 MaskGIT 的「一次到位不可行」） |
-| M7 | **B4 AR 上界臂** | 同表征下的 AR 臂跑通并给出与 B2 的质量差（上界）与推理耗时比；若 B2 已接近 B4，则「并行足够」有据；若差距显著，则 B2 的迭代策略必须改进——两种结论都必须写进报告 |
-| M8 | **B1 热图 + focal 正式臂** | 采用 CornerNet 配置（α/β 作超参搜索，**不写未核实的具体值**）+ DDC 式 Hamming 平滑 + **每难度阈值**；报告「固定解码规则」与「每谱最优阈值」两栏，格式与 B2 **完全一致** |
-| M9 | **B3 GOCT 配置臂** | 3 层 d=256、time token 0–95 + action token、`hop = 1/48` beat、CE + label smoothing 0.02；报 `±30 ms` micro-F1 与公开数字并肩呈现；tokenization 的改写点（`positionX` 桶 + `line_id` + `side`）单独说明 |
-| M10 | **B5 absorbing 扩散臂 + 层级声明** | 跑通并**在报告中显式写明对照层级**（采样/调度层）；文档中同时给出「B2 与 B5 训练目标同构（NELBO ≡ 时间步加权掩码 CE）」的说明，避免把采样层差异读成目标层差异 |
-| M11 | 条件 / 表征消融矩阵 | 每格报 F1@±20ms 与 ±50ms **双栏**、按难度分档、按时间组（含 12/24 三连）分解：无音频/有音频、无事件轨/有、单线/多线、含 side/合并 side、beat-aligned（主路径）/固定帧网格（证据复现臂）；单线臂需额外报跨线合法率 |
-| M12 | **阶段出口：首版可玩 RPEJSON**（与 plan 05/06 联合） | 生成的谱面经合法性校验**空违规**（同刻按键上限、Hold 区间、越界、跨线几何冲突）；难度条件生效（可区分不同 `difficulty` 的密度/类型分布）；产出双容差 F1 报告与人评素材；**NLL 只作校准，不作质量分** |
+| M1 | ✅ 契约与形状冻结（21 项；无权重/无 GPU；`mypy beatmorph` strict 零错误） | `FieldBatch`/`FieldOutput` 形状断言全绿；三个 mask 语义分离测试通过；**无权重、无 GPU**；`uv run mypy beatmorph/generation` strict 零错误 |
+| M2 | ✅ 可变 K 前向（K=1/30/82 与混批；padding 线零贡献 + **零梯度**，含 NaN 梯度回归） | 同一组权重跑通 `K = 1 / 30 / 82`（中位与实测极值）与批量内混合 K（padding + `line_mask`）；`line_mask=False` 的线对输出与 loss 贡献恰为 0 |
+| M3 | ✅ **G1–G4 门禁全绿**（真实主干实跑：G1 3860.7→276.9；G2 605.2 vs 644.6（≥1.05×）；G3 606.1 ≤ 1096.8；G4 帧率两轴；标 slow） | G1 单 batch 过拟合：1–4 样本上末步 loss ≤ `max(0.05, 0.1×首步)`；G2 打乱标签：shuffled ≥ real × 1.05；G3：模型 ≤ 0.9 × 常数基线；G4：`frames ≈ duration × frame_rate`（±2 帧）。四项结果文本入训练日志 |
+| M4 | ✅ 遮盖重标定契约（r=0.25/0.5/0.75 三档定量；**发现文档 1/(1-r) 与推导 1/r 在 r≠0.5 时分歧**，见 §9-6） | 合成场上：未重标定损失（`r = 0.5`）优化得到的全场积分 `Σ_k ∫λ_k` ≈ `0.5 ×` 真值（±5%），重标定后回到 `真值 ±5%`；`r = 0` 时 `L_train == L_full`（相对误差 ≤ 1e-6） |
+| M5 | 🟡 覆盖粒度消融：机制 + 「抄邻居 / mask 泄漏」诊断已落地并进默认 CI；**F1@±20ms 对照待 plan 05/06** | 同一模型/数据/步数下，事件遮盖臂在 held-out 的 F1@±20ms 更高，且「抄邻居」诊断指标（被遮盖事件邻域的事件命中率）更低；两维（粒度 × 比例 `r`）各报一组 |
+| M6 | 🟡 迭代并行解码跑通（`steps >= 2` 契约、schedule 单调性、三种置信度、确定性）；**质量–速度曲线待 plan 05/06** | `steps ≥ 2` 契约；给出 `{steps} × {F1@±20ms, F1@±50ms, 平均耗时}` 的质量–速度曲线；`steps = 1` 的失败被记录（对齐 MaskGIT 的「一次到位不可行」） |
+| M7 | ⬜ **B4 AR 上界臂** | 同表征下的 AR 臂跑通并给出与 B2 的质量差（上界）与推理耗时比；若 B2 已接近 B4，则「并行足够」有据；若差距显著，则 B2 的迭代策略必须改进——两种结论都必须写进报告 |
+| M8 | ⬜ **B1 热图 + focal 正式臂**（目标函数 `penalty_reduced_focal_loss` / `gaussian_heatmap_target` / `hamming_smooth` 已实现并单测；模型臂与门禁待建） | 采用 CornerNet 配置（α/β 作超参搜索，**不写未核实的具体值**）+ DDC 式 Hamming 平滑 + **每难度阈值**；报告「固定解码规则」与「每谱最优阈值」两栏，格式与 B2 **完全一致** |
+| M9 | ⬜ **B3 GOCT 配置臂** | 3 层 d=256、time token 0–95 + action token、`hop = 1/48` beat、CE + label smoothing 0.02；报 `±30 ms` micro-F1 与公开数字并肩呈现；tokenization 的改写点（`positionX` 桶 + `line_id` + `side`）单独说明 |
+| M10 | ⬜ **B5 absorbing 扩散臂 + 层级声明**（等价目标 `timestep_weighted_masked_ce` 已实现并单测；离散 tokenizer 与采样器待建） | 跑通并**在报告中显式写明对照层级**（采样/调度层）；文档中同时给出「B2 与 B5 训练目标同构（NELBO ≡ 时间步加权掩码 CE）」的说明，避免把采样层差异读成目标层差异 |
+| M11 | ⬜ 条件 / 表征消融矩阵 | 每格报 F1@±20ms 与 ±50ms **双栏**、按难度分档、按时间组（含 12/24 三连）分解：无音频/有音频、无事件轨/有、单线/多线、含 side/合并 side、beat-aligned（主路径）/固定帧网格（证据复现臂）；单线臂需额外报跨线合法率 |
+| M12 | ⬜ **阶段出口：首版可玩 RPEJSON**（与 plan 05/06 联合） | 生成的谱面经合法性校验**空违规**（同刻按键上限、Hold 区间、越界、跨线几何冲突）；难度条件生效（可区分不同 `difficulty` 的密度/类型分布）；产出双容差 F1 报告与人评素材；**NLL 只作校准，不作质量分** |
 
 ---
 
@@ -260,14 +261,15 @@ L_train = -(1/(1-r)) · Σ_{n ∈ occluded} log λ(e_n) + Σ_k ∫ λ_k        �
 
 ## 8. 测试策略
 
-- **单元（默认 CI，无权重 / 无 GPU）**
-  - `tests/unit/generation/test_masks.py`：三个 mask 语义分离；遮盖通道改变输出；mask 通道可回传梯度。
-  - `tests/unit/generation/test_variable_k.py`：`K = 1/30/82`、批量内混合 K、`line_mask` 排除 padding 的零贡献断言。
-  - `tests/unit/generation/test_losses.py`：`r = 0` 等价性；`(1-r)` 欠计数反例（M4）；**排列敏感性**（交换两条线 → loss 改变）；无 line 分类项的源码级断言。
-  - `tests/unit/generation/test_masking.py`：按事件遮盖的粒度正确性（hold-end 配对不被拆散）；比例 `r` 的统计正确性。
-  - `tests/unit/generation/test_sampling.py`：`steps ≥ 2` 契约、schedule 单调性、终止条件；置信度三种定义的确定性。
+- **单元（默认 CI，无权重 / 无 GPU）**（**实际落地**；generation + integration 共 154 项全绿）
+  - `tests/unit/generation/test_contracts.py`：三个 mask 语义分离；形状断言（含「普通轨必须先跨层求和」的 5 vs 20）；遮盖通道改变输出且可回传梯度；层排布与超参校验。
+  - `tests/unit/generation/test_variable_k.py`：`K = 1/30/82`、批量内混合 K、`line_mask` 排除 padding 的**零贡献与零梯度**断言。
+  - `tests/unit/generation/test_losses.py`：`r = 0` 等价性；r = 0.25/0.5/0.75 三档的欠计数与重标定（M4）；**排列敏感性**；无 line 分类项的源码级断言；`apply_line_mask_batched` 的批次广播回归。
+  - `tests/unit/generation/test_masks.py`：按事件遮盖的粒度正确性（hold 配对不被拆散）；比例 `r` 的统计正确性；三种粒度；抄邻居 / **mask 泄漏**诊断。
+  - `tests/unit/generation/test_sampling.py`：`steps >= 2` 契约、schedule 单调性、终止条件、确定性（no_grad + stable 排序）；置信度三种定义。
+  - `tests/unit/generation/test_source_guards.py`：**R-04-7 源码级扫描**——本模块不得出现任何秒 <-> τ 换算（白名单只放 `FieldGrid` 与测度算子），并自带植入探针防止门禁空转。
 - **契约级**：全部形状/帧率/网格断言进默认 CI；mock 的 plan 01/03 输出**必须引用契约常量**（音频帧数由 `duration × frame_rate` 派生、τ 格数由总拍数 × `BEAT_SUBDIVISION` 派生），不得写死 75 / 1350 / 10.546875；**并断言本模块源码不含任何秒↔τ 换算实现**（无 `60 / bpm` 型分段积分、无独立 `d_tau` 常量）——换算只经 plan 03 的接口。
-- **集成**：`tests/integration/generation/test_train_step.py`——用 `data/fixtures/` 微型谱 + 合成 audio_emb 跑一个完整训练步与一次 `sample()`，全程无 GPU。
+- **集成**：`tests/integration/generation/test_train_step.py`——用**合成微型谱**（plan 03 的 `build_target`）+ 契约层 `JudgeLine.sum_track` 在 τ 轴上求值的事件轨，跑一个完整训练步与一次 `sample()`，全程无 GPU。
 - **e2e（`@pytest.mark.gpu` / `slow`）**：G1–G4 门禁、B 臂矩阵、端到端 RPEJSON 生成（M12）。
 - **门禁脚本化**：G1–G4 作为可重复运行的脚本（同一 seed 下结果可复现），其输出直接进训练日志——**门禁结果不是一次性的检查，而是每次扩大规模前的例行关卡**。
 
@@ -289,3 +291,26 @@ L_train = -(1/(1-r)) · Σ_{n ∈ occluded} log λ(e_n) + Σ_k ∫ λ_k        �
 12. **`extended` 通道子集与 `text` 事件**：默认取 scaleX / scaleY / color RGB / gif / incline（F_ext = 7），`textEvents` 需文本编码，v1 只记存在性；子集最终由消融决定。
 13. **损失的归一化口径**：`sum` vs `per-event`（跨谱可比性 vs 与 RFC 写法一致）；门禁与报告必须用同一口径，未定。
 14. **是否对 `fill`/`isFake` 音符单独建通道**：与 plan 03 §9-11 联动，v1 默认排除。
+15. **G2 门禁的合成任务设计（本模块新增经验，须写进方法学）**：泊松 NLL 的下界是**事件数 N**（不是 0），
+    且微型模型足以「背样本」；因此 G2 的合成任务必须**条件可学、打乱后不可学**，训练预算还要控制在
+    「打乱臂来不及背样本」的区间。实测：直接照抄条件（把可见场复制到输出）在补上输出头直连 skip 后
+    200 步到达理论最优；同任务打乱目标后 100 步内差距 ≥1.05×，但步数加大到 300 后打乱臂开始背样本、
+    差距缩到 1.04×。该性质属微型合成任务固有，**报告中必须说明**，不得据此放宽判据。
+16. **条件学习会停在「边际盆地」（本模块实测；风险 R-04-5 的量化）**：不加输出头 skip 时，全参训练在
+    「把可见格复制到输出」的最小任务上 800 步仍停在边际解（loss 348.4，理论最优 150.2），而
+    **冻结解码器只训头 + 输入投影**立刻到达最优——表达力够、**优化路径不够**。与 R-04-5
+    （line embedding 退化成「最忙线偏置」）同型：真实训练必须监控「条件消融前后 loss 差」。
+17. **输出头直连 skip（本模块新增设计）**：输出头除读解码器输出，还直接读该 token 的输入特征
+    （可见场 + 遮盖通道）。这是让「补全」可学的最短梯度路径（见 §9-16）；是否需要写进 BasePlan
+    §3.3 的架构描述，待评审。
+18. **遮盖通道的信息泄漏（范式级缺陷，本模块在 M3 门禁上抓到）**：若按 §4.2 的**字面**口径只遮
+    「有事件的格子」，则 `mask == 1` 等价于「此处有事件」（`mask_leak == 1.0`），模型只需**照抄 mask**
+    即可把事件项打到接近最优，**完全不需要看音频与判定线事件轨**；实测 G2 的真实臂与打乱臂 loss
+    **逐位相同**。本模块的缓解（默认路径）：`token_block=True`（把遮盖扩张到整个 `(k, τ)` token，
+    含该 token 的空格）+ `dilute=True`（再稀释一批空格 token，使「被遮 token 含事件」的比例回到全谱
+    事件密度）。这把「按事件遮盖」实现为「**以事件为锚的区域遮盖**」，与 §4.2 字面表述有出入，
+    **需 RFC 裁定**；字面口径保留为消融臂并如实报出 `mask_leak`。
+19. **padding 线的 NaN 梯度（实现缺陷，已修 + 回归测试）**：`event_term` 若先 `log(lam)` 再用
+    `where` 选 0，反向传播会算出 `0 * (1/0) = NaN`；padding 线的 λ 恰为 0，于是**全部参数梯度变 NaN**
+    （实测 79/79），而 loss 本身有限、**不报错**——属「静默毁训练」型缺陷。修法：先按 `line_mask`
+    清零监督集合、再取 log。

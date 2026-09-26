@@ -16,11 +16,11 @@
 
 | 编号 | 模块 | 对应代码 | 对应奠基章节 | 阶段 | 状态 |
 | --- | --- | --- | --- | --- | --- |
-| 00 | [核心契约：判定线 / 音符 / 谱面 / 强度场张量](./00-core-contracts.md) | `beatmorph/core/contracts/` | §2、§3.2、§3.4 | Phase 1 | 🟡 草案 |
+| 00 | [核心契约：判定线 / 音符 / 谱面 / 强度场张量](./00-core-contracts.md) | `beatmorph/core/contracts/` | §2、§3.2、§3.4 | Phase 1 | ✅ 已完成 |
 | 01 | [Stage 0 音频编码器：MERT-v1-330M + LoRA Adapter](./01-audio-encoder.md) | `beatmorph/audio/` | §2、§3.1 | Phase 1 | 🟡 草案 |
-| 02 | [数据流水线：Phira 获取 + RPEJSON 解析 + 质检 + 特征离线提取](./02-data-pipeline.md) | `beatmorph/data/`、`beatmorph/io/formats/rpejson/`（读） | §4、§3.2.4 | Phase 1 | 🟡 草案 |
-| 03 | [强度场模块（判定线局部系多线标记点过程）](./03-field.md) | `beatmorph/field/` | §1.2、§2、§3.2、§3.4 | Phase 2 | 🟡 草案 |
-| 04 | [生成主干：掩码补全 Encoder-Decoder](./04-generation.md) | `beatmorph/generation/` | §1.2、§2、§3.3、§3.4、§3.5 | Phase 2 | 🟡 草案 |
+| 02 | [数据流水线：Phira 获取 + RPEJSON 解析 + 质检 + 特征离线提取](./02-data-pipeline.md) | `beatmorph/data/`、`beatmorph/io/formats/rpejson/`（读） | §4、§3.2.4 | Phase 1 | 🔵 实施中 |
+| 03 | [强度场模块（判定线局部系多线标记点过程）](./03-field.md) | `beatmorph/field/` | §1.2、§2、§3.2、§3.4 | Phase 2 | 🔵 实施中 |
+| 04 | [生成主干：掩码补全 Encoder-Decoder](./04-generation.md) | `beatmorph/generation/` | §1.2、§2、§3.3、§3.4、§3.5 | Phase 2 | 🔵 实施中（M1–M4/M6；G1–G4 全绿） |
 | 05 | [解码与合法性后处理（强度场 → 离散事件 → RPEJSON）](./05-decoder-postprocess.md) | `beatmorph/decoder/`、`beatmorph/io/formats/rpejson/`（写） | §2、§3.6、§9 | Phase 2 | 🟡 草案 |
 | 06 | [评估与实验设计（指标 / 协议 / B1-B6 / 人评）](./06-eval.md) | `beatmorph/eval/` | §1.3、§3.2.2、§9 | Phase 2（人评 Phase 3） | 🟡 草案 |
 | 07 | [训练基础设施（Lightning / Hydra / G1-G4 门禁 / 环境自检）](./07-infra-training.md) | `beatmorph/infra/`、`configs/` | §5、§9 | Phase 1-2 | 🟡 草案 |

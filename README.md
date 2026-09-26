@@ -10,7 +10,7 @@
 
 BeatMorph 从原始音频（WAV/MP3）+ 难度（+ 可选判定线事件轨）出发，端到端生成高质量、可玩的 **Phigros 谱面（RPEJSON）**。模型从社区海量自制谱自主学习创作规律，无需人工标注（标注成本 ≈ 0）。
 
-> 📌 **状态**：Pre-Alpha。范式（[RFC-0029](docs/decisions/RFC-0029-phigros-continuous-chart-generation.md)）、奠基文档（v3.0）、格式/单位/数据/文献事实库已就绪；**代码尚未迁移**（当前仓库仍为 osu!mania 版）。
+> 📌 **状态**：Pre-Alpha。范式（[RFC-0029](docs/decisions/RFC-0029-phigros-continuous-chart-generation.md)）、奠基文档（v3.0）、事实库已就绪；**核心契约 / 数据流水线 / 强度场 / 生成主干（M1–M4/M6）四层已落地并通过默认 CI**（545 项测试），**生成主干的 G1–G4 门禁已实跑全绿**；消融臂、解码、评估与训练栈待建（见下方交接件）。
 
 ---
 
@@ -18,48 +18,53 @@ BeatMorph 从原始音频（WAV/MP3）+ 难度（+ 可选判定线事件轨）�
 
 > 本节读者是**下一个 session 的 agent**，不是历史记录。
 > **每次交接必须整节重写，不得追加**（规则见 [AGENTS.md](AGENTS.md) §6）。
-> 上次交接：**2026-08-05** ｜ 交接人：主会话
+> 上次交接：**2026-09-26 20:20** ｜ 交接人：主会话（plan 04 生成主干 M1–M4/M6）
 
 ### 当前状态
 
-**已就绪**
+自检（默认 CI，无网络 / 无权重 / 无 GPU）：`make lint && make typecheck && make test-fast` → **545 passed**；
+两套 G1-G4 门禁都**在真实主干上实跑过**：`uv run pytest tests/unit/field/test_sanity_gates.py tests/unit/generation/test_sanity_gates.py -m slow` → 全绿。
 
-- **范式**：[RFC-0029](docs/decisions/RFC-0029-phigros-continuous-chart-generation.md) 已采纳（Phigros + 判定线局部系多线标记点过程 + 掩码补全 + 非齐次泊松 NLL）；beat-aligned 时间网格与数据合规两项裁决已落 RFC/BasePlan/CLAUDE。
-- **文档库**：[BasePlan v3.0](docs/BasePlan.md)（397 行）、[CLAUDE.md v3.0](CLAUDE.md)、[plans 00-08](docs/plans/README.md)（2538 行）、[知识库 4 份](docs/knowledges/)（格式 / 单位几何 / 数据集 / 文献）、[POSTMORTEM](docs/POSTMORTEM-2026-08-05-frame-rate-misalignment.md)。
-- **门禁**：`beatmorph/infra/sanity.py`（G1-G4，纯 Python，无 torch 依赖）；帧率契约测试进默认 CI。
-- **仓库**：`main` 已快进至 `67c7299`；osu!mania 实现在 **`archive/osu-mania`** 分支完整保留；主路径已删除 retired 模块。
+**已落地**（plan 00 / 02 / 03 与 plan 04 主干；里程碑逐条状态见各 plan 的状态列）：
 
-**代码实况（重要：不要被文档的完备度误导）**
+- `core/contracts/` ✅ v3.0 契约：`phigros.py`（判定线 / 音符 / 谱面 / 事件轨求值）+ `field.py`（网格与张量形状）+ `tensors.py`
+- `data/` ✅ RPEJSON 独立实现解析器、内容嗅探、`info.yml` 定位、三层质检、Phira 客户端（分页 / Range 预筛 / provenance）、特征缓存、按曲目切分
+- `field/` ✅ 网格与**秒↔τ 唯一换算**（torch-free）、目标构建、两条 ∫λ 路径互校、泊松 NLL、G3 闭式基线、共格碰撞统计、可视化
+- `generation/` 🔵 **M1–M4 / M6**：`FieldBatch`/`FieldOutput` 契约、三 mask 语义与**防泄漏的遮盖构造**、`full_poisson_loss` / `masked_poisson_loss`（HT 重标定）、掩码补全 Enc-Dec（滑动窗口 + 周期全局层、难度 AdaLN、轨道/音频 cross-attention、可变 K、因子化 λ 头）、迭代并行解码（三种连续场置信度）
+- 夹具 ✅ `tests/fixtures/phigros/`（手工构造，无音频无曲绘）：标准 RPE / 伪装成 `.json` 的 PEC / 含 decoy `chart.json` 的最小谱面包
 
-| 区域 | 实况 |
-|------|------|
-| `beatmorph/core/contracts/` | **仍是 v2.x**（`Note/Chart/Section/EventToken` + 常量）——**待重写为 Phigros 契约** |
-| `beatmorph/audio/encoder/mert.py` | ✅ 可用（帧率已改为派生量 75Hz） |
-| `beatmorph/infra/sanity.py` | ✅ 可用（G1-G4） |
-| `beatmorph/field/`、`eval/`、`io/formats/rpejson/` | ⬜ **不存在，待建** |
-| `beatmorph/generation/`、`decoder/` | 空包壳 |
-| `configs/` | 仅剩 `model/mert.yaml`（已修正） |
-| 测试 | 仅 3 份存活（契约 / 门禁 / 帧率契约）→ `36 passed, 1 skipped` |
+**接缝**：`tests/integration/test_time_conversion_seam.py` 钉住「格式层 beat↔秒」与「场层秒↔τ」的一致性（实测唯一分歧——BPMList 首段不在 0 拍的畸形谱——已由 `data/qc.py` 判违约拒收，不静默二选一）；`tests/integration/generation/test_train_step.py` 用 plan 03 的 `build_target` 直接喂 generation，秒↔τ 只在 `field/` 内发生。
+
+**本轮三个发现（都已变成测试或契约，细节见 plan 04 §9）**：
+
+1. **遮盖通道泄漏（范式级）**：按 plan 04 §4.2 的**字面**口径（只遮有事件的格子）时 `mask == 1` 等价于「此处有事件」，G2 的真实臂与打乱臂 loss **逐位相同**——模型照抄 mask 即可，根本不需要看音频与事件轨。默认路径改为「**以事件为锚的 token 区块遮盖 + 空格稀释**」，`mask_leak_tokens` 回到全谱事件密度附近；口径本身待 RFC 裁定。
+2. **重标定系数分歧**：文档写 `1/(1-r)`，而「只监督被遮盖事件」的推导给的是 `1/r`——两者**只在 r = 0.5 处相同**。实现把三种口径全部实现（默认数学自洽的 `hidden`），并在 r = 0.25/0.5/0.75 三档上定量钉死。
+3. **padding 线的 NaN 梯度**：先 `log(lam)` 再用 `where` 会算出 `0 * inf = NaN`，把**全部参数梯度**污染成 NaN（79/79）而 loss 本身有限、不报错。已修 + 回归测试。
+
+**未落地**：plan 04 的消融臂与阶段出口（M5 的 F1 对照、M7–M12）；`decoder/` 与 rpejson **写侧**（plan 05）、`eval/`（plan 06）、`infra/` + `configs/` 训练栈（plan 07）、`cli`/`api`（plan 08）。
 
 ### 下一步
 
-1. **写 Phigros 基座契约**（[plan 00](docs/plans/00-core-contracts.md)，393→400 行，8 条里程碑）——这是后面 8 份 plan 的共同依赖，必须先做。
-   - 首要：把 v2.x 的 `core/contracts/` 换成 `JudgeLine` / `PhigrosNote` / `PhigrosChart` / `ChartFieldSpec` / `ChartField` / `ChartTargetField`（形状 `(B,K,T,X,S,C)`，τ 时间轴，不变量 I1–I13）。
-2. 按 [plan 02](docs/plans/02-data-pipeline.md) 建 RPEJSON 解析器（**独立实现**，只读 prpr/phichain 行为规范；夹具 `chart/1000` + `chart/7039`）。
-3. 按 [plan 03](docs/plans/03-field.md) 建 `field/`（两条积分路径 + 一致性门禁 + τ↔秒往返测试）。
-4. 数据获取按 plan 02 执行（合规已裁定；**脚本须记录来源与用途**）。
+1. **plan 05 解码与合法性后处理**（新的主瓶颈）：强度场已能产出，但要变成可玩谱面还缺解码双臂（find_peaks vs Ogata thinning）+ 红线校验 + **rpejson 写侧**；plan 04 的 M5（按事件 vs 按帧遮盖的 F1 对照）与 M6（步数—质量曲线）也依赖它。
+2. **plan 04 的消融臂（M7–M11）**：B4 AR 上界臂、B1 热图 + focal 正式臂、B3 GOCT 配置臂、B5 absorbing 扩散臂。目标函数（focal / 时间步加权掩码 CE）与 G1–G4 门禁模板已就绪，缺的是模型臂、离散 tokenizer 与各自的门禁实跑；**扩数据规模前必须先跑通 G1–G4**。
+3. **plan 02 的真实数据通路**（需网络，标 e2e/slow）：322 页枚举 + Range 预筛 + 选择性下载；脚本必须写 `provenance`（来源 / 用途 / 脚本标识 / 时间）。
+4. **全库统计回填两个数字**：共格碰撞率 → `RPE_X_GRID_BINS` 的最终取值；唯一曲目数 / 同曲重复率。**在此之前 128 只是默认值**。
 
-### 未决项（不阻塞第 1–3 步）
+### 未决项（不阻塞第 1-4 步）
 
 | 未决 | 出处 |
 |------|------|
-| 网格桶数 N 的最终值（需 N 消融 + 共格碰撞统计） | RFC §8.4 R-f、plan 03 M6/M7 |
-| RPE 同刻按键上限数值（未查证 → 只统计不作红线） | plan 05 §9-1 |
-| 旋转正方向的屏幕含义（存疑 D1） | plan 00 §9-8、单位文档 §9 |
-| 官谱侧 `1X` 75 vs 75.94、v1 y 分母 520/530 冲突 | 单位文档 §9 |
-| `bpmfactor` 参考实现未实现 | 单位文档 §9 |
-
----
+| **遮盖重标定口径**：`hidden`(1/r，实现默认) vs 文档字面 `observed`(1/(1-r)) vs 不自洽的 `hidden_doc`；三者仅在 r = 0.5 处重合 | plan 04 §9-6 |
+| **mask 泄漏口径**：默认「以事件为锚的 token 区块遮盖 + 空格稀释」偏离 §4.2 字面表述（待 RFC）；字面口径保留为消融臂 | plan 04 §9-18 |
+| 输出头**直连 skip** 是否写进 BasePlan §3.3 的架构描述 | plan 04 §9-17 |
+| 条件学习的「边际盆地」：训练日志需加「条件消融前后 loss 差」监控（R-04-5） | plan 04 §9-16 |
+| G2 门禁的合成任务与训练预算（微型任务会被「背样本」）需写进报告方法学 | plan 04 §9-15 |
+| `N` 的最终取值（需碰撞率–N / NLL–N / F1–N 三条曲线） | plan 03 §9-7 |
+| 秒↔τ 两个换算点是否合并为一份实现（`data → field`？还是上提契约层） | plan 02 §9-11 / plan 03 §9-13 |
+| τ 轴终点口径（`chartTime` / 最后一事件 / 音频时长；是否含 `META.offset`） | plan 03 §9-14 |
+| BPM 变更点落在 1/48 拍格内时 `J_j` 的取值（已量化出 `rule` 三档，默认 `left`） | plan 03 §9-16 |
+| `RPE_HEIGHT_RATIO` 的出处（D3）；旋转正方向的屏幕含义（D1） | plan 00 §9-6 / §9-8 |
+| RPE 同刻按键上限（未查证 → 只统计不作红线） | plan 05 §9-1 |
 
 ## 为什么是 Phigros
 
@@ -132,7 +137,7 @@ python scripts/verify_mert_frame_rate.py
 
 ## 数据与训练
 
-⚠️ **数据合规是当前阻塞项**：唯一可用的万级数据源（Phira 官方 API，实测 9649 张）其 ToU **未授予机器学习训练权利**，且音频随谱 100% 捆绑分发。**裁定前不得开始训练**。详见 [BasePlan §4.4](docs/BasePlan.md) 与 [phira-dataset-survey.md](docs/knowledges/phira-dataset-survey.md)。
+✅ **数据合规已裁定（2026-08-05）**：训练可启动，项目级硬约束为 ① **最终不发布模型权重** ② 谱面/音频可本地落盘但**不得入库** ③ 获取与处理脚本**记录来源与用途** ④ 发布权重前必须重新裁定。风险由决策者承担。详见 [BasePlan §4.4](docs/BasePlan.md)、[RFC-0029 §8.3 Q11b](docs/decisions/RFC-0029-phigros-continuous-chart-generation.md) 与 [phira-dataset-survey.md](docs/knowledges/phira-dataset-survey.md)。
 
 流程与操作见 **[docs/TRAINING.md](docs/TRAINING.md)**。
 
@@ -154,7 +159,7 @@ python scripts/verify_mert_frame_rate.py
 
 | Phase | 目标 |
 |-------|------|
-| **1 地基** | 数据合规裁定 → 全库预筛 → RPEJSON 解析器 → 契约断言 → MERT 特征 |
+| **2 强度场** | ✅ field 模块（双积分路径）→ ✅ 掩码补全主干（M1–M4）→ ✅ **生成主干 G1-G4 全绿** → ⬜ B1-B6 对照 → ⬜ 解码与合法性后处理（plan 05）→ ⬜ 首版可玩谱面（M12） |
 | **2 强度场** | field 模块（双积分路径）→ 掩码补全主干 → **G1-G4 全绿** → B1-B6 对照 → 首版可玩谱面 |
 | **3 对齐与产品化** | DPO / 风格检索（待重估）→ 推理加速 → API / Demo |
 

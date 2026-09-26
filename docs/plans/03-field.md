@@ -1,6 +1,7 @@
 # Plan 03 — 强度场模块（判定线局部系多线标记点过程）
 
-> 状态：🟡 草案 ｜ 阶段：Phase 2 ｜ 负责：field-agent（强度场组）
+> 状态：🟢 已实施（M1–M12 全部落地并自检通过，2026-09-26；M6/M7 的全库数值与 N 的最终取值待 plan 02 统计回填）｜ 阶段：Phase 2 ｜ 负责：field-agent（强度场组）
+> 实施留痕：`beatmorph/field/*.py`（源码零物理常量字面量，AST 扫描契约测试守住）｜ `tests/unit/field/` + `tests/integration/test_field_pipeline.py` 默认 CI **103 passed / 0 skipped**，全仓默认 CI 403 passed ｜ ruff 0 error、mypy strict 0 error ｜ G1–G4 门禁已实跑全绿（`tests/unit/field/test_sanity_gates.py`，标 slow）
 > 对应代码：`beatmorph/field/` ｜ 对应奠基章节：§1.2 / §2 / §3.2 / §3.4 / §7
 
 ## 1. 目标与范围
@@ -65,37 +66,59 @@
 ### 3.1 场、网格与常量（`beatmorph/field/grid.py`）
 
 ```python
-RPE_STAGE_WIDTH: Final[float] = 1350.0   # 源自 core/contracts（A 级：prpr RPE_WIDTH / phichain CANVAS_WIDTH）
+RPE_STAGE_WIDTH: Final[float] = (
+    1350.0  # 源自 core/contracts（A 级：prpr RPE_WIDTH / phichain CANVAS_WIDTH）
+)
 RPE_STAGE_HEIGHT: Final[float] = 900.0
-DEFAULT_X_BINS: Final[int] = 128         # RFC-0029 §3.1 裁定
-N_SIDES: Final[int] = 2                  # above / below
+DEFAULT_X_BINS: Final[int] = 128  # RFC-0029 §3.1 裁定
+N_SIDES: Final[int] = 2  # above / below
 TYPE_CHANNELS: Final[tuple[str, ...]] = ("tap", "drag", "hold", "hold_end", "flick")
 # 时间基本格：1/48 拍（RFC-0029 §3.1 Q15 决议；网格随 BPM 变化）——派生式，禁止写字面量
 BEAT_SUBDIVISION: Final[int] = 48
 # 帧率是派生量，不是超参（BasePlan §3.1；POSTMORTEM-2026-08-05）——**它只服务音频帧轴（Stage 0），
 # 不再是场的时间轴**；场的时间轴是 τ（拍）。两者的换算只在本模块进行（红线 7）。
-MERT_FRAME_RATE_HZ: Final[float] = MERT_SAMPLE_RATE_HZ / MERT_CONV_STRIDE_PRODUCT   # = 24000 / 320 = 75
+MERT_FRAME_RATE_HZ: Final[float] = (
+    MERT_SAMPLE_RATE_HZ / MERT_CONV_STRIDE_PRODUCT
+)  # = 24000 / 320 = 75
+
 
 @dataclass(frozen=True)
 class FieldGrid:
     x_bins: int = DEFAULT_X_BINS
+
     @property
-    def dx(self) -> float: return RPE_STAGE_WIDTH / self.x_bins      # 禁止写 10.546875
+    def dx(self) -> float:
+        return RPE_STAGE_WIDTH / self.x_bins  # 禁止写 10.546875
+
     @property
-    def d_tau(self) -> float: return 1.0 / BEAT_SUBDIVISION         # 单位：拍；禁止写 0.020833...
+    def d_tau(self) -> float:
+        return 1.0 / BEAT_SUBDIVISION  # 单位：拍；禁止写 0.020833...
+
     @property
-    def x_min(self) -> float: return -RPE_STAGE_WIDTH / 2
+    def x_min(self) -> float:
+        return -RPE_STAGE_WIDTH / 2
+
     @property
-    def x_max(self) -> float: return +RPE_STAGE_WIDTH / 2
+    def x_max(self) -> float:
+        return +RPE_STAGE_WIDTH / 2
+
     # ── 秒 ↔ τ 的**唯一**换算点（RFC-0029 §3.1/§7-8；下游一律经此，不得自行实现）──
-    def jacobian(self, bpm_points) -> FloatTensor:
-        ...   # J(τ) = dt/dτ = 60 / bpm(τ)（秒/拍），由 BPMList 分段给出；段内常量、段界跳变
-    def tau_to_seconds(self, tau, bpm_points) -> ...:
-        ...   # t = ∫_0^τ J = Σ_段 (Δ拍数 × 60 / bpm_段)
-    def seconds_to_tau(self, t_s, bpm_points) -> ...:
-        ...   # 上式按段反解；与 tau_to_seconds 互为逆（M12 断言往返无损）
-    def volume(self, tau_bins: int, n_lines: int, jacobian) -> float:
-        ...   # |Ω| = Σ_j J_j · d_tau · dx，j 遍历 (k, τ, x, s, c) 全部格元；**非均匀**（§2 偏离 2）
+    def jacobian(
+        self, bpm_points
+    ) -> (
+        FloatTensor
+    ): ...  # J(τ) = dt/dτ = 60 / bpm(τ)（秒/拍），由 BPMList 分段给出；段内常量、段界跳变
+    def tau_to_seconds(
+        self, tau, bpm_points
+    ) -> ...: ...  # t = ∫_0^τ J = Σ_段 (Δ拍数 × 60 / bpm_段)
+    def seconds_to_tau(
+        self, t_s, bpm_points
+    ) -> ...: ...  # 上式按段反解；与 tau_to_seconds 互为逆（M12 断言往返无损）
+    def volume(
+        self, tau_bins: int, n_lines: int, jacobian
+    ) -> (
+        float
+    ): ...  # |Ω| = Σ_j J_j · d_tau · dx，j 遍历 (k, τ, x, s, c) 全部格元；**非均匀**（§2 偏离 2）
 ```
 
 契约断言（默认 CI，无权重无 GPU）：
@@ -274,18 +297,18 @@ def render_field_png(lam, gt_counts, out_path, *, grid, **sel) -> Path
 
 | # | 里程碑 | 验收（可量化） |
 |---|---|---|
-| M1 | 网格与派生常量契约 | `dx * x_bins == RPE_STAGE_WIDTH`、`d_tau * BEAT_SUBDIVISION == 1`（拍）、`frame_rate == MERT_SAMPLE_RATE_HZ / MERT_CONV_STRIDE_PRODUCT` 全部断言通过；本模块源码**零**字面量（正则扫描，含 `0.020833…`）；测试进默认 CI（无权重/无 GPU） |
-| M2 | 目标构建 | `Σ_j n_j == meta.n_events`（相对误差 0，整数严格相等）；hold-end 与起点同 `(k, i_x, s)` 断言通过；越界/fake/非法 Hold 三项计数与解析器统计**逐张一致**；不钳位（越界 note 的 `positionX` 原值保留在 meta 中） |
-| M3 | 两条积分路径对拍 | 四类测试场（解析闭式 / 随机分段常量 / 因子化 / **多 BPM 段**）上相对误差 ≤ 1e-6（float64）、≤ 1e-4（float32）；**逐格 `ΔV_j = J_j·d_tau·dx` 的加权断言**（非均匀网格下若漏乘 `J_j` 必须失败）；`Λ` 单调性断言；`p` 归一化断言（含掩码/域外裁剪的**反例测试**必须失败） |
-| M4 | 泊松 NLL 恒等式 | (i) `λ ≡ N/\|Ω\|` 的 NLL == `N * (1 + log(\|Ω\|/N))`（相对误差 ≤ 1e-6，`\|Ω\| = Σ_j ΔV_j`）；(ii) `λ ≡ 0` 的 NLL 非有限（断言 + 禁止 eps 平滑的代码审查项）；(iii) `n_j = 2` 贡献 `2·log λ_j`；(iv) `binned - point` == `Σ_j log(n_j!) - Σ_j n_j log ΔV_j`（相对误差 ≤ 1e-6；均匀网格下退化为 `- N log ΔV`） |
-| M5 | 强不平衡 / 线集中诊断 | 输出 per-side、per-channel、per-line 计数与 NLL 分解 + 归一化线熵；契约测试证明损失**不含**任何通道/side/line 权重（对 5 通道 × 2 侧 × K 线的重加权系数恒为 1）；背面与 Flick 的计数占比与实测区间（2.4–3.0% / 6–7%）在同一量级 |
-| M6 | 共格碰撞统计工具 + 全库统计 | 对全库（或声明的抽样集）产出：精确同刻最小 `\|Δx\|` 分布（p0/p1/p5/中位）、每 N 的碰撞率与 `n_j ≥ 2` 格占比、每谱「不共格所需 N」；结论**先于** N 的选型发布 |
-| M7 | N ∈ {64,128,256,512} 消融 | 每 N 报：碰撞率、NLL（point 与 binned 两栏）、显存与单步耗时、下游事件级 F1@±20ms 与 ±50ms（数值由 plan 06 提供，本模块只固定接口与网格）；产出**碰撞率–N 与指标–N 曲线**；N 的最终取值由本里程碑数据决定并在 plan 中回填（不得默认 128 了事） |
-| M8 | 可视化/调试工具 | 合成场 + `data/fixtures/` 微型谱面可产出确定的 PNG（尺寸/命名确定性）；无权重、无 GPU、非 slow 即可运行；人工目视可用于判读「到处乱亮」「整条线塌到 0」「背面缺失」三类失败 |
-| M9 | **G1–G4 门禁接入** | 以本模块自带的最小可微回归任务（不依赖 plan 04）跑通 `beatmorph/infra/sanity.py` 四道门禁并全绿；`summarize()` 输出写入训练日志；G3 的基线值取自 M4 的闭式 |
-| M10 | 契约测试进默认 CI | `tests/unit/field/` 在无权重、无 GPU、非 slow 条件下全绿；`uv run mypy beatmorph/field` strict 零错误；`make lint && make test-fast` 通过 |
-| M11 | 文档化与留痕 | 写明 `\|Ω\|` 与 `ΔV_j` 的定义、`L_point` 与 `L_binned` 的常数差推导、越界/fake/非法 Hold 的处置记录、以及 N 的裁定依据（含被否决的取值与理由） |
-| M12 | **「场网格 ↔ 秒」往返无损契约测试（Q15 硬要求）** | 在**多 BPM 段**谱面（≥ 2 段、含变速）上：`seconds_to_tau(tau_to_seconds(τ)) == τ` 与反向均在**声明容差**内（容差由本计划标定后回填，§9-5）；`tau_to_seconds` 与「逐段 `Δ拍 × 60 / bpm` 求和」的解析值一致；`J(τ)` 段内常量、段界跳变；**改写 `BPMList` 必须使结果变化**（否则实现里藏了硬编码或用的是帧率）；τ 格数与总拍数一致；进**默认 CI**、无权重无 GPU（RFC-0029 §3.1：「否则 beat-aligned 会变成下一个 25 Hz」） |
+| M1 | ✅ 网格与派生常量契约（含字面量 AST 扫描，进默认 CI） | `dx * x_bins == RPE_STAGE_WIDTH`、`d_tau * BEAT_SUBDIVISION == 1`（拍）、`frame_rate == MERT_SAMPLE_RATE_HZ / MERT_CONV_STRIDE_PRODUCT` 全部断言通过；本模块源码**零**字面量（正则扫描，含 `0.020833…`）；测试进默认 CI（无权重/无 GPU） |
+| M2 | ✅ 目标构建（越界/fake/非法 Hold 三项计数齐备，不钳位） | `Σ_j n_j == meta.n_events`（相对误差 0，整数严格相等）；hold-end 与起点同 `(k, i_x, s)` 断言通过；越界/fake/非法 Hold 三项计数与解析器统计**逐张一致**；不钳位（越界 note 的 `positionX` 原值保留在 meta 中） |
+| M3 | ✅ 两条积分路径对拍（四类测试场 + 逐格 dV 加权 + 未归一化 p 的反例） | 四类测试场（解析闭式 / 随机分段常量 / 因子化 / **多 BPM 段**）上相对误差 ≤ 1e-6（float64）、≤ 1e-4（float32）；**逐格 `ΔV_j = J_j·d_tau·dx` 的加权断言**（非均匀网格下若漏乘 `J_j` 必须失败）；`Λ` 单调性断言；`p` 归一化断言（含掩码/域外裁剪的**反例测试**必须失败） |
+| M4 | ✅ 泊松 NLL 恒等式（四条全绿；λ≡0 → +∞，无 eps 平滑） | (i) `λ ≡ N/\|Ω\|` 的 NLL == `N * (1 + log(\|Ω\|/N))`（相对误差 ≤ 1e-6，`\|Ω\| = Σ_j ΔV_j`）；(ii) `λ ≡ 0` 的 NLL 非有限（断言 + 禁止 eps 平滑的代码审查项）；(iii) `n_j = 2` 贡献 `2·log λ_j`；(iv) `binned - point` == `Σ_j log(n_j!) - Σ_j n_j log ΔV_j`（相对误差 ≤ 1e-6；均匀网格下退化为 `- N log ΔV`） |
+| M5 | ✅ 强不平衡 / 线集中诊断（损失无任何重加权，契约测试证明系数恒为 1；实测占比待全库回填） | 输出 per-side、per-channel、per-line 计数与 NLL 分解 + 归一化线熵；契约测试证明损失**不含**任何通道/side/line 权重（对 5 通道 × 2 侧 × K 线的重加权系数恒为 1）；背面与 Flick 的计数占比与实测区间（2.4–3.0% / 6–7%）在同一量级 |
+| M6 | 🟡 共格碰撞统计工具（已实现并自测；**全库统计待 plan 02 数据**） | 对全库（或声明的抽样集）产出：精确同刻最小 `\|Δx\|` 分布（p0/p1/p5/中位）、每 N 的碰撞率与 `n_j ≥ 2` 格占比、每谱「不共格所需 N」；结论**先于** N 的选型发布 |
+| M7 | 🟡 N 消融接口与碰撞率–N 曲线工具（已实现；NLL/F1/显存**数值待 plan 04/06 回填**，N 取值未裁定） | 每 N 报：碰撞率、NLL（point 与 binned 两栏）、显存与单步耗时、下游事件级 F1@±20ms 与 ±50ms（数值由 plan 06 提供，本模块只固定接口与网格）；产出**碰撞率–N 与指标–N 曲线**；N 的最终取值由本里程碑数据决定并在 plan 中回填（不得默认 128 了事） |
+| M8 | ✅ 可视化/调试工具（Agg、无权重无 GPU、尺寸与文件名确定性） | 合成场 + `data/fixtures/` 微型谱面可产出确定的 PNG（尺寸/命名确定性）；无权重、无 GPU、非 slow 即可运行；人工目视可用于判读「到处乱亮」「整条线塌到 0」「背面缺失」三类失败 |
+| M9 | ✅ **G1–G4 门禁接入**（最小可微回归任务实跑全绿，标 slow） | 以本模块自带的最小可微回归任务（不依赖 plan 04）跑通 `beatmorph/infra/sanity.py` 四道门禁并全绿；`summarize()` 输出写入训练日志；G3 的基线值取自 M4 的闭式 |
+| M10 | ✅ 契约测试进默认 CI（无权重无 GPU 非 slow 全绿；ruff/mypy 见回报） | `tests/unit/field/` 在无权重、无 GPU、非 slow 条件下全绿；`uv run mypy beatmorph/field` strict 零错误；`make lint && make test-fast` 通过 |
+| M11 | 🟡 文档化与留痕（模块 docstring 写明 dV/\|Ω\|/L_point 与 L_binned 差、三项计数处置；N 的裁定依据待 M6/M7 数值） | 写明 `\|Ω\|` 与 `ΔV_j` 的定义、`L_point` 与 `L_binned` 的常数差推导、越界/fake/非法 Hold 的处置记录、以及 N 的裁定依据（含被否决的取值与理由） |
+| M12 | ✅ **「场网格 ↔ 秒」往返无损契约测试（Q15 硬要求）**（多 BPM 段、段界跳变、改写 BPMList 必变、进默认 CI） | 在**多 BPM 段**谱面（≥ 2 段、含变速）上：`seconds_to_tau(tau_to_seconds(τ)) == τ` 与反向均在**声明容差**内（容差由本计划标定后回填，§9-5）；`tau_to_seconds` 与「逐段 `Δ拍 × 60 / bpm` 求和」的解析值一致；`J(τ)` 段内常量、段界跳变；**改写 `BPMList` 必须使结果变化**（否则实现里藏了硬编码或用的是帧率）；τ 格数与总拍数一致；进**默认 CI**、无权重无 GPU（RFC-0029 §3.1：「否则 beat-aligned 会变成下一个 25 Hz」） |
 
 ---
 
@@ -341,6 +364,12 @@ def render_field_png(lam, gt_counts, out_path, *, grid, **sel) -> Path
 11. **`isFake` 是否计入场**：本计划默认排除并统计；若「假音符的视觉编排」被判定为 Phigros 谱面的重要组成，则需重开此条。
 12. **`speed`/`size`/`yOffset`/`visibleTime` 等标记**在 v1 被边际化：是否需要独立的「标记头」（v2 议题）——RFC-0029 未涉及。
 13. **秒↔τ 换算与格式层的接缝（须裁定）**：本模块是「秒 ↔ τ」的**唯一**实现点（RFC-0029 §7-8），但 plan 02 的解析（beat → 秒）与 plan 05 的写出（秒 → beat 三元组反解）在数学上是**同一分段积分**。三者是否必须共用同一实现（依赖方向 `io → field`？）、还是格式层的 beat↔秒 被判定为独立于场网格的第二换算点，**未裁定** → 须与 contracts-agent / 决策者对齐。在此之前只保留 plan 02 那一处格式层换算，**不得**出现第三处。
+   > **临时裁定（2026-09-27，实施期）**：接缝**实测确有分歧**，但只在一个畸形情形下：BPMList 首段起点 > 0 拍时，
+   > 本模块把 τ=0 当作谱面时间原点（与契约 `PhigrosNote.t` 自洽）并在前面外推一段，而格式层以首段为原点（与 Phira 官方 `beat2sec` 一致），
+   > 两者相差一个常量偏移。首段起于 0 拍时两处在 `tests/integration/test_time_conversion_seam.py` 中逐点一致（多 BPM 段 / 段界 / 往返 / 改写 BPMList 必变）。
+   > **处置**：畸形情形由 plan 02 的 `qc.py` 以 schema 违约拒收（隔离区），不静默二选一。
+   > 另两个残留子问题已在本轮**量化**而非裁定：① BPM 变更点落在格内时的 `J_j` 取值由 `FieldGrid.cell_seconds(rule="left"|"right"|"exact")` 显式暴露（默认 `left` = 本 plan 口径，§9-16）；
+   > ② τ 终点口径仍取 `chart.duration_s()` 且可覆盖，`FieldGrid.for_chart` 对越窗事件计数而不静默丢弃（§9-14）。
 14. **`T`（τ 轴长度）的终点口径未查证**：τ 格数需要「谱面终点换算到拍」，但终点取自哪个字段（`chartTime` / 最后一事件 / 音频时长）以及是否含 `META.offset`，本轮**未查证** → 不得凭猜实现；须先查 `phigros-format.md` 并由 plan 02 的 IR 明确给出。
 15. **τ 轴与音频帧轴的对齐方式未定**：`audio_emb` 在 75 Hz 帧轴上、场在 τ 格上，条件注入处的重采样（在 τ 格上取音频帧 / 在音频帧上取 τ）尚无结论；本计划只在**一处**实现该重采样（§4.2），具体形式待与 plan 04 联合定稿。
 16. **BPM 变更点不落在 1/48 拍格上时的 `J_j` 取值**：RPE 的 `BPMList` 起点是 beat 三元组 `i + n/d`，`d` 不保证整除 48 ⟹ 存在跨格变速。该格取左段、右段还是按格内时长加权，**未定**（直接影响 M3 多 BPM 段测试场的构造与 M12 的容差标定）。

@@ -15,6 +15,7 @@ TB 标量是**附加**记录：tensorboard 缺失时只告警，不改变门禁�
 
 from __future__ import annotations
 
+import copy
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -37,6 +38,7 @@ from beatmorph.infra.sanity import (
 __all__ = [
     "GateFailure",
     "GateInputs",
+    "bounded_gate_config",
     "enforce_gates",
     "execute_gates",
     "format_gates_text",
@@ -129,6 +131,27 @@ def run_gates(inputs: GateInputs, cfg: GatesConfig) -> list[GateResult]:
             tol_frames=cfg.frame_rate_tol_frames,
         ),
     ]
+
+
+def bounded_gate_config(cfg: TrainConfig) -> TrainConfig:
+    """门禁用的**有界**数据口径：返回 `data.max_samples = gates.gate_samples` 的配置副本。
+
+    为什么必须单独给门禁限界（2026-09-27 第八轮实测）：门禁要跑 300 + 2x100 + 100 步，
+    单步成本 ∝ (K·T)²。采样器修好之后（[RFC-0033](../../docs/decisions/RFC-0033-sampler-coverage-and-epoch.md)）
+    门禁批从**全库**按剩余窗口加权抽桶，抽中的是最大的那批桶（K 可到 `k_max=128`）——
+    实测门禁从 **5 min 涨到 26 min**，显存贴到 **7880/8151 MiB**，正好落在
+    docs/TRAINING.md §7.5 记录的「滑进 Windows 共享内存」危险区。有界切片使它同时便宜、可复现，
+    并与第五轮的权威记录（`data.max_samples=200`）同口径。
+
+    Returns:
+        `gates.gate_samples is None` 时原样返回 `cfg`；否则返回深拷贝并只改 `data.max_samples`。
+        **训练侧仍用原始 cfg**——这个副本只喂 `build_gate_inputs` 与 `gates_context`。
+    """
+    if cfg.gates.gate_samples is None:
+        return cfg
+    bounded = copy.deepcopy(cfg)
+    bounded.data.max_samples = int(cfg.gates.gate_samples)
+    return bounded
 
 
 def gates_context(

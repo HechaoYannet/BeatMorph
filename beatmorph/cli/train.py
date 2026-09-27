@@ -45,6 +45,7 @@ from beatmorph.infra.derive import assert_derived_identities, derived_values, fo
 from beatmorph.infra.env_doctor import repo_root, run_env_doctor
 from beatmorph.infra.gates import (
     GateFailure,
+    bounded_gate_config,
     enforce_gates,
     execute_gates,
     format_skipped_gates,
@@ -246,13 +247,18 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0911, PLR0912, P
             return EXIT_GATES
         gates_green = gates_all_passed(_read_text(artifacts.path(GATES_FILENAME))) is True
     elif args.gates or args.gates_only:
+        # 门禁跑在**有界切片**（gates.gate_samples）上，而不是全量 data.max_samples：
+        # 单步成本 ∝ (K·T)²，全量采样器会按剩余窗口加权抽到 K≈k_max 的大桶
+        # （实测门禁 5 min → 26 min、显存贴到 7880/8151 MiB）。训练侧仍用原始 cfg。
+        gate_cfg = bounded_gate_config(cfg)
+        gate_source = _build_source(gate_cfg, manifest_path)
         context = gates_context(
             root=root,
-            data_source=source.describe(),
+            data_source=gate_source.describe(),
             data_path=manifest_path if cfg.data.source == "manifest" else None,
         )
         try:
-            inputs, stats = build_gate_inputs(cfg, source, device=args.device)
+            inputs, stats = build_gate_inputs(gate_cfg, gate_source, device=args.device)
         except Exception as exc:  # 数据侧问题也要以明确退出码收场
             logger.error("门禁输入装配失败（退出码 %d）：%s", EXIT_TRAIN, exc)
             artifacts.write_metrics({"gates_passed": False, "reason": str(exc)})

@@ -75,6 +75,11 @@ optim:
 gates:
   required: true
   smoke_max_samples: 8
+  # 门禁批的数据规模上限（行数）——**与训练规模解耦**（RFC-0033 后果）。
+  # 单步成本 ∝ (K·T)²，而修好采样器后门禁批会从全库按剩余窗口加权抽桶（K 可到 128）：
+  # 实测门禁 5 min → 26 min、显存 7880/8151 MiB（滑进共享内存的危险区）。
+  # 200 行与第五轮权威门禁记录（data.max_samples=200）同口径。None = 不限界（仅诊断用）。
+  gate_samples: 200
   overfit_steps: 300
   overfit_target_ratio: 0.1
   # ★ 门禁预算必须让模型**真的收敛**，否则 G2（打乱对照）与 G3（优于常数基线）两臂都

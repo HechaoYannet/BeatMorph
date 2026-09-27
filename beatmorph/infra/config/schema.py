@@ -238,6 +238,13 @@ class GatesConfig:
 
     required: bool = True
     smoke_max_samples: int = 8
+    #: 门禁批的**数据规模上限（行数）**；None = 不限界（沿用 data.max_samples）。
+    #: 为什么必须有界（2026-09-27 第八轮实测）：门禁要跑 300 + 2x100 + 100 步，而单步成本
+    #: ∝ (K·T)²。采样器修好之后（RFC-0033）门禁批从**全库**按剩余窗口加权抽桶，抽中的是
+    #: 最大的那批桶（K 可到 k_max=128）——门禁从 **5 min 涨到 26 min，且显存贴到 7880/8151 MiB**，
+    #: 正好落在 docs/TRAINING.md §7.5 记录的「滑进 Windows 共享内存」危险区。
+    #: 固定成有界切片后门禁既便宜又可复现，且与第五轮权威记录（data.max_samples=200）同口径。
+    gate_samples: int | None = 200
     overfit_steps: int = 300
     overfit_target_loss: float = 0.05
     overfit_target_ratio: float = 0.1
@@ -419,6 +426,8 @@ def validate_config(cfg: TrainConfig) -> list[str]:  # noqa: PLR0912, PLR0915 - 
     gates = cfg.gates
     if gates.smoke_max_samples < 1:
         problems.append(f"gates.smoke_max_samples 必须 >= 1，得到 {gates.smoke_max_samples}")
+    if gates.gate_samples is not None and gates.gate_samples < 1:
+        problems.append(f"gates.gate_samples 必须 >= 1 或为 null，得到 {gates.gate_samples}")
     if gates.overfit_steps < 1 or gates.shuffle_steps < 1:
         problems.append("gates 的过拟合/打乱步数必须 >= 1")
     if gates.frame_rate_tol_frames < 0:

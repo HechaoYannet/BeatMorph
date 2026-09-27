@@ -55,6 +55,9 @@ data:
   #   ⇒ 改它不改变样本序列、不改变覆盖率、不改变续训指纹（进 checkpoint.RESUME_IGNORED_KEYS）。
   #   ⚠️ 必须同时限住每个 worker 的 BLAS 线程，否则 N 个 worker 各自开满 24 核会过度订阅：
   #      启动前设 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1（未设时训练会打 WARNING）。
+  #   ⚠️ **2026-09-27 第十轮定位修正**：下面这段标定是在 **DataLoader 默认 in_order=True** 下测的，
+  #     那个「N≥8 封顶」是 in_order 的产物（队头一条慢窗口会让全部 worker 集体等索引）。
+  #     关掉 in_order 后 W=10/12 分别到 11.55/12.21 窗口/s、仍在上行。详见 plan 07 §9-49。
   #   ★ 8 是**实测标定**出的拐点（2026-09-27 第十轮，scripts/local_worker_scaling.py；真实
   #     train split、只改本字段）：供给能力 2.51 / 4.42 / **6.33** / 5.75 / 6.28 窗口/s
   #     @ N=3/6/8/10/12 ⇒ **N≥8 起不再上涨**（OMP 取 1 或 2、pin_memory 开或关都不改变）。

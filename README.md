@@ -18,42 +18,34 @@ BeatMorph 从原始音频（WAV/MP3）+ 难度（+ 可选判定线事件轨）�
 
 > 本节读者是**下一个 session 的 agent**，不是历史记录。
 > **每次交接必须整节重写，不得追加**（规则见 [AGENTS.md](AGENTS.md) §6）。
-> 上次交接：**2026-09-27（第十轮）** ｜ 交接人：主会话（[RFC-0034](docs/decisions/RFC-0034-data-supply-throughput.md) §11：GPU 利用率量准 **44.3%**，瓶颈坐实为数据供给，`data.workers 3 → 8` 把它抬到 **75.5%**）
+> 上次交接：**2026-09-27（第十轮）** ｜ 交接人：主会话（GPU 利用率量准 **44.3%** ⇒ 数据供给有**两级**瓶颈：第一级 worker 数已修，第二级 `DataLoader(in_order=True)` 已定位**未修**）
 
 ### 当前状态
 
 自检（默认 CI，无网络 / 无权重 / 无 GPU）：`uv run ruff check . && uv run mypy beatmorph && uv run pytest -m "not slow and not gpu and not e2e"` → **1033 passed**（17 deselected）。
 
-**★ 全量大规模训练正在运行**：`runs/phigros_masked/20260927-100604/`（`max_steps=20000`，交接时 step ≈17300，ETA ≈9 min）。门禁 **36.5 min 全绿**（有界切片 `gates.gate_samples=200`，索引秒级命中）：G1 93552.7 → -7.9 ｜ G2 真实 73.68 vs 打乱 228.75（**3.10×**）｜ G3 -24.66 ≤ 2179.76 ｜ G4 154 帧 ≈ 2.05 s × 75 Hz。训练中 loss 16684 → ~100，K 中位 25，峰值显存 4.87 GiB，`training_health` 退出码 0。
+**★ 训练已跑满一轮，GPU 当前空闲**：`runs/phigros_masked/20260927-100604/`（`max_steps=20000` 跑满，退出码 0，checkpoint 16000/18000/20000 各 153 MiB）。门禁 **36.5 min 全绿**（有界切片 `gates.gate_samples=200`，索引秒级命中）：G1 93552.7 → -7.9 ｜ G2 真实 73.68 vs 打乱 228.75（**3.10×**）｜ G3 -24.66 ≤ 2179.76 ｜ G4 154 帧 ≈ 2.05 s × 75 Hz。K 中位 25，峰值显存 4.87 GiB。
 
-> ⚠️ **本轮（第十轮）改正了上一轮写在这里的一个错误结论**：上一轮把 `perf/data_share` 的**中位 5.0%** 当成「数据侧不是瓶颈」的证据，并据此说「不要再加 worker」。**方向反了。** 该分布极端重尾（中位 5.0% vs **均值 45.0%**），实测 GPU 利用率只有 **44.3%**、其中 **42.7% 的采样完全空转**。解药恰恰是加 worker：`data.workers 3 → 8` 后 GPU 利用率 **75.5%**、空转降到 **9.5%**、步时 mean **0.296 → 0.195 s**。量法与逐项排除见 [RFC-0034 §11](docs/decisions/RFC-0034-data-supply-throughput.md)。
+**★ 本轮唯一主线：数据供给的两级瓶颈（第一级已修，第二级已定位未修）**
 
-**★ 缺陷一：采样器覆盖率（[RFC-0033](docs/decisions/RFC-0033-sampler-coverage-and-epoch.md)，已修）**——本轮修掉的两个缺陷都属「结果看起来正常、实则错误」类。
+| 级 | 是什么 | 实测 | 状态 |
+|---|---|---|---|
+| ① | **训练路径原本根本没有 worker 这个旋钮**——`ManifestBatchSource.batch()` 在训练**主线程同步**取批，`step_time_s` 的起点在它之前 | GPU 利用率 **44.3% → 75.5%**、完全空转 42.7% → **9.5%**、步时 mean 0.278 → **0.199 s**、`data_share` 45.0% → **19.0%** | ✅ 已修：`data.workers: 3 → 8` |
+| ② | **torch 的 `DataLoader` 默认 `in_order=True`**（`_batches_parallel` 没传）：乱序先到的结果只进 `_task_info`，`_try_put_index` **只在按序交付时调一次** ⇒ **队头一条慢窗口让 8 个 worker 集体等索引** | 只改这一个 kwarg：**6.85 → 9.85-10.08 窗口/s**、worker 占用 60-65% → **100%**、交付 gap 415-523 ms → **9.4 ms**；重尾 p50/p90/p99 = 568/2303/**5891** ms | ⚠️ **已定位，未修**（见「下一步 1」）|
 
-旧采样器 `ManifestBatchSource` 只有**一个全局共享游标**，且每步按**当前桶**长度取模；桶长最小为 **1**，撞到就被清零 ⇒ **1000 步后彻底饱和**（用仓库里那份 `_draw` 本身实测）：
+- ⚠️ **上一轮写在这里的结论被本轮推翻两次，两次都是「量具/读法」的错**：① `perf/data_share` 的**中位 5.0%** 被当成「数据侧不是瓶颈」（真实**均值 45.0%**，极端重尾，中位无代表性）；② 本轮先猜「共享内存搬运」是上限，被实验 A 否掉（`ForkingPickler.dumps` 只有 **1.1 KB / 3 ms**，句柄共享零拷贝）。
+- **「改成谱面序」已被实测否掉，不要再为它开 RFC**：`same_set` 对照（同一批 480 窗、payload 差 0.15%、只改顺序）**12.64 vs 11.77 = 1.07×**；其收益几乎全部来自消灭「跨 991 桶的整谱重复解析」（解析 296→81、特征 116→18），**同一桶内部再排序没有额外收益**，而且它把**遮盖构造成本抬高 47%**（274→404）。
+- **逐项排除**（都不是瓶颈）：盘（并发 1587-1759 MiB/s，需求 ≈490）、解压（npz 压缩比仅 1.09×）、`pin_memory`（开关 6.33/6.34）、主进程 CPU（**0.05 核**）、OMP 线程（1 与 2 无差别）、Defender（本就关闭）。
+- **配置里的「N≥8 封顶 / 8 是拐点」是 `in_order` 的产物**：关掉后 W=10/12 到 **11.55 / 12.21** 窗口/s，仍在上行。`configs/phigros_masked.yaml` 已加修正横幅。
 
-| 步数 | 抽到的不同窗口 | 不同谱面 |
-|---|---|---|
-| 1,000 | **993** | **674** |
-| 3,000 / 20,000 | **993（不变）** | **674（不变）** |
+**★ 训练期仪表体检：现有 2 万步参数答不了「模型在学吗」**（全文见 plan 07 §9-46）
 
-⇒ `max_steps` 加到 600,000 也不会见到新数据：「全量训练」实际只在 **0.156% 的窗口 / 10.2% 的谱面**上训练，而 loss 曲线完全正常。修法 = 每桶独立游标 + 桶内种子化洗牌 + **按剩余窗口数加权选桶**；新增 `epoch` / `coverage/windows_seen` / `coverage/charts_seen` 在线标量。**修复后 20,000 步覆盖 6,036/6,614 张谱面（91.3%）**。
-
-- **epoch**（本轮立的口径）：1 epoch = 走遍全库、每窗口恰好一次 = **634,952 步**（本机 ≈**88 h**）⇒ **不作预算单位、只作可观测指标**；20,000 步 ≈ 3.15% window-epoch 但 ≈**91% 谱面覆盖**——**谱面覆盖率才是诚实的进度单位**。
-- **配套**：门禁批改用**有界切片** `gates.gate_samples=200`（否则会加权抽到 K≈128 的大桶 ⇒ 5 min → **36.5 min**）；护栏 `test_sampler_coverage.py`（6）+ `test_gate_samples_bound.py`（4）。
-
-**★ 缺陷二：事件轨求值占每窗口 CPU 52.5%（逐位等价，32.9×，已修）**
-
-剖面显示每个窗口 **52.5%** 的 CPU 花在 `beatmorph/data/tracks.py::line_tracks_at`（1.46e6 次 `track_value`、**3.97e7 次 `Beat.to_beats()`**）。改为 `searchsorted(starts)` + `prefix_max(ends)` 的「列表序首个命中」定位（证明见 `_first_matching_keyframe`），取值仍调用契约层 `numeric_at` ⇒ **数值逐位不变**（判据 `torch.equal`）。每窗口 CPU **1.218 → 0.582 s**。护栏 `tests/unit/data/test_tracks_vectorized.py`（4）。
-
-**★ GPU 空转的修法已落地：[RFC-0034](docs/decisions/RFC-0034-data-supply-throughput.md) S1–S4（计划 / 物化 / 搬运三层分离）**
-
-决策者问「GPU 平均占用率依然不算高，是不是 workers 太小了」。**答案：这个旋钮不存在**——全仓 `num_workers` 只出现在**数据准备**脚本（`fetch_phira.py` / `extract_features.py`），训练侧唯一的 `DataLoader`（`infra/lightning_module.py`）默认 **0**；真实取批 `ManifestBatchSource.batch()` 在训练进程**主线程里同步**完成「选桶 → 取窗口 → 解析谱面 → 建场 → collate」，而 `step_time_s` 的计时起点就在它之前 ⇒ **数据构建时间一直混在步时里**。
-
-实测（训练进行中）：GPU 利用率**均值 35.7% / 中位 5.0%**（**双峰**：要么满载要么空转）、功耗均值 **21.4 W = 115 W 上限的 18.6%**、训练进程占 **6.45/24** 核；步时中位 **0.539 s** 却 **25.8%（478/1850）的步 ≥1 s**。（上一轮把这条长尾归给「∝(K·T)² 的注意力，**不是**数据侧」——**第十轮实测推翻**：`data_time_s` 的**均值**占墙钟 **45.0%**，长尾正是数据等待。）真正的数据侧瓶颈是**每窗口重解析整张谱面**（一张谱平均 96 窗，≈**46%** 的每窗口 CPU；调大 `chart_cache_size` 实测无效，LRU 命中率封顶 18.6%）。**已落地（本轮）**：步时拆成 `data_time_s` + `compute_time_s`（逐行和恒等于步时）+ `perf/data_share`，巡检脚本打印拆分并在**数据占比 ≥50% 时告警**；护栏 `tests/unit/infra/test_step_time_split.py`（4）。
-
-**实跑证据** —— ★ **门禁 + 全量训练**：`runs/phigros_masked/20260927-100604/`（`gates.txt` + 在线标量 `logs/loss_history.jsonl`：`batch_n_lines` / `batch_events` / `epoch` / `windows_seen` / `charts_seen` / `data_time_s` / `compute_time_s`）。
-- `runs/phigros_masked/20260927-085105/`（RFC-0032 语义、采样器未修）：**K 中位 26 / p99 108 / max 123**、峰值 5.67 GiB ⇒ RFC-0032「本线轨 + bf16」在真实全量 K 上成立；其**数据覆盖结论已作废**。第五轮权威门禁 `runs/phigros_masked/20260927-043828/gates.txt`（2305.8 s，全绿）**不受覆盖率缺陷影响**（每次新建 source、只取 1–16 样本）。
+- **loss 是双峰，不是一条曲线**：**43.8% 空窗（中位 6.5e-4）/ 56.2% 非空（中位 96）**，差 5 个数量级；`loss<1e-3` 的行**全部**是空窗；空窗的 loss **恒等于积分项 ∫λdV**。
+- ⇒ **`best.pt` 按训练损失选 = 按「谁抽到最空的窗」选**（实测最小 loss 在 step 6234，`events=0, K=1`）。
+- ⇒ 唯一可比的量（非空批 vs **同批**最优常数场基线）在**已验证可还原的** 16,000 步里**完全平坦**：比值中位 **0.834**、四段改善 16.0/20.7/17.2/**13.1%**、`Spearman(step, 比值) = −0.120` ⇒ 只能说「**明显优于平凡常数场约 16%，但优势没有扩大**」。
+- `grad_norm` 与 loss 的 log-log Pearson **0.996**（只是 loss 的影子）；`optim.grad_clip_norm=1.0` ⇒ **每一步都被裁剪**，AdamW 下近乎安慰剂。
+- **在线材料里没有任何「音频条件是否被用上」的证据**（G2 用同线未遮盖的事件轨就能过，不必用音频）。
+- ⚠️ **分析 `logs/loss_history.jsonl` 前必读**：21,100 行 / 20,000 step，**1100 个 step 有两条副本**（4001-4650 数据不同；**16001-16450** 同数据、权重已分叉）。正确口径 = 按 step 去重 + **整段丢弃 1–4000**（旧采样器，`charts_seen` 一致率仅 0.9%）。
 
 **真实数据（`data/processed/`，不入库）**
 
@@ -62,57 +54,46 @@ BeatMorph 从原始音频（WAV/MP3）+ 难度（+ 可选判定线事件轨）�
 | 谱面 / 音频 | **8551** 张 RPE；42.8 GB / 8084 唯一音频；唯一曲目 6807 |
 | 判定线 / note | 327 170 条判定线；note 1107 万（Tap 55.7% / 背面 3.11%） |
 | **判定线利用率** | **57.8%** 的判定线不承载任何可判定事件（48.9% 零 note + 8.9% 全 `isFake`）⇒ **表演线**（[survey §7.7](docs/knowledges/phira-dataset-survey.md)） |
-| 训练窗口 | train **634,952**；**每谱窗口均值 96 / 中位 90 / max 922** |
-| 训练清单 | `pairs.json`：train 6750 / val 814 / test 890 / 泛化 658（按曲目切分） |
+| 训练窗口 | train **634,952**；每谱窗口均值 96 / 中位 90 / max 922 |
+| 训练清单 | `pairs.json`：train 6750 / val 814 / test 890 / 泛化 658（**按曲目切分**） |
+| **1 epoch** | **634,952 步**；按 0.199 s/步 ≈ **35 h** ⇒ 20,000 步只覆盖 **3.15%** 的窗口（谱面覆盖已 **100%**） |
 
 **四条已通的链**
 
 1. **解码导出 / 训练通路**：λ 场 → `decoder.decode_field` → 合法性后处理 → `io/formats/rpejson` 写出 → 读回；清单 + 特征缓存 → `ChartPairDataset`（窗口化 + 索引缓存 + 行级 LRU）→ `collate_field_batch` → `MaskedFieldModel`（本线轨 + bf16）→ 泊松 NLL → checkpoint（可旋转、可续训）；
-2. **真实数据 / 长跑运维通路**：Phira API → 预筛 + 选择性下载 → RPEJSON 解析 → 三级质检 → 带 provenance 的清单 → 真实 MERT 特征 → 窗口数据集；`--resume`（配置 / 门禁 / data_rev 三项校验）→ 在线标量（TB + `logs/loss_history.jsonl`，含覆盖率与**步时拆分**）→ `scripts/training_health.py --watch 7200`。
+2. **真实数据 / 长跑运维通路**：Phira API → 预筛 + 选择性下载 → RPEJSON 解析 → 三级质检 → 带 provenance 的清单 → 真实 MERT 特征 → 窗口数据集；`--resume`（配置 / 门禁 / data_rev 三项校验）→ 在线标量（TB + `logs/loss_history.jsonl`）→ `scripts/training_health.py --watch 7200`。
+
+**★ 调研报告与一次性探针（⚠️ 都在 `runs/_research/` 与 `scripts/local_*`，两者**均不入库**，清理 `runs/` 就会丢）**
+
+| 路径 | 内容 |
+|---|---|
+| `runs/_research/q3_supply_ceiling.md` | **共享上限定位**（`in_order=True`）全文 + 实验 A 原始表 + 11 条存疑 |
+| `runs/_research/q3_*.md` 之外：`runs/_research/q1_cache_ram.md` | 「扩大缓存换 RAM」的否证：18.12 MB/张、50% 命中率需 **72.5 GiB/worker**、epoch 内命中率上限 **91.67%**、「共享」只对字节成立 |
+| `runs/_research/q2_training_diagnostics.md` | 训练期仪表体检全文（上文那一段）+ 9 条存疑 |
+| `runs/_research/probes/q3_*` / `q2_*` | 探针脚本与原始 JSON |
+| `scripts/local_worker_scaling.py` | worker 数 → 供给标定（**注意：其「N≥8 封顶」是 `in_order` 的产物**）|
+| `scripts/local_order_throughput.py` / `local_order_worker.py` | 取批顺序的吞吐对照（含 monkeypatch 先例）|
+| `scripts/local_build_split.py` | 物化成本的函数级拆分（全谱 91.3% / 逐窗口 9.9%，cProfile 口径偏高）|
+| `scripts/local_gpu_duty.py` / `local_spy_dump.py` | 占空比采样（**必须用 Popen 逐行读**）与主线程快照（**只能用 dump，record 会丢样本**）|
+| ⚠️ `scripts/local_chart_mem.py` | **坏了**：`deep_bytes` 漏了 pydantic `__slots__` ⇒ 读数偏低 **1.85×**（真值 18.12 MB/张）。用前先修 |
 
 **未落地 / 未验证**
 
-- **整谱工作被按窗口重复（当前最大的剩余浪费）**：**每个窗口都把同一张谱重解析、重解压一遍**（一张谱平均 96 个窗口）。第十轮量清了**为什么调缓存没用**：计划层跨 **991 个桶**轮转发牌 ⇒ 一张谱的 96 个窗口相隔约 991 个槽位，`chart_cache_size=8` / `feature_cache_size=2` 的**命中率必然为 0**，每个 epoch 同一张谱被完整重解析 **96 次**（解析 44% + 建场 33% + 解压 12%，单窗口 0.85 s）。**这是 RFC-0033/0034 换来覆盖率所付的代价**，调参数绕不开；削它**会动取批顺序语义**（局部性 vs 每步谱面多样性）⇒ **必须先开 RFC**；
-- **GPU 与 CPU 的重叠已修并验收（RFC-0034 S1–S4 提交 `cc0e166`；§11 提交见 git log）**：步时中位 **0.539 → 0.099 s（5.4×）**；第十轮把利用率量准后 `data.workers 3 → 8`，GPU 利用率 **44.3% → 75.5%**、`data_share` **46.4% → 22.4%**、步时 mean **0.296 → 0.195 s**。跑完全段（steps 16201–20000）后 `data_share` **19.0% < 20%**、GPU 利用率 **75.5% > 50%** ⇒ **两条判据都达标**。尾部仍有 p99 ≈1.7 s（一个 worker 卡一次能拖穿 16 个预取槽）。⚠️ `commit charge` **38.1/40.1 GiB（95%）** ⇒ **N=8 同时是内存上限**；**遮盖退化 `r == 0` 约占 1.6% 的步**（30/1850）：退化为**全事件目标**（非空批、非零梯度——1900 步里 `loss == 0` 的行数为 **0**），即目标在少数步上**漂移**，而 loss 曲线看不出来（plan 07 §9-43）；
-- **装饰线旁路**：决策者已定「用额外旁路、标记为后续扩展，等主路线训练完成后再做」；
-- **评估入口未接线**（形态已裁定 = 独立 `beatmorph-eval` 子命令，`eval/pipeline.py` 已就绪），待训练产出 checkpoint；**val 路径未实现**：`optim.val_every` 空转 ⇒ **TB 里没有 val 曲线**；`best.pt` 只是「训练损失最优」，**不是模型选择依据**；
-- **plan 04 消融臂**（M7 B4 / M9 B3 / M10 B5 / M11）按决策者口径等大规模训练完毕；**B1 的 G3 常数基线口径仍未定**（plan 04 §9-20）；**Lightning 后端真机实跑**未做（`--extra train` 已装齐、env doctor E4 PASS）。
-
-### 下一步
-
-1. ★ **盯本轮全量训练**
-
-   ```bash
-   uv run python scripts/training_health.py --experiment phigros_masked --gpu --watch 7200
-   uv run tensorboard --logdir runs/phigros_masked
-   # 崩溃/中断后原地续跑（不重跑门禁）
-   uv run beatmorph-train --config-name phigros_masked --resume latest --device cuda --skip-env-doctor
-   ```
-
-   核对：**`coverage/charts_seen` 必须持续上升**（平掉 = 采样器又饱和，立刻查 RFC-0033 的护栏，**不要**靠加步数掩盖）；**`perf/data_share` 要看「按和」的占比，不是中位**——该分布极端重尾，中位 5% 与均值 45% 可以同时为真，**第十轮就是被中位骗过一次**（[RFC-0034 §11](docs/decisions/RFC-0034-data-supply-throughput.md)）；停止判据仍是**功耗塌陷 + 步时放大一个量级**（显存贴顶本身**不是**判据，见 [docs/TRAINING.md](docs/TRAINING.md) §7.5）。
-2. ★ **RFC-0035 待裁定：削掉「整谱工作被按窗口重复」**（当前最大的剩余浪费，见「未落地」第 1 条）。
-   判据 0 **已实测**：单窗口成本里 **91.3% 是全谱工作**（`_read_chart_or_skip` 49.1% /
-   `_window_subchart` 23.6% / `load_feature_cache` 15.6% / `line_tracks_at` 3.0%），
-   只有 **9.9%** 真正属于这个窗口 ⇒ 措施成立且富余很大。已拆成三项**独立可回退**的：
-   **M0** note 定位二分（消 23.5%，最便宜、不动契约、不加产物、不动顺序）、
-   **M1** 特征转码为可 mmap 的 `.npy`（消 15.6%，语义逐位不变，磁盘 +105 GB）、
-   **M2** 谱面紧凑包（消 49.1%，约 1 GB）。**M0 单项就能让 8 个 worker 从「不足」变成「刚好够」；
-   只有 M2 才能把 worker 数降回 3 个。** 诚实上界：即使供给无限快，端到端最多再快 **1.29×**
-   （compute mean 0.151 s 是地板）。**裁定前不动手。**
-3. **装饰线旁路（等 1 完成后）**：λ 的线轴改为「承载有效音符的线集合」（train 有效 K 中位 12 / p90 28），装饰线不进模型、不进损失，**导出时原样写回**。
-4. **评估接线**：独立 `beatmorph-eval` 子命令（读 `run_dir` + split → `metrics.json` 的 `eval` 分节）——必须在训练产出 checkpoint 之后。
-5. **val 路径**：实现验证循环与 `val/loss` 标量，并裁定 `best.pt` 的模型选择口径（plan 07 §4.5 / §9-31）；接通后顺带按「掩码目标实际占比」评估 `r == 0` 退化要不要改遮盖策略（plan 07 §9-43）。
-6. **plan 04 消融臂 + B1 的 G3 基线口径**：等大规模训练完毕；口径先裁定。
-7. 若之后补抽特征：`uv run python scripts/extract_features.py`（可续跑）→ `uv run python scripts/fetch_phira.py pairs`（索引缓存会因清单/stat 变化自动重建）。
+- **第 1 层未做**（见「下一步 1」）：`in_order=False` 会把供给从 6.85 抬到 ~10 窗口/s，但**会让「槽位 ↔ 批」错位**，必须先让批自带槽位号；
+- **第 2 层未剖析**：物化侧**遮盖构造 274-404 ms**（占单窗口 ~34%）是本轮唯一看不懂的大头；
+- **val 路径未实现**：`optim.val_every` 空转 ⇒ **TB 里没有 val 曲线**；`best.pt` 只是「训练损失最优」，**不是模型选择依据**（且如上所述，那个损失是噪声）；
+- **评估入口未接线**（形态已裁定 = 独立 `beatmorph-eval` 子命令，`eval/pipeline.py` 已就绪），待训练产出 checkpoint；
+- **装饰线旁路**：决策者已定「用额外旁路、标记为后续扩展」；**plan 04 消融臂**（M7/M9/M10/M11）按决策者口径等大规模训练完毕；**Lightning 后端真机实跑**未做（`--extra train` 已装齐、env doctor E4 PASS）；
+- **内存是硬上限**：`commit charge` 已达 **35.8/37.0 GiB**（页文件上限自己在长到 45 GiB），W=12 时可用物理最低 7.4 GiB ⇒ **`in_order` 修好之前加 worker 只吃内存不涨吞吐**。
 
 ### 未决项（不阻塞 1–7）
 
 | 未决 | 出处 |
 |------|------|
-| **RFC-0034 §11：削整谱重复要怎么动取批顺序**（局部性 vs 每步谱面多样性）；**N 与 BLAS 线程最优点已实测**（供给 N=3/6/8/10/12 = 2.51/4.42/**6.33**/5.75/6.28 窗口/s，OMP=1 与 2 无差别 ⇒ **N≥8 封顶**）；`np.memmap` 旁路计数的异常退出语义未定 | [RFC-0034](docs/decisions/RFC-0034-data-supply-throughput.md) §11.3/§11.5 |
+| ~~取批顺序改成「谱面序」~~ **已实测否掉**（`same_set` 对照 **1.07×**）；~~N 最优点~~ **已实测，但「N≥8 封顶」是 `in_order` 的产物**（关掉后 W=10/12 = 11.55/12.21 仍上行）；**`np.memmap` 旁路计数的异常退出语义**未定 | plan 07 §9-49 / RFC-0034 §11.5 |
 | **`r == 0` 遮盖退化要不要改遮盖策略**（换遮盖单位 / 放宽重掷上限 / 退化窗口降权）；口径已复核为「**≈1.0% 的全部步 / ≈1.8% 的非空批**」，且 **43.8% 的步天然就是 `r==0`**（空窗合法） | plan 07 §9-43 |
 | **训练预算是否从「步数」改成「epoch 数」**；**是否采用谱面分层采样** | RFC-0033 未决定的两件事 / 备选 3 |
-| **「谱内连续取批」vs 每步多样性**（同谱相邻窗口高度相关，可能伤 SGD）；全谱级派生缓存的内存上界未算；46% 里 pydantic 校验占多少未拆开测 | plan 02 §9 第八/九轮存疑 |
+| **「谱面序」对 SGD 的实际影响**：已量出监督信号 **lag-1 自相关 +0.024 → +0.426**、相邻步同谱 0.2% → **94.6%**、空窗连续段最长 17 → 31，但**没有 val 可以把它换算成性能损失**；全谱级派生缓存的内存上界已实测（不可行） | plan 07 §9-47/§9-48/§9-49 |
 | **装饰线是否/如何从 λ 线轴去掉**（含无条件生成缺口）——已定「用旁路、后续扩展」，尚未设计 | RFC-0032 §不决定 / [survey §7.7](docs/knowledges/phira-dataset-survey.md) |
 | **局部层若被证实需要别线的轨**：回归路径 = 共享 K/V（语义不变、显存 ∝K、计算仍 `K²`） | RFC-0032 备选 1 |
 | **val 路径与模型选择口径**（`optim.val_every` 空转；`best.pt` 暂按训练损失） | plan 07 §4.5 / §9-31 |

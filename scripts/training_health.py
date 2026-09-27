@@ -31,6 +31,8 @@ VRAM_WARN_GIB: float = 7.5
 STEP_TIME_DEGRADE_RATIO: float = 1.3
 #: 标量停更告警阈值（秒）：超过它说明进程可能已停或卡住。
 STALE_WARN_S: float = 1800.0
+#: 数据侧占比告警阈值：超过它说明 GPU 大部分时间在**等数据**（瓶颈在数据管道，不在算力）。
+DATA_SHARE_WARN: float = 0.5
 
 
 def _find_run_dir(root: Path, experiment: str, explicit: str | None) -> Path:
@@ -110,8 +112,28 @@ def _gpu_line() -> str:
     return out.splitlines()[0] if out else ""
 
 
+def _split(rows: list[dict[str, float]]) -> tuple[float, float] | None:
+    """（数据侧中位秒数 / 计算侧中位秒数）；没有拆分字段的老曲线返回 None。
+
+    「GPU 利用率不高」有两种互斥成因——数据侧供给不足（GPU 在等）与计算侧本身慢
+    （K 大、步时长）。只看 step_time_s 分不出来，只能靠功耗/利用率反推；拆分字段自
+    plan 07 §9-42 起写入标量。
+    """
+    pairs = [
+        (float(row["data_time_s"]), float(row["compute_time_s"]))
+        for row in rows
+        if row.get("data_time_s") is not None and row.get("compute_time_s") is not None
+    ]
+    if not pairs:
+        return None
+    return (
+        statistics.median([item[0] for item in pairs]),
+        statistics.median([item[1] for item in pairs]),
+    )
+
+
 def _trend(rows: list[dict[str, float]], window: int) -> list[str]:
-    """步时 / 显存 / 存盘的告警清单（空 = 健康）。"""
+    """步时 / 瓶颈侧 / 显存 / 存盘的告警清单（空 = 健康）。"""
     times = [float(row["step_time_s"]) for row in rows if row.get("step_time_s")]
     vram = [float(row["peak_vram_gib"]) for row in rows if row.get("peak_vram_gib")]
     warnings: list[str] = []
@@ -121,6 +143,14 @@ def _trend(rows: list[dict[str, float]], window: int) -> list[str]:
         late = statistics.mean(times[half:])
         if early > 0 and late > early * STEP_TIME_DEGRADE_RATIO:
             warnings.append(f"步时退化 {early:.2f}s -> {late:.2f}s（{late / early:.2f}x）")
+    split = _split(rows)
+    if split is not None and split[0] + split[1] > 0.0:
+        share = split[0] / (split[0] + split[1])
+        if share >= DATA_SHARE_WARN:
+            warnings.append(
+                f"数据侧占比 {100.0 * share:.0f}%：GPU 大部分时间在等数据"
+                "（提吞吐要动数据管道，加 worker 数字或加卡都不解决）"
+            )
     if vram and max(vram) >= VRAM_WARN_GIB:
         warnings.append(
             f"显存贴顶 峰值 {max(vram):.2f} GiB >= {VRAM_WARN_GIB} GiB（会滑进共享内存）"
@@ -161,6 +191,13 @@ def report(  # noqa: PLR0912 - 线性报告；拆成多个函数反而更难照�
     if times:
         summary += f"，步时 中位 {statistics.median(times):.2f}s 最大 {max(times):.2f}s"
     print(summary)
+    split = _split(recent)
+    if split is not None and split[0] + split[1] > 0.0:
+        share = split[0] / (split[0] + split[1])
+        print(
+            f"步时拆分：数据 {split[0]:.2f}s / 计算 {split[1]:.2f}s"
+            f"（数据占比 {100.0 * share:.1f}%，中位）"
+        )
     warnings = _trend(recent, window)
     mean_time = statistics.mean(times) if times else 0.0
     if max_steps is not None and mean_time > 0:

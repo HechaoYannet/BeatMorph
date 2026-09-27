@@ -610,6 +610,16 @@ def _flush_scalars(
         step = int(row["step"])
         writer.add_scalar("train/loss", float(row["loss"]), step)
         writer.add_scalar("train/step_time_s", float(row["step_time_s"]), step)
+        # 步时拆分（plan 07 §9-42）：data_share 连续攀升 = GPU 在等数据，
+        # 这比「吞吐掉下来」早得多地可见。
+        if "data_time_s" in row and "compute_time_s" in row:
+            data_s = float(row["data_time_s"])
+            compute_s = float(row["compute_time_s"])
+            writer.add_scalar("train/data_time_s", data_s, step)
+            writer.add_scalar("train/compute_time_s", compute_s, step)
+            span = data_s + compute_s
+            if span > 0.0:
+                writer.add_scalar("perf/data_share", data_s / span, step)
         writer.add_scalar("train/lr", float(row["lr"]), step)
         grad = float(row["grad_norm"])
         if math.isfinite(grad):
@@ -729,8 +739,9 @@ def train(  # noqa: PLR0915 - 训练循环的语句数靠注释说明更清楚�
     1. 断点续训：resume_from 指向上一次的 step-*.pt；载入前经 load_checkpoint 逐项校验，
        不一致拒绝恢复，优化器状态（AdamW 动量）一并恢复；
     2. 增量落盘：每 run.log_every 步把标量追加进 logs/loss_history.jsonl 并 flush 到 TB
-       （train/loss、train/step_time_s、train/grad_norm、sys/peak_vram_gib）——长跑期间必须能
-       在线看到进度，而不是等训练结束才第一次写盘；
+       （train/loss、train/step_time_s、train/data_time_s、train/compute_time_s、
+       perf/data_share、train/grad_norm、sys/peak_vram_gib、coverage/*）——长跑期间必须能
+       在线看到进度与**瓶颈在哪一侧**，而不是等训练结束才第一次写盘；
     3. 旋转：每次存盘后只保留最新 run.keep_last 个步级 checkpoint（外加 best.pt），先写后删；
     4. 降速可见：步时与峰值显存逐步进 TB/jsonl（判据见 docs/TRAINING.md §7.5）。
 
@@ -775,6 +786,9 @@ def train(  # noqa: PLR0915 - 训练循环的语句数靠注释说明更清楚�
         for step in range(start_step, cfg.optim.max_steps + 1):
             started = time.perf_counter()
             raw = first_batch if step == start_step else source.batch(masked=True)
+            # 数据侧到此为止（选桶 → 取窗口 → 解析谱面 → 建场 → collate）。这一段全在
+            # **主进程单线程关键路径**上，此刻 GPU 是空的（plan 07 §9-42）。
+            drawn = time.perf_counter()
             batch = raw.to(target_device)
             optimizer.zero_grad(set_to_none=True)
             with autocast_context(cfg.optim.precision, target_device):
@@ -789,8 +803,13 @@ def train(  # noqa: PLR0915 - 训练循环的语句数靠注释说明更清楚�
                     torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.optim.grad_clip_norm)
                 )
             optimizer.step()
+            # loss.detach() 取标量会**强制同步**：到这里 GPU 上的搬运/前向/反向/裁剪/更新
+            # 都已落地，因此下面的 compute 才是真计算时间，而不是 kernel 排队时间。
             value = float(loss.detach())
-            elapsed = time.perf_counter() - started
+            computed = time.perf_counter()
+            elapsed = computed - started
+            data_time = drawn - started
+            compute_time = computed - drawn
             history.append((step, value))
             best = min(best, value)
             if step == start_step:
@@ -801,6 +820,11 @@ def train(  # noqa: PLR0915 - 训练循环的语句数靠注释说明更清楚�
                     "step": float(step),
                     "loss": value,
                     "step_time_s": elapsed,
+                    # 步时**拆开**（plan 07 §9-42）：GPU 利用率偏低时，必须能区分
+                    # 「数据侧供给不足（GPU 在等）」与「计算侧本身慢」。混成一个数只能
+                    # 靠功率/利用率反推，而这两者都看不出瓶颈在哪一侧。
+                    "data_time_s": data_time,
+                    "compute_time_s": compute_time,
                     "grad_norm": grad_norm,
                     "peak_vram_gib": _peak_vram_gib(),
                     "lr": float(cfg.optim.lr),

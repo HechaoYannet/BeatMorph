@@ -484,9 +484,35 @@ uv run python scripts/training_health.py --experiment phigros_masked --gpu      
 uv run python scripts/training_health.py --experiment phigros_masked --gpu --watch 7200 # 每 2 小时自动巡检
 ```
 
-它把「有没有在跑 / 有没有降速 / 显存有没有贴顶 / checkpoint 有没有落后 / ETA」压成一行结论：
-退出码 `0` 健康 / `1` 有告警 / `2` 无数据。预警规则：步时后半窗比前半窗慢 1.3× 以上、
-峰值显存 ≥ 7.5 GiB、标量超过 30 分钟没更新、checkpoint 落后于当前步。
+它把「有没有在跑 / 有没有降速 / 显存有没有贴顶 / checkpoint 有没有落后 / ETA /
+**瓶颈在哪一侧**」压成一行结论：退出码 `0` 健康 / `1` 有告警 / `2` 无数据。
+预警规则：步时后半窗比前半窗慢 1.3× 以上、**数据侧占比 ≥ 50%**、峰值显存 ≥ 7.5 GiB、
+标量超过 30 分钟没更新、checkpoint 落后于当前步。
+
+**③b 「GPU 利用率不高」怎么读（2026-09-27 第九轮，[RFC-0034](decisions/RFC-0034-data-supply-throughput.md)）**
+
+先说结论：**训练路径里没有 worker 这个旋钮**。全仓 `num_workers` 只出现在数据准备脚本
+（`scripts/fetch_phira.py` / `extract_features.py`）；训练侧唯一的 `DataLoader` 在
+`beatmorph/infra/lightning_module.py` 且 `num_workers` 默认 **0**。真实取批由
+`ManifestBatchSource.batch()` 在**训练进程主线程里同步**完成，而 `step_time_s` 的计时起点
+就在它之前 ⇒ 数据构建时间**一直混在步时里**。
+
+因此本轮把步时**拆开**，只看拆分，不要靠功耗猜：
+
+| 标量 | 含义 |
+|---|---|
+| `train/data_time_s` | 选桶 → 取窗口 → **解析谱面** → 建场 → collate（**全在主线程**，此刻 GPU 是空的） |
+| `train/compute_time_s` | H2D + 前向 + 反向 + 裁剪 + 优化器（`loss.detach()` 取值即同步点） |
+| `perf/data_share` | `data_time_s / (data_time_s + compute_time_s)` |
+
+判读（实测基线，step 1850/20000，RTX 5070 Laptop 8 GB / 115 W 上限）：
+
+- **双峰是正常的**：GPU 利用率均值 35.7%、**中位 5.0%**、29/60 采样 ≤1%，功耗均值 21.4 W
+  = 上限的 **18.6%**。中位 5% 表示**一半以上时间 GPU 什么都没干**，这与「功耗贴顶」是两回事。
+- **长尾来自 K²，不是数据侧**：K 中位 26 / p90 67 / max 128，单步注意力 ∝(K·T)²；
+  1850 步里 **25.8% 的步 ≥1 s**（p99 4.52 s / max 6.83 s），而中位步只有 0.539 s。
+- **判据**：`data_share` 中位**持续 ≥50%** ⇒ 瓶颈在**数据管道**，加卡/加 batch 都不解决
+  （巡检脚本会直接告警）；`data_share` 低而成长期步时高 ⇒ 那是 K 分布，属正常。
 
 **④ TensorBoard（对接人力监控）**
 
@@ -494,8 +520,9 @@ uv run python scripts/training_health.py --experiment phigros_masked --gpu --wat
 uv run tensorboard --logdir runs/phigros_masked
 ```
 
-标量每 `run.log_every` 步**增量**刷盘（`train/loss` / `train/step_time_s` / `train/grad_norm` /
-`train/lr` / `sys/peak_vram_gib` / `batch_n_lines` / `batch_events`），因此曲线是**在线**的；
+标量每 `run.log_every` 步**增量**刷盘（`train/loss` / `train/step_time_s` /
+**`train/data_time_s` / `train/compute_time_s` / `perf/data_share`** / `train/grad_norm` /
+`train/lr` / `sys/peak_vram_gib` / `batch_n_lines` / `batch_events` / `coverage/*`），因此曲线是**在线**的；
 同样的行同时追加进 `logs/loss_history.jsonl`（权威、可脚本读，TB 缺失也不影响训练）。
 
 **④b 数据覆盖率（必看，2026-09-27 第八轮新增；[RFC-0033](decisions/RFC-0033-sampler-coverage-and-epoch.md)）**

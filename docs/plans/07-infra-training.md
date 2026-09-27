@@ -606,8 +606,9 @@ run_gates(*, step_fns: GateStepFns, out_path: Path, cfg) -> list[GateResult]
     每窗口 **1.218 → 0.582 s**，函数调用数 7.97e7 → 2.22e7；
     等值判据是 `torch.equal`（**不是** `allclose`），护栏
     `tests/unit/data/test_tracks_vectorized.py`（4 项：空隙 / 重叠 / 贝塞尔 / 非默认切割 /
-    多层 / 端点 / 空轨 / 通道序）。**剩下的大头变成谱面解析（46%）**——那是下一轮的结构性优化
-    （每窗口重解析同一张谱；见 §9-38 的 chart LRU 结论）。
+    多层 / 端点 / 空轨 / 通道序）。**剩下的大头变成谱面解析（46%）**——它的量化、瓶颈归属
+    与修法已立案：见 §9-42 与 [RFC-0034](../decisions/RFC-0034-data-supply-throughput.md)
+    （每窗口重解析同一张谱；§9-38 的 chart LRU 结论说明「调大缓存」不是解法）。
 
 40. **本轮默认 CI 口径**：`ruff` / `mypy --strict` 干净；`pytest -m "not slow and not gpu and not e2e"`
     **1005 passed**（17 deselected）。新增护栏 10 项（采样器 6 + 事件轨 4）。
@@ -632,5 +633,46 @@ run_gates(*, step_fns: GateStepFns, out_path: Path, cfg) -> list[GateResult]
     - **判据修正**：门禁期间 `memory.used ≈ 7.7 GiB / 8.15 GiB` 在当前 batch 口径下是**常态**，
       **不是**共享内存回退的特征（util 99-100%、功耗 47-92 W、连续 26 min 无 OOM）。
       **先看逐门禁日志，再看功耗**；不要仅凭显存贴顶就判卡死。
+
+42. **GPU 中位利用率 5% 的真相：训练路径里没有 worker（2026-09-27 第九轮）**：
+    决策者问「GPU 平均占用率依然不算高，是不是 workers 太小了」。实测（**训练进行中**，
+    step 1850/20000，RTX 5070 Laptop 8 GB / 功耗上限 115 W）：GPU 利用率（1 Hz × 60 采样）
+    **均值 35.7% / 中位 5.0% / p90 100% / 其中 29 个采样 ≤1%** —— **双峰**：要么满载、要么空转，
+    中位 5% 说明一半以上时间 GPU 什么都没干；功耗 **均值 21.4 W = 上限的 18.6%**（峰值 78.3 W）；
+    训练进程占 **6.45 / 24** 逻辑核（峰值 14.89），系统 CPU 均值 30.1%；显存 7862/8151 MiB。
+    步时（1850 步）：中位 **0.539 s** / 均值 0.871 / p90 1.721 / p99 4.52 / max 6.83，
+    **25.8%（478/1850）的步 ≥1 s**；K 中位 26 / p90 67 / max 128 ⇒ 长尾来自 ∝(K·T)² 的注意力。
+
+    - **「workers」这个旋钮当前不存在**：全仓 `num_workers` 只出现在**数据准备**脚本
+      （`scripts/fetch_phira.py` / `scripts/extract_features.py`）；训练侧唯一的 torch
+      `DataLoader` 在 `beatmorph/infra/lightning_module.py`，且 `batch_size=None`、
+      `num_workers` 取默认 **0**。真实训练走 `ManifestBatchSource.batch()`，它在**训练进程
+      主线程里同步**完成「选桶 → 取窗口 → 解析谱面 → 建场 → collate」，而 `step_time_s`
+      的计时起点就在这一句**之前** ⇒ 数据构建时间**本来就混在步时里**。
+    - 根因是**每窗口重解析整张谱面**（一张谱平均 **96** 个窗口）：§9-38 修掉事件轨后它就是
+      每窗口 CPU 的第一大项（**≈46%**）。把 `chart_cache_size` 调大**已实测无效**
+      （同谱复用间隔中位 **991 步**，LRU 命中率封顶 18.6%）；而直接开 `num_workers`
+      会让**每进程各持一份 LRU 缓存**，并把**覆盖率记账**变成各副本 —— 正是 RFC-0033
+      刚修掉的那类静默失效（worker 只并行 `__getitem__`，**不并行「选桶」这个串行决策点**）。
+    - **已落地（本轮）**：`step_time_s` 拆成 `data_time_s` + `compute_time_s`
+      （逐行和**恒等于**步时），TB 增 `train/data_time_s` / `train/compute_time_s` /
+      **`perf/data_share`**；`scripts/training_health.py` 打印拆分并在
+      **数据占比 ≥50% 时告警**（老曲线无这两个字段则不误报）。护栏
+      `tests/unit/infra/test_step_time_split.py`（4 项）。**动机**：§9-41 的误判之所以发生，
+      正是因为一个数把「GPU 在等数据」与「计算本身慢」混在了一起，只能靠功耗反推。
+    - **架构决策待裁定**：[RFC-0034](../decisions/RFC-0034-data-supply-throughput.md)
+      —— A（谱面解析一次 + 窗口切片复用；预计每窗口 0.582 → ≈0.31 s、2 万步墙钟 ≈4.9 h → ≈3 h，
+      **不引入并发 ⇒ 可复现性零风险**）／ B（A 之后再评估的**有界**预取；无界预取在本项目
+      已出过一次挂死事故，教训见 plan 02 §9）。
+
+43. **遮盖退化（r==0）的在线可见性（2026-09-27 第九轮，本轮顺带发现，未修）**：
+    本轮训练日志 47 行里有 **30 行**是
+    `chart_id=… 窗口 N：8 次重掷种子后仍无法让事件可见（r<1），退化为无遮盖样本（r=0；losses 的 r==0 契约分支）`，
+    即 ≈**1.6%**（30/1850 步）的窗口落到 `r == 0`。按 losses 契约 `r == 0` ⇒
+    `masked_poisson_loss == full_poisson_loss`，**不是空批、也不是零梯度**（已核对：1900 步里
+    `loss == 0.0` 的行数为 **0**）。但这些步**没有在练掩码补全目标**，而是在练全事件目标
+    ⇒ 目标在 ~1.6% 的步上**漂移**，而 loss 曲线看不出来（两者量纲接近）。
+    登记为**未决项**：待 val 路径接通后，按「掩码目标实际占比」评估是否要改遮盖策略
+    （例如换遮盖单位 / 放宽重掷上限 / 把退化窗口在采样时降权），而不是继续静默兜底。
 
 [POSTMORTEM-2026-08-05]: ../POSTMORTEM-2026-08-05-frame-rate-misalignment.md

@@ -10,7 +10,7 @@
 
 BeatMorph 从原始音频（WAV/MP3）+ 难度（+ 可选判定线事件轨）出发，端到端生成高质量、可玩的 **Phigros 谱面（RPEJSON）**。模型从社区海量自制谱自主学习创作规律，无需人工标注（标注成本 ≈ 0）。
 
-> 📌 **状态**：Pre-Alpha。范式（[RFC-0029](docs/decisions/RFC-0029-phigros-continuous-chart-generation.md)）、奠基文档（v3.0）、事实库已就绪；**核心契约 / 数据流水线 / 强度场 / 生成主干 / 解码与导出 / 训练基础设施六层已落地并通过默认 CI**（**1015 项测试**），**真实 Phira 全库已拉到本地（8551 张 RPE 谱面 + 42.8 GB 音频，不入库）**，特征提取 **8005/8084**、训练窗口 **634 952**（索引有落盘缓存）；**合成门禁与真实切片门禁均全绿**（见下方交接件）；**显存墙已解除（[RFC-0032](docs/decisions/RFC-0032-local-layer-own-line-tracks.md)），全量大规模训练正在运行（前置修复：[RFC-0033](docs/decisions/RFC-0033-sampler-coverage-and-epoch.md) 采样器覆盖率 + [RFC-0034](docs/decisions/RFC-0034-data-supply-throughput.md) 数据供给吞吐诊断，两者都属「结果看起来正常却是错的」类缺陷），消融臂与评估接线待建**。
+> 📌 **状态**：Pre-Alpha。范式（[RFC-0029](docs/decisions/RFC-0029-phigros-continuous-chart-generation.md)）、奠基文档（v3.0）、事实库已就绪；**核心契约 / 数据流水线 / 强度场 / 生成主干 / 解码与导出 / 训练基础设施六层已落地并通过默认 CI**（**1017 项测试**），**真实 Phira 全库已拉到本地（8551 张 RPE 谱面 + 42.8 GB 音频，不入库）**，特征提取 **8005/8084**、训练窗口 **634 952**（索引有落盘缓存）；**合成门禁与真实切片门禁均全绿**（见下方交接件）；**显存墙已解除（[RFC-0032](docs/decisions/RFC-0032-local-layer-own-line-tracks.md)），全量大规模训练正在运行（前置修复：[RFC-0033](docs/decisions/RFC-0033-sampler-coverage-and-epoch.md) 采样器覆盖率 + [RFC-0034](docs/decisions/RFC-0034-data-supply-throughput.md) 数据供给吞吐诊断，两者都属「结果看起来正常却是错的」类缺陷），消融臂与评估接线待建**。
 
 ---
 
@@ -44,7 +44,7 @@ BeatMorph 从原始音频（WAV/MP3）+ 难度（+ 可选判定线事件轨）�
 
 剖面显示每个窗口 **52.5%** 的 CPU 花在 `beatmorph/data/tracks.py::line_tracks_at`（1.46e6 次 `track_value`、**3.97e7 次 `Beat.to_beats()`**）。改为 `searchsorted(starts)` + `prefix_max(ends)` 的「列表序首个命中」定位（证明见 `_first_matching_keyframe`），取值仍调用契约层 `numeric_at` ⇒ **数值逐位不变**（判据 `torch.equal`）。每窗口 CPU **1.218 → 0.582 s**。护栏 `tests/unit/data/test_tracks_vectorized.py`（4）。
 
-**★ 本轮新查明的 GPU 空转真相：训练路径里根本没有 worker（[RFC-0034](docs/decisions/RFC-0034-data-supply-throughput.md)，提案，A / A+B 待裁定）**
+**★ 本轮新查明的 GPU 空转真相：[RFC-0034](docs/decisions/RFC-0034-data-supply-throughput.md) v2 分层重构（提案，待裁定）**
 
 决策者问「GPU 平均占用率依然不算高，是不是 workers 太小了」。**答案：这个旋钮不存在**——全仓 `num_workers` 只出现在**数据准备**脚本（`fetch_phira.py` / `extract_features.py`），训练侧唯一的 `DataLoader`（`infra/lightning_module.py`）默认 **0**；真实取批 `ManifestBatchSource.batch()` 在训练进程**主线程里同步**完成「选桶 → 取窗口 → 解析谱面 → 建场 → collate」，而 `step_time_s` 的计时起点就在它之前 ⇒ **数据构建时间一直混在步时里**。
 
@@ -70,8 +70,8 @@ BeatMorph 从原始音频（WAV/MP3）+ 难度（+ 可选判定线事件轨）�
 
 **未落地 / 未验证**
 
-- **谱面解析仍占每窗口 CPU 46%**：**每个窗口都把同一张谱重解析一遍**（一张谱平均 96 个窗口）。调大 `data.chart_cache_size` 无效（LRU 命中率上限：cap=8 → 18.6%、cap=32 → 26.1%）⇒ **修法已立案待裁定**（RFC-0034 **A**：谱面解析一次 + 窗口切片复用；预计每窗口 0.582 → ≈0.31 s、2 万步墙钟 ≈4.9 h → ≈3 h，**不引入并发 ⇒ 可复现性零风险**）；
-- **GPU 与 CPU 仍不重叠**：没有预取，取批永远在关键路径上（RFC-0034 **B** 只允许**有界**预取——无界 `--pipeline` 已出过一次挂死事故，plan 02 §9）；**遮盖退化 `r == 0` 约占 1.6% 的步**（30/1850）：退化为**全事件目标**（非空批、非零梯度——1900 步里 `loss == 0` 的行数为 **0**），即目标在少数步上**漂移**，而 loss 曲线看不出来（plan 07 §9-43）；
+- **谱面解析仍占每窗口 CPU 46%**：**每个窗口都把同一张谱重解析一遍**（一张谱平均 96 个窗口）。调大 `data.chart_cache_size` 无效（LRU 命中率上限：cap=8 → 18.6%、cap=32 → 26.1%）⇒ **修法已立案**（RFC-0034 v2：桶内按谱聚簇后**这一项自然消失**——不是新增缓存，是取批顺序的副产物）；
+- **GPU 与 CPU 零重叠**：取批在训练主线程**同步**执行，GPU 一半以上墙钟在等数据 —— 这正是 RFC-0034 v2 要修的设计失败（顺序/覆盖率进计划层 ⇒ 才能用 `num_workers` 且不破坏可复现性）；**遮盖退化 `r == 0` 约占 1.6% 的步**（30/1850）：退化为**全事件目标**（非空批、非零梯度——1900 步里 `loss == 0` 的行数为 **0**），即目标在少数步上**漂移**，而 loss 曲线看不出来（plan 07 §9-43）；
 - **装饰线旁路**：决策者已定「用额外旁路、标记为后续扩展，等主路线训练完成后再做」；
 - **评估入口未接线**（形态已裁定 = 独立 `beatmorph-eval` 子命令，`eval/pipeline.py` 已就绪），待训练产出 checkpoint；**val 路径未实现**：`optim.val_every` 空转 ⇒ **TB 里没有 val 曲线**；`best.pt` 只是「训练损失最优」，**不是模型选择依据**；
 - **plan 04 消融臂**（M7 B4 / M9 B3 / M10 B5 / M11）按决策者口径等大规模训练完毕；**B1 的 G3 常数基线口径仍未定**（plan 04 §9-20）；**Lightning 后端真机实跑**未做（`--extra train` 已装齐、env doctor E4 PASS）。
@@ -88,7 +88,7 @@ BeatMorph 从原始音频（WAV/MP3）+ 难度（+ 可选判定线事件轨）�
    ```
 
    核对：**`coverage/charts_seen` 必须持续上升**（平掉 = 采样器又饱和，立刻查 RFC-0033 的护栏，**不要**靠加步数掩盖）；**`perf/data_share` 中位 ≥50% ⇒ 瓶颈在数据管道**（巡检会告警），低而成长期步时高 = K 分布、属正常；停止判据仍是**功耗塌陷 + 步时放大一个量级**（显存贴顶本身**不是**判据，见 [docs/TRAINING.md](docs/TRAINING.md) §7.5）。
-2. ★ **裁定并实现 [RFC-0034](docs/decisions/RFC-0034-data-supply-throughput.md) 的 A / A+B**（本轮的下一步）：**A** = 谱面解析一次 + 窗口切片复用（预计每窗口 0.582 → ≈0.31 s、2 万步墙钟 ≈4.9 h → ≈3 h；**无并发 ⇒ 可复现性零风险**）。**用已落地的步时拆分验证收益**（对比 `data_time_s` 中位）；**B**（有界预取）只在 A 之后仍有 >30% 步时被数据侧占据时才做。
+2. ★ **裁定并实现 [RFC-0034](docs/decisions/RFC-0034-data-supply-throughput.md) v2（计划 / 物化 / 搬运三层分离）**：**S1 计划层**（`plan_epoch` + `PlanBatchSampler` + `coverage_at` 纯函数）→ **S2** worker 安全化 → **S3** DataLoader 路径（`data.workers` 进 `RESUME_IGNORED_KEYS`）→ **S4** 桶内按谱聚簇 → **S5** 巡检。**验收**：旧新逐位等价、`data.workers` 0/2/4 同 index 逐位一致、`perf/data_share` 中位 <20%、GPU 利用率中位 >50%、覆盖率同 step 一致、峰值显存差 ≤50 MiB、2 万步 ≤2.0 h。**固定成本 0 次门禁、0 次索引重建**（RFC §5 已论证，须由测试锁定）。
 3. **装饰线旁路（等 1 完成后）**：λ 的线轴改为「承载有效音符的线集合」（train 有效 K 中位 12 / p90 28），装饰线不进模型、不进损失，**导出时原样写回**。
 4. **评估接线**：独立 `beatmorph-eval` 子命令（读 `run_dir` + split → `metrics.json` 的 `eval` 分节）——必须在训练产出 checkpoint 之后。
 5. **val 路径**：实现验证循环与 `val/loss` 标量，并裁定 `best.pt` 的模型选择口径（plan 07 §4.5 / §9-31）；接通后顺带按「掩码目标实际占比」评估 `r == 0` 退化要不要改遮盖策略（plan 07 §9-43）。
@@ -99,7 +99,7 @@ BeatMorph 从原始音频（WAV/MP3）+ 难度（+ 可选判定线事件轨）�
 
 | 未决 | 出处 |
 |------|------|
-| **RFC-0034 的 A / A+B 裁定**；B 若做，「有界预取下覆盖率账目一致性」如何设计 | [RFC-0034](docs/decisions/RFC-0034-data-supply-throughput.md) |
+| **RFC-0034 v2 裁定**；其中三项未实测：桶内聚簇对每步多样性的影响、N × BLAS 线程最优点、`np.memmap` 旁路计数的异常退出语义 | [RFC-0034](docs/decisions/RFC-0034-data-supply-throughput.md) §9 |
 | **`r == 0` 遮盖退化（≈1.6% 的步）要不要改遮盖策略**（换遮盖单位 / 放宽重掷上限 / 退化窗口降权） | plan 07 §9-43 |
 | **训练预算是否从「步数」改成「epoch 数」**；**是否采用谱面分层采样** | RFC-0033 未决定的两件事 / 备选 3 |
 | **「谱内连续取批」vs 每步多样性**（同谱相邻窗口高度相关，可能伤 SGD）；全谱级派生缓存的内存上界未算；46% 里 pydantic 校验占多少未拆开测 | plan 02 §9 第八/九轮存疑 |

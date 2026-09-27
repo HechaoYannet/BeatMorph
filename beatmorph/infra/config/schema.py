@@ -388,6 +388,13 @@ def validate_config(cfg: TrainConfig) -> list[str]:  # noqa: PLR0912, PLR0915 - 
         )
 
     optim = cfg.optim
+    #: 支持的精度取值（Lightning 的命名习惯）：fp32 家族不启用 autocast，bf16 家族在 CUDA 上启用。
+    allowed_precision = {"32", "32-true", "fp32", "bf16", "bf16-mixed"}
+    if str(optim.precision) not in allowed_precision:
+        problems.append(
+            f"optim.precision={optim.precision!r} 不在 {sorted(allowed_precision)} 中"
+            "（fp16 需要 GradScaler，本训练循环不支持：静默按 fp32 跑比拒掉更危险）",
+        )
     if optim.lr <= 0.0:
         problems.append(f"optim.lr 必须为正，得到 {optim.lr}")
     if optim.batch_size < 1:

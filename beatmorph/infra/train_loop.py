@@ -25,6 +25,7 @@ import json
 import math
 import time
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
@@ -54,6 +55,8 @@ __all__ = [
     "BatchSource",
     "ManifestBatchSource",
     "TrainReport",
+    "autocast_context",
+    "autocast_dtype",
     "betas_of",
     "build_gate_inputs",
     "constant_baseline_for",
@@ -167,6 +170,36 @@ def set_initial_head_bias(model: MaskedFieldModel, value: float) -> None:
         head.bias.fill_(float(value))
 
 
+def autocast_dtype(precision: str, device: torch.device) -> torch.dtype | None:
+    """精度字符串 -> autocast dtype；`None` = 不启用（CPU，或非 bf16 精度）。
+
+    抽成纯函数是为了能在**没有 GPU 的默认 CI** 里断言这个决策（见
+    `tests/unit/infra/test_precision.py`）——否则这条路径只有真机才走到。
+    """
+    if device.type != "cuda" or str(precision) not in {"bf16", "bf16-mixed"}:
+        return None
+    return torch.bfloat16
+
+
+def autocast_context(precision: str, device: torch.device) -> AbstractContextManager[None]:
+    """按 `optim.precision` 给出 autocast 上下文（plan 07 §9-36）。
+
+    **为什么需要**：`optim.precision` 此前**只被声明、没有人读**——训练一直跑 fp32。
+    8 GB 卡上实测（K=32、`t_window=192`）：bf16 把峰值显存 5.05 → 2.92 GiB（0.58x）、
+    步时 0.550 → 0.269 s（0.49x），K 上限从 ≈31 抬到 ≈42-47。
+
+    **只在 CUDA 上启用**：CPU 路径保持 fp32，于是默认 CI（CPU）的数值逐位不变。
+    `fp16` 不在支持范围内——它需要 GradScaler，静默按 fp32 跑比假装支持更危险，
+    因此 `validate_config` 会直接拒掉（fail-closed）。
+
+    ⚠️ bf16 的**首步**要 1.4-3.0 s（一次性内核编译 / autotune），别把首步当稳态。
+    """
+    dtype = autocast_dtype(precision, device)
+    if dtype is None:
+        return nullcontext()
+    return torch.autocast(device_type="cuda", dtype=dtype)
+
+
 def make_step_fn(
     model: nn.Module,
     batch: FieldBatch,
@@ -174,6 +207,7 @@ def make_step_fn(
     *,
     grad_clip_norm: float | None = None,
     chunks: int = 1,
+    precision: str = "fp32",
 ) -> StepFn:
     """把「前向 + 反传 + 一步优化」包成 `sanity.StepFn`（返回标量 loss）。
 
@@ -199,12 +233,14 @@ def make_step_fn(
         chunks: 前向分段数（<= 1 或 >= B 时退化为一段）。
     """
     parts = batch.split_samples(chunks)
+    amp = autocast_context(precision, batch.line_mask.device)
 
     def step() -> float:
         optimizer.zero_grad(set_to_none=True)
         total = 0.0
         for part in parts:
-            output = model(part)
+            with amp:
+                output = model(part)
             loss = output.loss
             if loss is None:  # pragma: no cover - forward(compute_loss=True) 保证非 None
                 raise RuntimeError("前向没有返回 loss：门禁需要 compute_loss=True")
@@ -326,6 +362,7 @@ def build_gate_inputs(
         optimizer_for(g3_model),
         grad_clip_norm=cfg.optim.grad_clip_norm,
         chunks=g2_chunks,
+        precision=cfg.optim.precision,
     )
     model_loss = g3_step()
     for _ in range(max(1, gates.shuffle_steps) - 1):
@@ -354,7 +391,11 @@ def build_gate_inputs(
 
     inputs = GateInputs(
         step_fn_real=make_step_fn(
-            g1_model, g1_batch, optimizer_for(g1_model), grad_clip_norm=cfg.optim.grad_clip_norm
+            g1_model,
+            g1_batch,
+            optimizer_for(g1_model),
+            grad_clip_norm=cfg.optim.grad_clip_norm,
+            precision=cfg.optim.precision,
         ),
         step_fn_g2_real=make_step_fn(
             g2_real_model,
@@ -362,6 +403,7 @@ def build_gate_inputs(
             optimizer_for(g2_real_model),
             grad_clip_norm=cfg.optim.grad_clip_norm,
             chunks=g2_chunks,
+            precision=cfg.optim.precision,
         ),
         step_fn_g2_shuffled=make_step_fn(
             shuffled_model,
@@ -369,6 +411,7 @@ def build_gate_inputs(
             optimizer_for(shuffled_model),
             grad_clip_norm=cfg.optim.grad_clip_norm,
             chunks=g2_chunks,
+            precision=cfg.optim.precision,
         ),
         model_loss=float(model_loss),
         baseline_loss=float(baseline_loss),
@@ -679,7 +722,8 @@ def train(  # noqa: PLR0915 - 训练循环的语句数靠注释说明更清楚�
             raw = first_batch if step == start_step else source.batch(masked=True)
             batch = raw.to(target_device)
             optimizer.zero_grad(set_to_none=True)
-            output = model(batch)
+            with autocast_context(cfg.optim.precision, target_device):
+                output = model(batch)
             loss = output.loss
             if loss is None:  # pragma: no cover - compute_loss 默认 True
                 raise RuntimeError("训练前向没有返回 loss")
@@ -704,6 +748,10 @@ def train(  # noqa: PLR0915 - 训练循环的语句数靠注释说明更清楚�
                     "grad_norm": grad_norm,
                     "peak_vram_gib": _peak_vram_gib(),
                     "lr": float(cfg.optim.lr),
+                    # 批的 K 与事件数：显存墙与「空批」两个老问题都靠它在线可见
+                    # （plan 07 §9-23 / §9-35；步时 ∝ K²，K 必须和 loss 一起看）。
+                    "batch_n_lines": float(batch.n_lines()),
+                    "batch_events": event_total(batch),
                 }
             )
             if step % log_every == 0 or step == cfg.optim.max_steps:

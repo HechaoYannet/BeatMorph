@@ -9,8 +9,9 @@
   -> cross-attention 的 K/V。
 - **Decoder**：掩码补全。输入 = 可见场 + **遮盖通道**（硬要求，RFC-0029 §3.3-1）+
   位置编码 + line embedding；**多线共享权重**，K 不进任何输出层形状；
-  局部层是**滑动窗口自注意力**（窗口以 tau 格为单位），每 `global_period` 层插一个
-  **全局层**（层内同时看到全部 K 条线的场，RFC-0029 §2.4-4）。
+  局部层是**滑动窗口自注意力**（窗口以 tau 格为单位），且事件轨条件**只注入本线**
+  （RFC-0032：局部层只看自己那条线的运动）；每 `global_period` 层插一个**全局层**
+  （层内同时看到全部 K 条线的场与轨，RFC-0029 §2.4-4）——**跨线只发生在全局层**。
 - **输出头**：默认 `factorized`（lambda = Lambda' * p，p 在 (X, S, C) 上归一化），
   于是 `int lambda` 精确、两条积分路径的一致性成为可断言条件（plan 03 §4.6）；
   `direct`（softplus 直接出 lambda）保留给消融与调试。
@@ -437,6 +438,18 @@ class MaskedFieldModel(nn.Module):
         audio = self.encode_audio(batch)
         tracks = self.encode_tracks(batch)
         line_mask = batch.line_mask_bool()
+        # 局部层的**本线轨**（RFC-0032）：encode_tracks 把 K 条线拍平成一条
+        # `K * T_line` 的序列——它的**序列维里已经含判定线轴**，因此**不能**再按线
+        # repeat_interleave：那会让每条线的 token 都 attend 全部 K 条线的事件轨，
+        # 代价是 `K^2 * T * T_line` 的 K/V（实测占 K=20 时 2.4x 的峰值显存，且显存随
+        # K 二次增长；换成 SDPA 的 mem_efficient 核只省 8%，因为重复发生在注意力之前）。
+        # reshape 之后每条线只拿到自己的 `T_line` 个轨 token，局部层的显存回到
+        # O(K * T * T_line)。**跨线信息仍由全局层提供**（下面的 else 分支用未拆分的
+        # `tracks` 作 K/V，正是 RFC-0029 §2.4-4 说的「全局层同时看到全部 K 条线」）。
+        t_line = int(tracks.shape[1]) // n_lines
+        own_tracks = tracks.reshape(batch_size, n_lines, t_line, d_model).reshape(
+            batch_size * n_lines, t_line, d_model
+        )
         for module in self.layers:
             # ModuleList 的元素静态类型是 Module；narrow 之后才能直接调用（mypy strict）
             assert isinstance(module, DecoderLayer)
@@ -446,7 +459,7 @@ class MaskedFieldModel(nn.Module):
                     flat,
                     cond.repeat_interleave(n_lines, dim=0),
                     audio.repeat_interleave(n_lines, dim=0),
-                    tracks.repeat_interleave(n_lines, dim=0),
+                    own_tracks,
                     attn_mask=self.band_mask(t_bins, device=flat.device, dtype=flat.dtype),
                 )
                 tokens = local.reshape(batch_size, n_lines, t_bins, d_model)

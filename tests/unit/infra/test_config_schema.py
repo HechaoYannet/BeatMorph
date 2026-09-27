@@ -169,3 +169,11 @@ def test_repository_configs_are_valid(tmp_path: Path) -> None:
     for name in ("smoke", "phigros_masked"):
         cfg = load_config(config_name=name, directory=root / "configs")
         assert cfg.run.experiment
+
+
+def test_unsupported_precision_is_rejected() -> None:
+    """优化精度必须是本训练循环**真的支持**的取值（fp16 需要 GradScaler，故 fail-closed）。"""
+    with pytest.raises(ConfigError, match=r"optim\.precision"):
+        config_from_mapping(BASE, overrides=["optim.precision=16-mixed"])
+    cfg = config_from_mapping(BASE, overrides=["optim.precision=fp32"])
+    assert cfg.optim.precision == "fp32"

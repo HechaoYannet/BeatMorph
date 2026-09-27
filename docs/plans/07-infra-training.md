@@ -531,3 +531,20 @@ run_gates(*, step_fns: GateStepFns, out_path: Path, cfg) -> list[GateResult]
     **⇒ 打开一个配置里早已声明、且不需要任何架构改动的开关，就能把 K 上限抬约一半、单步砍半。**
     是否打开属 infra-agent 的配置口径修正（不动契约），但**上线前必须重跑 G1-G4 门禁**
     （bf16 改数值路径，G1-G4 是唯一能证明它没改坏东西的证据）。
+37. **本线轨落地 + bf16 接线 + 真实数据实跑（2026-09-27 第七轮；RFC-0032 已采纳）**：
+    ① `MaskedFieldModel.decode` 的局部层改用**本线轨**（reshape 而非 `repeat_interleave`），
+    跨线仍只在全局层 —— 显存 ∝`K²` → ∝`K`（K=20: 2.46→1.31、K=32: 5.05→1.86、K=64: 3.41、
+    配 bf16 时 K=128 → 5.10 GiB）；
+    ② `optim.precision` **接上 autocast**（新增 `autocast_context` / `autocast_dtype`：只在 CUDA 且
+    bf16 家族时启用；CPU 保持 fp32 ⇒ 默认 CI 数值不变；fp16 在 `validate_config` 里被拒）。
+    **门禁的 `make_step_fn` 与 `train()` 用同一个上下文**，否则门禁与训练跑的不是同一套数值；
+    ③ `train()` 的在线标量新增 **`batch_n_lines` / `batch_events`** —— K 与「空批」两个老问题都能在线看见；
+    ④ **护栏**：`tests/unit/generation/test_local_own_line_tracks.py`（3 项）直接钉住 cross_tracks 的
+    K/V 长度（局部 = `T_line`、全局 = `K*T_line`）——改回旧写法**不报错**，只会让显存重新变成 O(K²)。
+
+    **实跑验证（真实数据 + CUDA，非合成）**：`data.max_samples=8 optim.max_steps=24` ⇒ 24 步内
+    **4 次命中 K=100**、峰值显存 **4.00 GiB**、步时 1.3–2.2 s（K=7 → 0.16 s、K=24 → 0.33 s、K=48 → 0.60 s），
+    loss 4758.6 → 353.2。**旧写法在 K=100 需要约 40 GiB**。证据
+    `runs/ownline_check/20260927-082835/logs/loss_history.jsonl`。默认 CI **1009 passed**、ruff / mypy 干净。
+    **遗留**：`--gates` 需在真机重跑一轮（随启动顺带，不额外占 GPU）；装饰线旁路按决策者口径
+    登记为**后续扩展**（plan 04 §9-24）。

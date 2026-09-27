@@ -242,6 +242,20 @@ class SmokeBatchSource:
             f"T={grid.t_bins}，X={grid.x_bins}，时长={grid.total_seconds:.3f}s，seed={self.seed}"
         )
 
+    def coverage(self) -> dict[str, float]:
+        """合成来源**没有有限数据集**，因此没有 epoch/覆盖率可言。
+
+        显式返回 total=0（而不是伪造一个 1.0 的覆盖率）：训练循环据此跳过 coverage 标量，
+        让「不知道」保持为不知道——合成冒烟本来也不能证明真实采样器走过数据（plan 07 §9-38）。
+        """
+        return {
+            "epoch": 0.0,
+            "windows_seen": 0.0,
+            "windows_total": 0.0,
+            "charts_seen": 0.0,
+            "charts_total": 0.0,
+        }
+
 
 def shuffled_counts(counts: torch.Tensor, *, seed: int) -> torch.Tensor:
     """把目标按格整体置换（事件数不变；输入与目标的对应关系被破坏）。"""

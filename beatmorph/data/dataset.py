@@ -938,6 +938,21 @@ class ChartPairDataset(torch.utils.data.Dataset[PairSample]):
         entry = plan.entries[index]
         return (self.config.x_bins, self.config.t_window, entry.bpm_eff)
 
+    def window_row_index(self, index: int) -> int:
+        """第 `index` 个窗口所属的**split 内行下标**（覆盖率记账用；**不解析谱面**）。
+
+        `ManifestBatchSource` 需要在线回答「这个 run 见过多少张谱面」，而窗口 -> 行的映射
+        只在索引计划里、且必须 O(1) 拿到（每一步都会调用）。此前调用方只能去读私有
+        `_plan`；这里给一个显式出口，避免覆盖率记账被迫依赖私有字段。
+        """
+        plan = self._ensure_plan()
+        total = len(plan.entries)
+        if index < 0:
+            index += total
+        if not 0 <= index < total:
+            raise IndexError(f"窗口下标 {index} 越界（共 {total} 个窗口）")
+        return int(plan.entries[index].row_index)
+
     def describe(self) -> str:
         """多行诊断文本：配置 + 索引记账（训练日志用）。"""
         config = self.config

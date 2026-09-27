@@ -1,6 +1,6 @@
 # RFC-0034 — 数据供给管线重构：计划 / 物化 / 搬运 三层分离
 
-- 状态：**提案 v2**（取代同日 v1 的「A 缓存 / B 预取」方案；待决策者裁定）｜ 提出日期：2026-09-27
+- 状态：**采纳**（2026-09-27 决策者裁定「做 S1–S4」；**S1–S4 已落地**，S5 巡检待做，见 §10）｜ 提出日期：2026-09-27
 - 提出者：主会话（训练基础设施 / 数据流水线）
 - 影响模块：新增 `beatmorph/data/plan.py`；`beatmorph/data/dataset.py`（worker 安全化）、
   `beatmorph/infra/train_loop.py`（取批路径）、`beatmorph/infra/checkpoint.py`
@@ -192,3 +192,42 @@ def coverage_at(plan: WindowPlan, step: int, batch_size: int, dataset) -> dict[s
 - [RFC-0032](RFC-0032-local-layer-own-line-tracks.md)（显存墙：本设计不触碰模型侧，见 §4）
 - plan 07 §9-41（误判门禁为卡死：§8 的记账来源）、§9-42（步时拆分：判据 3 的量具）、§9-43（`r==0` 计数）
 - [docs/TRAINING.md](../TRAINING.md) §7.5（GPU 巡检口径）
+
+## 10. 实现状态（2026-09-27，S1–S4 已落地）
+
+提交 `cc0e166`。默认 CI **1033 passed**（新增护栏 15 项：计划层 9 + 取批路径 6 + 集成 pickle 1）。
+
+| 步骤 | 落地内容 | 验证 |
+|---|---|---|
+| **S1** | 新增 `beatmorph/data/plan.py`：`WindowPlan` / `plan_epoch` / `PlanBatchSampler` / `coverage_at`；`ManifestBatchSource` 改为**消费**计划（顺序与覆盖率都不再是它的内部状态） | `tests/unit/data/test_plan.py`（9）；原 `test_sampler_coverage.py` 6 项**原样通过**（RFC-0033 的语义没被破坏） |
+| **S2** | `ChartPairDataset.__getstate__/__setstate__`：剥掉 `_plan` / 两个 LRU / `_plan_from_cache` / 诊断计数（worker 按需从落盘索引缓存重建，秒级） | 集成 pickle 往返：还原后 `_plan is None`、LRU 空、样本**逐位一致** |
+| **S3** | `BatchSource.batches()` + `ManifestBatchSource._batches_parallel`；`train()` 改为 `next(stream)`；`data.workers` 进 `RESUME_IGNORED_KEYS`；门禁强制 workers=0；workers>1 且未设 `OMP_NUM_THREADS` 时**告警**（不替调用方改全局环境） | `tests/unit/infra/test_plan_batches.py`（6）：**workers=0 与 =2 逐位一致**（真实 spawn）+ 覆盖率一致 + 续训 O(1) 定位 + 指纹中立 |
+| **S4** | 桶内按谱面行聚簇 + **全局按轮次发牌** | 见下（真实 train split 实测） |
+
+### S4 的第一版设计是错的，并被实测抓住
+
+v2 草案把「块」按 `桶偏移 + 块序` 排序（桶按**窗口数**分槽位）。真实 train split 实测
+（991 桶 / 634,952 窗 / 6,614 张谱）：
+
+| 口径 | 6,600 步 | 13,200 步 | 20,000 步 |
+|---|---|---|---|
+| 修复前的均匀撒点（RFC-0033 记录） | — | — | **6,036/6,614 = 91.3%** |
+| **S4 v2 草案（按窗口数分槽位）** | 28.3% | 42.9% | **52.6%** ❌ |
+| **S4 落地（全局按轮次发牌）** | **71.8%** | **100.0%** | **100.0%** ✅ |
+
+根因：按窗口数分槽位时，「窗口多、谱面少」的桶（例如 1 张谱 10 万窗）会把大量槽位反复花在
+同一张谱上，同时饿死窗口少的桶。改为**按轮次**（第 k 轮访问每个桶的每个行恰好一次）后，
+「全部谱面各访问一次」只需 Σ_桶(行数) 个槽位，覆盖率因此**严格优于**修复前。
+
+**代价与现状**：`chunk=1`（默认）下同谱连续段中位长度为 **1** ⇒ **没有**摊薄解析的效果
+（那 46% 仍在），S4 这一轮拿到的是**覆盖率**而不是解析摊薄；块长大于 1 才摊薄，但会把
+「全部谱面轮一遍」的步数放大 `chunk` 倍。是否值得，取决于 S3 并行之后**还差多少**——
+这正是步时拆分（§C）要回答的，也是 §9-1 仍未实测的那一项。
+
+### 仍未做
+
+- **S5**（`perf/data_share` / worker 数 / 主机内存进 `training_health.py`）；
+- **worker 侧诊断计数的旁路汇总**（`np.memmap`）：现在 worker 里的 `r == 0` 退化计数不上报，
+  口径已在 `ChartPairDataset.no_visible_context_fallbacks` 的 docstring 里写明是**已知缺口**；
+- **验收判据 3/5/6**（`data_share` 中位 <20%、峰值显存差 ≤50 MiB、2 万步 ≤2.0 h）**尚未实测**：
+  需要一次带 `data.workers=3` 的真实训练。`1/2/4` 已由测试锁定。

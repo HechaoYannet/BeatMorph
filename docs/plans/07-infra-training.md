@@ -680,4 +680,25 @@ run_gates(*, step_fns: GateStepFns, out_path: Path, cfg) -> list[GateResult]
     登记为**未决项**：待 val 路径接通后，按「掩码目标实际占比」评估是否要改遮盖策略
     （例如换遮盖单位 / 放宽重掷上限 / 把退化窗口在采样时降权），而不是继续静默兜底。
 
+44. **取批计划层 + DataLoader 并行（RFC-0034 S1–S4，2026-09-27 第九轮，已落地）**：
+    提交 `cc0e166`。**顺序与覆盖率搬出采样器**（新增 `beatmorph/data/plan.py`）：一个 epoch 的
+    取批顺序一次性物化为纯数据，覆盖率变成「顺序前缀」的 `searchsorted` 查询（O(log n)）
+    ⇒ 采样器不再有状态，才能开 `data.workers` 而不破坏可复现性与记账。
+
+    - **S3**：`train()` 改为流式 `next(stream)`；`data.workers>0` 走 DataLoader
+      （`persistent_workers` + `prefetch_factor=2`，`pin_memory` 仅在 CUDA 可用时）。
+      **批次切分仍在主进程**，槽位终点由 `batch_sampler` 上报 —— 记账**不依赖 collate 产物**。
+      `data.workers` 进 `RESUME_IGNORED_KEYS`（语义无关字段）；门禁路径**强制 workers=0**。
+    - **S4 的两版**（这条值得单独记）：第一版按**窗口数**分槽位，真实 train split 实测
+      20,000 步只覆盖 **52.6%** 的谱面（旧均匀撒点 91.3%）——「窗口多、谱面少」的桶反复访问
+      同一张谱，同时饿死窗口少的桶。改为**全局按轮次发牌**后：**6,600 步 71.8% /
+      13,200 步 100.0%**，**严格优于**修复前。代价：`chunk=1` 下同谱连续段中位长度为 1，
+      **没有**摊薄解析（那 46% 仍在），S4 这一轮拿到的是覆盖率不是解析摊薄。
+    - 计划物化实测：索引缓存命中 1.3 s + 计划 1.8 s（991 桶 / 634,952 窗），一次性成本。
+    - 护栏：`tests/unit/data/test_plan.py`（9）+ `tests/unit/infra/test_plan_batches.py`（6，
+      含 **workers=0/2 逐位一致**的真实 spawn 等价性）+ 集成 pickle 往返。默认 CI **1033 passed**。
+    - **未做**：S5 巡检；worker 侧 `r == 0` 计数的旁路汇总（docstring 已写明是已知缺口）；
+      验收判据 3/5/6（`perf/data_share` <20%、峰值显存差 ≤50 MiB、2 万步 ≤2.0 h）**待一次
+      带 `data.workers=3` 的真实训练**。
+
 [POSTMORTEM-2026-08-05]: ../POSTMORTEM-2026-08-05-frame-rate-misalignment.md

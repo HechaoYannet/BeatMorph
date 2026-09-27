@@ -487,7 +487,8 @@ uv run python scripts/training_health.py --experiment phigros_masked --gpu --wat
 它把「有没有在跑 / 有没有降速 / 显存有没有贴顶 / checkpoint 有没有落后 / ETA /
 **瓶颈在哪一侧**」压成一行结论：退出码 `0` 健康 / `1` 有告警 / `2` 无数据。
 预警规则：步时后半窗比前半窗慢 1.3× 以上、**数据侧占比 ≥ 50%**、峰值显存 ≥ 7.5 GiB、
-标量超过 30 分钟没更新、checkpoint 落后于当前步。
+标量超过 30 分钟没更新、**checkpoint 真漏存**（间隙 > @@@@run.save_every@@@@；间隔内「当前步 >
+最近 checkpoint」是**正常状态**，不告警）。
 
 **③b 「GPU 利用率不高」怎么读（2026-09-27 第九轮，[RFC-0034](decisions/RFC-0034-data-supply-throughput.md)）**
 

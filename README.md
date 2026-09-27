@@ -22,7 +22,7 @@ BeatMorph 从原始音频（WAV/MP3）+ 难度（+ 可选判定线事件轨）�
 
 ### 当前状态
 
-自检（默认 CI，无网络 / 无权重 / 无 GPU）：`uv run ruff check . && uv run mypy beatmorph && uv run pytest -m "not slow and not gpu and not e2e"` → **1015 passed**（17 deselected）。
+自检（默认 CI，无网络 / 无权重 / 无 GPU）：`uv run ruff check . && uv run mypy beatmorph && uv run pytest -m "not slow and not gpu and not e2e"` → **1017 passed**（17 deselected）。
 
 **★ 全量大规模训练正在运行**：`runs/phigros_masked/20260927-100604/`（`max_steps=20000`，交接时 step ≈1900，ETA ≈4.5 h）。门禁 **36.5 min 全绿**（有界切片 `gates.gate_samples=200`，索引秒级命中）：G1 93552.7 → -7.9 ｜ G2 真实 73.68 vs 打乱 228.75（**3.10×**）｜ G3 -24.66 ≤ 2179.76 ｜ G4 154 帧 ≈ 2.05 s × 75 Hz。训练中 loss 16684 → ~100，K 中位 26 / p90 67 / max 128，峰值显存 6.63 GiB，`training_health` 退出码 0。
 

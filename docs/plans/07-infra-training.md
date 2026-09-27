@@ -657,8 +657,11 @@ run_gates(*, step_fns: GateStepFns, out_path: Path, cfg) -> list[GateResult]
     - **已落地（本轮）**：`step_time_s` 拆成 `data_time_s` + `compute_time_s`
       （逐行和**恒等于**步时），TB 增 `train/data_time_s` / `train/compute_time_s` /
       **`perf/data_share`**；`scripts/training_health.py` 打印拆分并在
-      **数据占比 ≥50% 时告警**（老曲线无这两个字段则不误报）。护栏
-      `tests/unit/infra/test_step_time_split.py`（4 项）。**动机**：§9-41 的误判之所以发生，
+      **数据占比 ≥50% 时告警**（老曲线无这两个字段则不误报）。同时修掉巡检脚本的一个
+      **恒真告警**：旧口径 `last_step > checkpoints[-1]` 在 `save_every=2000` 时
+      1999/2000 的步都命中（实测 step 2250 / ckpt 2000 被报「落后」）⇒ 退出码恒为 1、
+      把 go/no-go 信号作废；现改为**只在真漏存（间隙 > save_every）时告警**。护栏
+      `tests/unit/infra/test_step_time_split.py`（6 项）。**动机**：§9-41 的误判之所以发生，
       正是因为一个数把「GPU 在等数据」与「计算本身慢」混在了一起，只能靠功耗反推。
     - **架构决策待裁定**：[RFC-0034](../decisions/RFC-0034-data-supply-throughput.md)
       —— A（谱面解析一次 + 窗口切片复用；预计每窗口 0.582 → ≈0.31 s、2 万步墙钟 ≈4.9 h → ≈3 h，

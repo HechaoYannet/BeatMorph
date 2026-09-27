@@ -83,6 +83,19 @@ def _max_steps(run_dir: Path) -> int | None:
         return None
 
 
+def _save_every(run_dir: Path) -> int | None:
+    """从 config.yaml 读 checkpoint 间隔；读不到返回 None（此时退回旧口径）。"""
+    path = run_dir / "config.yaml"
+    if not path.is_file():
+        return None
+    payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    try:
+        value = int(payload["run"]["save_every"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
 def _checkpoint_steps(run_dir: Path) -> list[int]:
     """已有的步级 checkpoint（按步号升序）。"""
     steps: list[int] = []
@@ -129,6 +142,23 @@ def _split(rows: list[dict[str, float]]) -> tuple[float, float] | None:
     return (
         statistics.median([item[0] for item in pairs]),
         statistics.median([item[1] for item in pairs]),
+    )
+
+
+def _checkpoint_lag(last_step: int, checkpoints: list[int], save_every: int | None) -> str | None:
+    """「真漏存」的告警文本；没有漏存返回 None。
+
+    间隔内「当前步 > 最近 checkpoint」是**正常状态**（save_every=2000 时 1999/2000 的步
+    都处在这个状态）。旧口径每步都告警 ⇒ 巡检退出码恒为 1，等于把 go/no-go 信号作废。
+    """
+    if not checkpoints or last_step <= checkpoints[-1]:
+        return None
+    gap = last_step - checkpoints[-1]
+    if save_every is not None and gap <= save_every:
+        return None
+    return (
+        f"最近 checkpoint（{checkpoints[-1]}）落后于当前步（{last_step}，"
+        f"间隔 {save_every if save_every is not None else '未知'}）"
     )
 
 
@@ -208,8 +238,9 @@ def report(  # noqa: PLR0912 - 线性报告；拆成多个函数反而更难照�
         print(f"标量陈旧度：{age_s / 60.0:.1f} 分钟")
         if age_s > STALE_WARN_S:
             warnings.append(f"标量 {age_s / 60.0:.1f} 分钟没有更新：进程可能已停/卡住")
-    if checkpoints and last_step > checkpoints[-1]:
-        warnings.append(f"最近 checkpoint（{checkpoints[-1]}）落后于当前步（{last_step}）")
+    lag = _checkpoint_lag(last_step, checkpoints, _save_every(run_dir))
+    if lag is not None:
+        warnings.append(lag)
     if gpu:
         line = _gpu_line()
         if line:

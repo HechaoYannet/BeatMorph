@@ -78,7 +78,7 @@ def _load_health() -> ModuleType:
     return module
 
 
-def _rows(*, data: float, compute: float) -> list[dict[str, float]]:
+def _rows(*, data: float, compute: float, start: int = 1) -> list[dict[str, float]]:
     """合成标量：步时恒定、显存远低于阈值 ⇒ 只有「数据侧占比」能触发告警。"""
     step_time = data + compute
     return [
@@ -91,7 +91,7 @@ def _rows(*, data: float, compute: float) -> list[dict[str, float]]:
             "grad_norm": 1.0,
             "peak_vram_gib": 1.0,
         }
-        for step in range(1, 21)
+        for step in range(start, start + 20)
     ]
 
 
@@ -102,6 +102,45 @@ def _write_run(tmp_path: Path, rows: list[dict[str, float]]) -> Path:
         "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8"
     )
     return tmp_path
+
+
+def _write_run_with_config(
+    tmp_path: Path, rows: list[dict[str, float]], *, save_every: int, ckpt_step: int
+) -> Path:
+    """给 run 目录补上 config.yaml（run.save_every）与一个步级 checkpoint。"""
+    run_dir = _write_run(tmp_path, rows)
+    (run_dir / "config.yaml").write_text(
+        f"optim:\n  max_steps: {int(rows[-1]['step'])}\nrun:\n  save_every: {save_every}\n",
+        encoding="utf-8",
+    )
+    ckpt = run_dir / "checkpoints"
+    ckpt.mkdir(parents=True, exist_ok=True)
+    (ckpt / f"step-{ckpt_step}.pt").write_bytes(b"")
+    return run_dir
+
+
+def test_health_quiet_between_saves(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """间隔内「当前步 > 最近 checkpoint」是**正常状态**，不得告警。
+
+    旧口径每步都告警（save_every=2000 时 1999/2000 的步都命中）⇒ 巡检退出码恒为 1，
+    等于把 go/no-go 信号作废。实测于本轮长跑（step 2250 / checkpoint 2000）。
+    """
+    module = _load_health()
+    rows = _rows(data=0.15, compute=0.85, start=2231)
+    run_dir = _write_run_with_config(tmp_path, rows, save_every=2000, ckpt_step=2000)
+    assert module.report(run_dir, window=20, gpu=False) == 0
+    assert "落后于当前步" not in capsys.readouterr().out
+
+
+def test_health_warns_when_a_save_is_actually_missed(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """真漏存（间隙 > save_every）必须告警。"""
+    module = _load_health()
+    rows = _rows(data=0.15, compute=0.85)
+    run_dir = _write_run_with_config(tmp_path, rows, save_every=2, ckpt_step=2)
+    assert module.report(run_dir, window=20, gpu=False) == 1
+    assert "落后于当前步（20，间隔 2）" in capsys.readouterr().out
 
 
 def test_step_scalars_carry_split_that_sums_to_step_time(tmp_path: Path) -> None:

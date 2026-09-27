@@ -21,7 +21,10 @@ Lightning 后端仍然提供，并在缺失时给出可操作的报错（而不�
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+import json
+import math
+import time
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
@@ -36,7 +39,12 @@ from beatmorph.field.loss import constant_baseline_nll
 from beatmorph.generation.batch import FieldBatch
 from beatmorph.generation.model import MaskedFieldModel
 from beatmorph.infra.artifacts import RunArtifacts, git_rev
-from beatmorph.infra.checkpoint import save_checkpoint
+from beatmorph.infra.checkpoint import (
+    BEST_CHECKPOINT_NAME,
+    load_checkpoint,
+    rotate_checkpoints,
+    save_checkpoint,
+)
 from beatmorph.infra.config.schema import TrainConfig
 from beatmorph.infra.gates import GateInputs
 from beatmorph.infra.sanity import StepFn
@@ -62,6 +70,9 @@ if TYPE_CHECKING:
     from beatmorph.data.dataset import ChartPairDataset
 
 logger = get_logger("infra.train_loop")
+
+#: 过程标量的落盘文件名（jsonl；健康检查脚本与 TB 都读它）。
+HISTORY_FILENAME: str = "loss_history.jsonl"
 
 
 class BatchSource(Protocol):
@@ -407,6 +418,9 @@ class TrainReport:
     loss_history: list[tuple[int, float]] = field(default_factory=list)
     checkpoints: list[str] = field(default_factory=list)
     data_source: str = ""
+    #: 续训起点（checkpoint 路径与已完成步数）；None = 从头训练。
+    resumed_from: str | None = None
+    resumed_step: int = 0
 
     def to_metrics(self) -> dict[str, Any]:
         """metrics.json 的载荷（**不含**权重；plan 07 §3.2）。"""
@@ -417,6 +431,8 @@ class TrainReport:
             "best_loss": self.best_loss,
             "checkpoints": list(self.checkpoints),
             "data_source": self.data_source,
+            "resumed_from": self.resumed_from,
+            "resumed_step": self.resumed_step,
             "loss_history": [[step, loss] for step, loss in self.loss_history],
         }
 
@@ -446,7 +462,159 @@ def write_scalars(log_dir: Path, history: Sequence[tuple[int, float]]) -> bool:
     return True
 
 
-def train(
+class ScalarWriter(Protocol):
+    """TB SummaryWriter 的最小接口（不在签名里写 Any：ANN401）。"""
+
+    def add_scalar(self, tag: str, scalar_value: float, global_step: int) -> None:
+        """写一个标量。"""
+        ...
+
+    def flush(self) -> None:
+        """把缓冲刷到磁盘（长跑期间人力监控靠它看到最新点）。"""
+        ...
+
+    def close(self) -> None:
+        """收尾。"""
+        ...
+
+
+def _peak_vram_gib() -> float:
+    """当前进程在 CUDA 上的峰值已分配显存（GiB）；CPU 上恒为 0。
+
+    为什么必须进 TB：8 GB 卡上「显存贴顶 ⇒ 驱动滑进共享内存 ⇒ 步时放大一个量级」是
+    静默的（利用率仍 100%），唯一的前兆就是这条曲线与 power.draw。
+    """
+    if not torch.cuda.is_available():
+        return 0.0
+    return float(torch.cuda.max_memory_allocated()) / 2**30
+
+
+def _append_history(path: Path, rows: Sequence[Mapping[str, float]]) -> None:
+    """把标量行追加进 logs/loss_history.jsonl（追加，因此续训后仍是同一条曲线）。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        for row in rows:
+            handle.write(json.dumps(dict(row), ensure_ascii=False) + "\n")
+
+
+def open_scalar_writer(log_dir: Path) -> ScalarWriter | None:
+    """打开 TB SummaryWriter；tensorboard 缺失时返回 None 并告警（不改变训练结论）。
+
+    权威记录仍是 gates.txt / metrics.json；TB 只服务人力在线监控。
+    """
+    try:
+        from torch.utils.tensorboard import SummaryWriter
+    except ImportError:
+        logger.warning("tensorboard 不可用：TB 标量不写（loss_history.jsonl 仍有完整曲线）")
+        return None
+    log_dir = Path(log_dir)
+    log_dir.mkdir(parents=True, exist_ok=True)
+    writer: ScalarWriter = SummaryWriter(log_dir=str(log_dir))
+    return writer
+
+
+def _flush_scalars(
+    writer: ScalarWriter | None,
+    history_path: Path,
+    rows: Sequence[Mapping[str, float]],
+) -> None:
+    """把一批标量同时写进 jsonl（权威、健康检查脚本读它）与 TB（人力在线监控）。"""
+    _append_history(history_path, rows)
+    if writer is None:
+        return
+    for row in rows:
+        step = int(row["step"])
+        writer.add_scalar("train/loss", float(row["loss"]), step)
+        writer.add_scalar("train/step_time_s", float(row["step_time_s"]), step)
+        writer.add_scalar("train/lr", float(row["lr"]), step)
+        grad = float(row["grad_norm"])
+        if math.isfinite(grad):
+            writer.add_scalar("train/grad_norm", grad, step)
+        writer.add_scalar("sys/peak_vram_gib", float(row["peak_vram_gib"]), step)
+    writer.flush()
+
+
+def _apply_resume(
+    model: nn.Module,
+    optimizer: torch.optim.Optimizer,
+    cfg: TrainConfig,
+    *,
+    data_rev: str,
+    resume_from: Path,
+    report: TrainReport,
+) -> int:
+    """把 checkpoint 的状态装回模型与优化器，返回下一步的步号。
+
+    载入经 load_checkpoint 逐项校验（配置指纹 / 门禁全绿 / data_rev），不一致即抛——
+    宁可重跑，也不用「环境已变」的实验续训出不可信结论。
+    """
+    loaded = load_checkpoint(
+        Path(resume_from),
+        cfg=cfg,
+        data_rev=data_rev,
+        require_gates_green=cfg.gates.required,
+    )
+    model.load_state_dict(dict(loaded.model_state))
+    if loaded.optimizer_state is not None:
+        try:
+            optimizer.load_state_dict(dict(loaded.optimizer_state))
+        except (KeyError, ValueError) as exc:
+            raise RuntimeError(f"优化器状态无法恢复（{exc}）：拒绝从半个状态续训") from exc
+    report.resumed_from = str(resume_from)
+    report.resumed_step = loaded.meta.step
+    start_step = loaded.meta.step + 1
+    logger.info(
+        "续训：%s 已完成 %d 步，从第 %d 步跑到 %d",
+        resume_from,
+        loaded.meta.step,
+        start_step,
+        cfg.optim.max_steps,
+    )
+    return start_step
+
+
+def _save_step(
+    artifacts: RunArtifacts,
+    cfg: TrainConfig,
+    model: nn.Module,
+    optimizer: torch.optim.Optimizer,
+    *,
+    step: int,
+    value: float,
+    best: float,
+    data_rev: str,
+    gates_green: bool,
+    report: TrainReport,
+) -> Path:
+    """存一个步级 checkpoint（先写后删），必要时刷新最优快照，然后旋转旧文件。"""
+    path = save_checkpoint(
+        artifacts.checkpoints / f"step-{step:07d}.pt",
+        model=model,
+        cfg=cfg,
+        step=step,
+        data_rev=data_rev,
+        git_rev=git_rev(artifacts.root),
+        gates_green=gates_green,
+        optimizer=optimizer,
+    )
+    report.checkpoints.append(path.name)
+    best_path = artifacts.checkpoints / BEST_CHECKPOINT_NAME
+    if value <= best:
+        save_checkpoint(
+            best_path,
+            model=model,
+            cfg=cfg,
+            step=step,
+            data_rev=data_rev,
+            git_rev=git_rev(artifacts.root),
+            gates_green=gates_green,
+        )
+    rotate_checkpoints(artifacts.root, keep_last=cfg.run.keep_last, keep_paths=[best_path])
+    logger.info("checkpoint @step %d -> %s", step, path.name)
+    return path
+
+
+def train(  # noqa: PLR0915 - 训练循环的语句数靠注释说明更清楚，拆函数会把状态切碎
     cfg: TrainConfig,
     *,
     source: BatchSource,
@@ -454,8 +622,19 @@ def train(
     data_rev: str,
     gates_green: bool,
     device: str = "cpu",
+    resume_from: Path | None = None,
 ) -> TrainReport:
     """参考训练循环（默认 CPU 可跑；极小配置用于 CI 与冒烟）。
+
+    长跑的四个运维要点（plan 07 §4.5/§4.6，2026-09-27 第六轮）：
+
+    1. 断点续训：resume_from 指向上一次的 step-*.pt；载入前经 load_checkpoint 逐项校验，
+       不一致拒绝恢复，优化器状态（AdamW 动量）一并恢复；
+    2. 增量落盘：每 run.log_every 步把标量追加进 logs/loss_history.jsonl 并 flush 到 TB
+       （train/loss、train/step_time_s、train/grad_norm、sys/peak_vram_gib）——长跑期间必须能
+       在线看到进度，而不是等训练结束才第一次写盘；
+    3. 旋转：每次存盘后只保留最新 run.keep_last 个步级 checkpoint（外加 best.pt），先写后删；
+    4. 降速可见：步时与峰值显存逐步进 TB/jsonl（判据见 docs/TRAINING.md §7.5）。
 
     Args:
         cfg: 训练配置。
@@ -464,6 +643,7 @@ def train(
         data_rev: 数据版本（写进 checkpoint 元数据，恢复时校验）。
         gates_green: 本次运行的门禁是否全绿（写进 checkpoint 元数据）。
         device: 设备字符串。
+        resume_from: 续训起点 checkpoint；None = 从头训练。
 
     Returns:
         TrainReport。
@@ -473,54 +653,84 @@ def train(
     )
     report.data_source = source.describe()
     first_batch = source.batch(masked=True)
-    model = model_from_config(cfg, first_batch.grid, seed=cfg.optim.seed).to(device)
+    target_device = torch.device(device)
+    # 注意：--device cuda 必须同时搬批次（plan 07 §9-22）；只搬模型会让训练路径直接失败。
+    model = model_from_config(cfg, first_batch.grid, seed=cfg.optim.seed).to(target_device)
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=cfg.optim.lr,
         weight_decay=cfg.optim.weight_decay,
         betas=betas_of(cfg),
     )
-    # ⚠️ --device cuda 必须**同时搬批次**（plan 07 §9-22）：此前只把模型 .to(device)，
-    # 批次留在 CPU ⇒ 训练路径上的 --device cuda 会直接因设备不一致失败。门禁路径早已
-    # 经 build_gate_inputs 的 to_device 搬批次，这里补齐同一行为（cpu 下是空操作）。
-    target_device = torch.device(device)
+    start_step = 1
+    if resume_from is not None:
+        start_step = _apply_resume(
+            model, optimizer, cfg, data_rev=data_rev, resume_from=resume_from, report=report
+        )
     model.train()
     history: list[tuple[int, float]] = []
     best = float("inf")
-    for step in range(1, cfg.optim.max_steps + 1):
-        batch = (first_batch if step == 1 else source.batch(masked=True)).to(target_device)
-        optimizer.zero_grad(set_to_none=True)
-        output = model(batch)
-        loss = output.loss
-        if loss is None:  # pragma: no cover - compute_loss 默认 True
-            raise RuntimeError("训练前向没有返回 loss")
-        loss.backward()
-        if cfg.optim.grad_clip_norm is not None:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.optim.grad_clip_norm)
-        optimizer.step()
-        value = float(loss.detach())
-        history.append((step, value))
-        best = min(best, value)
-        if step == 1:
-            report.first_loss = value
-        if cfg.run.save_every > 0 and step % cfg.run.save_every == 0:
-            path = save_checkpoint(
-                artifacts.checkpoints / f"step-{step:07d}.pt",
-                model=model,
-                cfg=cfg,
-                step=step,
-                data_rev=data_rev,
-                git_rev=git_rev(artifacts.root),
-                gates_green=gates_green,
-                optimizer=optimizer,
+    log_every = max(1, int(cfg.run.log_every))
+    writer = open_scalar_writer(artifacts.logs)
+    pending: list[dict[str, float]] = []
+    try:
+        for step in range(start_step, cfg.optim.max_steps + 1):
+            started = time.perf_counter()
+            raw = first_batch if step == start_step else source.batch(masked=True)
+            batch = raw.to(target_device)
+            optimizer.zero_grad(set_to_none=True)
+            output = model(batch)
+            loss = output.loss
+            if loss is None:  # pragma: no cover - compute_loss 默认 True
+                raise RuntimeError("训练前向没有返回 loss")
+            loss.backward()
+            grad_norm = float("nan")
+            if cfg.optim.grad_clip_norm is not None:
+                grad_norm = float(
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.optim.grad_clip_norm)
+                )
+            optimizer.step()
+            value = float(loss.detach())
+            elapsed = time.perf_counter() - started
+            history.append((step, value))
+            best = min(best, value)
+            if step == start_step:
+                report.first_loss = value
+            pending.append(
+                {
+                    "step": float(step),
+                    "loss": value,
+                    "step_time_s": elapsed,
+                    "grad_norm": grad_norm,
+                    "peak_vram_gib": _peak_vram_gib(),
+                    "lr": float(cfg.optim.lr),
+                }
             )
-            report.checkpoints.append(path.name)
-            logger.info("checkpoint @step %d -> %s", step, path.name)
-    report.steps = cfg.optim.max_steps
+            if step % log_every == 0 or step == cfg.optim.max_steps:
+                _flush_scalars(writer, artifacts.logs / HISTORY_FILENAME, pending)
+                pending.clear()
+            if cfg.run.save_every > 0 and step % cfg.run.save_every == 0:
+                _save_step(
+                    artifacts,
+                    cfg,
+                    model,
+                    optimizer,
+                    step=step,
+                    value=value,
+                    best=best,
+                    data_rev=data_rev,
+                    gates_green=gates_green,
+                    report=report,
+                )
+    finally:
+        if pending:
+            _flush_scalars(writer, artifacts.logs / HISTORY_FILENAME, pending)
+        if writer is not None:
+            writer.close()
+    report.steps = max(0, cfg.optim.max_steps - start_step + 1)
     report.last_loss = history[-1][1] if history else float("nan")
-    report.best_loss = best
+    report.best_loss = best if history else float("nan")
     report.loss_history = history
-    write_scalars(artifacts.logs, history)
     logger.info("%s", report.format())
     return report
 

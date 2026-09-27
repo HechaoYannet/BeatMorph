@@ -140,6 +140,24 @@ class RunArtifacts:
             return artifacts
         raise FileExistsError(f"{base}/{stamp} 及其 {max_suffix} 个后缀均已存在，拒绝覆盖")
 
+    @classmethod
+    def open_existing(cls, root: Path) -> RunArtifacts:
+        """打开一个**已存在**的实验目录（续训用：不新建、不覆盖、不换目录）。
+
+        续训必须落在**原来那个目录**：六件套是一个实验的整体，另起一个目录会把同一次
+        实验劈成两半（而 checkpoint 的 meta 里记的正是那一次实验的配置与数据版本）。
+
+        Raises:
+            FileNotFoundError: 目录不存在。
+            AssertionError: 目录未被 .gitignore 覆盖（红线 5）。
+        """
+        artifacts = cls(root=Path(root))
+        if not artifacts.root.is_dir():
+            raise FileNotFoundError(f"实验目录不存在：{artifacts.root}")
+        artifacts._assert_ignored()
+        artifacts.init_layout()
+        return artifacts
+
     def _assert_ignored(self) -> None:
         """红线 5：产物必须落在被 `.gitignore` 覆盖的位置（仓库外不做该检查）。"""
         from beatmorph.data import assert_local_only, is_ignored, repo_root

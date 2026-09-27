@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -26,15 +26,24 @@ from beatmorph.core.logging import get_logger
 from beatmorph.infra.config.schema import TrainConfig, config_to_dict
 
 __all__ = [
+    "CHECKPOINT_PREFIX",
     "CheckpointMeta",
     "LoadedCheckpoint",
     "ResumeMismatchError",
+    "checkpoint_step",
     "config_diff",
     "config_fingerprint",
     "flatten_config",
+    "list_checkpoints",
     "load_checkpoint",
+    "rotate_checkpoints",
     "save_checkpoint",
 ]
+
+#: 步级 checkpoint 的文件名前缀（step-0000123.pt；旋转与恢复都只认它）。
+CHECKPOINT_PREFIX: str = "step-"
+#: 旋转时**永不删除**的最优快照文件名（训练损失最低的那一次存盘）。
+BEST_CHECKPOINT_NAME: str = "best.pt"
 
 logger = get_logger("infra.checkpoint")
 
@@ -55,16 +64,45 @@ def flatten_config(payload: Mapping[str, Any], prefix: str = "") -> dict[str, An
     return flat
 
 
+#: 续训**不**参与指纹的「运维字段」：它们是**预算与落盘策略**，不是实验语义。
+#: 阻断它们的代价是「想延长步数 / 加密 checkpoint 就必须另起一个实验目录」——
+#: 那恰好把同一次训练劈成两个目录（旧目录的曲线断在那里）。
+#: 语义字段（模型 / 数据 / 优化器超参 / 门禁阈值 / seed）**仍然**参与指纹。
+RESUME_IGNORED_KEYS: tuple[str, ...] = (
+    "optim.max_steps",
+    "run.save_every",
+    "run.keep_last",
+    "run.keep_best",
+    "run.log_every",
+    "run.log_level",
+    "run.runs_dir",
+    "run.experiment",
+)
+
+
+def _resume_relevant(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """去掉运维字段后的配置视图（指纹与 diff 共用，保证两者口径一致）。"""
+    flat = flatten_config(payload)
+    return {key: value for key, value in flat.items() if key not in RESUME_IGNORED_KEYS}
+
+
 def config_fingerprint(cfg: TrainConfig) -> str:
-    """配置指纹（规范化 JSON 的 sha256；键序无关）。"""
-    canonical = json.dumps(config_to_dict(cfg), sort_keys=True, ensure_ascii=False, default=str)
+    """配置指纹（规范化 JSON 的 sha256；键序无关）。
+
+    **口径**：指纹只覆盖「续训相关」的配置视图（见 :data:`RESUME_IGNORED_KEYS`）——
+    预算（max_steps）与落盘策略（save_every / log_every / keep_*）变更**不会**让旧
+    checkpoint 失效：它们不改变实验语义，只改变跑多久、多久存一次。
+    """
+    canonical = json.dumps(
+        _resume_relevant(config_to_dict(cfg)), sort_keys=True, ensure_ascii=False, default=str
+    )
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def config_diff(stored: Mapping[str, Any], current: Mapping[str, Any]) -> list[str]:
-    """两份配置的逐字段差异（人类可读；按字段名排序）。"""
-    left = flatten_config(stored)
-    right = flatten_config(current)
+    """两份配置的逐字段差异（人类可读；按字段名排序；同样只看续训相关字段）。"""
+    left = _resume_relevant(stored)
+    right = _resume_relevant(current)
     lines: list[str] = []
     for key in sorted(set(left) | set(right)):
         before = left.get(key, "<缺失>")
@@ -127,6 +165,63 @@ def save_checkpoint(
     torch.save(payload, target)
     logger.info("已保存 checkpoint %s（step=%d）", target, step)
     return target
+
+
+def checkpoint_step(path: Path) -> int | None:
+    """从 step-NNNNNNN.pt 的文件名解出步号；不符合命名规范返回 None。"""
+    stem = Path(path).stem
+    if not stem.startswith(CHECKPOINT_PREFIX):
+        return None
+    suffix = stem[len(CHECKPOINT_PREFIX) :]
+    return int(suffix) if suffix.isdigit() else None
+
+
+def list_checkpoints(run_dir: Path) -> list[tuple[int, Path]]:
+    """列出产物目录里的步级 checkpoint（按步号升序）。
+
+    只认 checkpoints/step-*.pt：best.pt 之类的快照不参与「最新一步」的判定
+    （它的步号不在文件名里，拿它续训会把训练步数拉回去）。
+    """
+    directory = Path(run_dir) / "checkpoints"
+    found: list[tuple[int, Path]] = []
+    if not directory.is_dir():
+        return found
+    for child in sorted(directory.glob(f"{CHECKPOINT_PREFIX}*.pt")):
+        step = checkpoint_step(child)
+        if step is not None:
+            found.append((step, child))
+    return sorted(found)
+
+
+def rotate_checkpoints(
+    run_dir: Path,
+    *,
+    keep_last: int,
+    keep_paths: Sequence[Path] = (),
+) -> list[Path]:
+    """只保留最新的 keep_last 个步级 checkpoint（外加 keep_paths），返回被删除的文件。
+
+    **纪律**：调用方必须在**新 checkpoint 写盘成功之后**才调用本函数——先删后写会在
+    「写失败」这个窗口里把唯一的恢复点也弄丢。keep_last <= 0 表示不旋转（保留全部）。
+    """
+    if keep_last <= 0:
+        return []
+    keep = {Path(item) for item in keep_paths}
+    checkpoints = list_checkpoints(run_dir)
+    keep.update(path for _step, path in checkpoints[-keep_last:])
+    removed: list[Path] = []
+    for _step, path in checkpoints:
+        if path in keep:
+            continue
+        try:
+            path.unlink()
+        except OSError as exc:  # pragma: no cover - 磁盘故障才走到
+            logger.warning("旧 checkpoint 删除失败（忽略）：%s（%s）", path, exc)
+            continue
+        removed.append(path)
+    if removed:
+        logger.info("checkpoint 旋转：保留最新 %d 个，删除 %d 个旧文件", keep_last, len(removed))
+    return removed
 
 
 def load_checkpoint(

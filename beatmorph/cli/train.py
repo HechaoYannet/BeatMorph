@@ -32,6 +32,7 @@ from beatmorph.infra.artifacts import (
     RunArtifacts,
     file_sha1,
 )
+from beatmorph.infra.checkpoint import list_checkpoints
 from beatmorph.infra.config.loading import configs_dir, load_config
 from beatmorph.infra.config.schema import (
     Backend,
@@ -86,6 +87,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--experiment", default=None, help="实验名（默认取配置里的值）")
     parser.add_argument("--max-steps", type=int, default=None, help="覆盖 optim.max_steps")
     parser.add_argument("--device", default="cpu", help="设备（默认 cpu；有 CUDA 时可用 cuda）")
+    parser.add_argument(
+        "--resume",
+        nargs="?",
+        const="latest",
+        default=None,
+        metavar="RUN_DIR",
+        help=(
+            "断点续训：从指定实验目录（或 latest = 本实验最近一个**有 checkpoint** 的目录）续跑。"
+            "续训不重跑门禁，但要求该目录的 gates.txt 与 checkpoint 的 meta 都是全绿；"
+            "配置/数据版本不一致会**拒绝恢复**（fail-closed）"
+        ),
+    )
     parser.add_argument("--gates", action="store_true", help="训练前强制跑 G1-G4")
     parser.add_argument("--gates-only", action="store_true", help="只跑门禁，不训练")
     parser.add_argument(
@@ -108,6 +121,46 @@ def _resolve(path_text: str, root: Path) -> Path:
 
 def _read_text(path: Path) -> str | None:
     return path.read_text(encoding="utf-8") if path.is_file() else None
+
+
+def _open_resume_target(
+    target: str,
+    *,
+    runs_dir: Path,
+    experiment: str,
+    root: Path,
+) -> tuple[RunArtifacts, Path]:
+    """解析续训目标，返回 (实验目录句柄, 起点 checkpoint)。
+
+    目标可以是：`latest`（本实验最近一个**有 step checkpoint** 的目录）、运行目录名
+    （`20260927-043828`）、或直接给路径。找目录与找 checkpoint 是两件事：最近的一个目录
+    可能是只跑了 `--gates-only` 的（没有 checkpoint），因此要**逐个往前找**。
+
+    Raises:
+        FileNotFoundError: 目标目录不存在，或目录里没有可续训的起点。
+    """
+    experiment_dir = runs_dir / experiment
+    if target == "latest":
+        candidates = sorted(
+            (path for path in experiment_dir.glob("*") if path.is_dir()),
+            key=lambda path: path.name,
+            reverse=True,
+        )
+        if not candidates:
+            raise FileNotFoundError(f"{experiment_dir} 下没有任何实验目录")
+        for candidate in candidates:
+            if list_checkpoints(candidate):
+                return RunArtifacts.open_existing(candidate), list_checkpoints(candidate)[-1][1]
+        raise FileNotFoundError(f"{experiment_dir} 下的实验目录都没有 step-*.pt：没有可续训的起点")
+    given = Path(target)
+    for candidate in (given, experiment_dir / target, root / target):
+        if candidate.is_dir():
+            artifacts = RunArtifacts.open_existing(candidate)
+            found = list_checkpoints(candidate)
+            if not found:
+                raise FileNotFoundError(f"{candidate}/checkpoints 下没有 step-*.pt")
+            return artifacts, found[-1][1]
+    raise FileNotFoundError(f"续训目标不存在：{target}")
 
 
 def main(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0911, PLR0912, PLR0915 - 启动编排
@@ -157,9 +210,19 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0911, PLR0912, P
             return EXIT_ENV
 
     # ── 4. 实验目录与六件套骨架 ─────────────────────────────────
-    artifacts = RunArtifacts.create(
-        runs_dir=_resolve(cfg.run.runs_dir, root), experiment=cfg.run.experiment
-    )
+    runs_dir = _resolve(cfg.run.runs_dir, root)
+    resume_from: Path | None = None
+    if args.resume is not None:
+        try:
+            artifacts, resume_from = _open_resume_target(
+                args.resume, runs_dir=runs_dir, experiment=cfg.run.experiment, root=root
+            )
+        except (FileNotFoundError, AssertionError) as exc:
+            logger.error("续训目标无法解析（退出码 %d）：%s", EXIT_ARGS, exc)
+            return EXIT_ARGS
+        logger.info("续训模式：实验目录 %s，起点 %s", artifacts.root, resume_from)
+    else:
+        artifacts = RunArtifacts.create(runs_dir=runs_dir, experiment=cfg.run.experiment)
     artifacts.write_config(cfg)
     manifest_path = _resolve(cfg.data.manifest_path, root) if cfg.data.manifest_path else None
     artifacts.write_provenance(cfg, extra={"script_rev": derived_values().__str__()})
@@ -173,7 +236,16 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0911, PLR0912, P
 
     # ── 5. 门禁 ────────────────────────────────────────────────
     gates_green = False
-    if args.gates or args.gates_only:
+    if resume_from is not None and not (args.gates or args.gates_only):
+        # 续训**不重跑**门禁（那是几十到几十分钟的 GPU 预算），但要求原实验的 gates.txt 全绿；
+        # checkpoint 的 meta 里也快照了一次 gates_green，load_checkpoint 会再校验一次。
+        try:
+            enforce_gates(run_dir=artifacts.root, cfg=cfg)
+        except GateFailure as exc:
+            logger.error("续训的 fail-closed 校验失败（退出码 %d）：%s", EXIT_GATES, exc)
+            return EXIT_GATES
+        gates_green = gates_all_passed(_read_text(artifacts.path(GATES_FILENAME))) is True
+    elif args.gates or args.gates_only:
         context = gates_context(
             root=root,
             data_source=source.describe(),
@@ -252,6 +324,7 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0911, PLR0912, P
                 data_rev=data_rev,
                 gates_green=gates_green,
                 device=args.device,
+                resume_from=resume_from,
             )
     except ImportError as exc:
         logger.error("缺少可选训练依赖（退出码 %d）：%s", EXIT_DEPENDENCY, exc)

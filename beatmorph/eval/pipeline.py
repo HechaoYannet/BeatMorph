@@ -112,6 +112,10 @@ TRAIN_SUMMARY_FIELDS: Final[tuple[str, ...]] = (
     "best_loss",
     "checkpoints",
     "data_source",
+    # 第六轮新增：续训留痕（None / 0 = 从头训练）。加字段必须同步本清单——
+    # 生产侧的键顺序由 tests/unit/eval/test_pipeline.py::test_train_summary_field_list_matches_the_producer 锁死。
+    "resumed_from",
+    "resumed_step",
     "loss_history",
 )
 

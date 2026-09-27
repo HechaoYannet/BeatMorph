@@ -449,3 +449,37 @@ run_gates(*, step_fns: GateStepFns, out_path: Path, cfg) -> list[GateResult]
     （**步时 ∝ K²**，因为 global 层对 `L=K·T` 做全自注意力）。整轮 38 min（其中 G2 两臂 100 步 ≈ 23 min）。
     ⇒ 「多少样本才够」这条曲线**优先度下降**：16 样本已经给出 2.32× 的差距（门限 1.05×），
     而**更大的样本数会被 `K²` 的步时成本劝退**；真要继续压，应先处理 global 层的 `O(L²)`（架构级，须 RFC）。
+
+**实施期落地（2026-09-27 第六轮：长跑运维 —— 断点续训 / 旋转 / 增量标量 / 巡检脚本）**
+
+29. **断点续训（`--resume [RUN_DIR|latest]`）**：`train(resume_from=...)` 经 `load_checkpoint` 恢复
+    **模型 + 优化器（AdamW 动量）+ 步号**，从 `step+1` 继续；`load_checkpoint` 的三项校验（配置指纹 /
+    门禁全绿 / `data_rev`）任一不符即**拒绝恢复**。CLI 侧 `latest` 会**逐个往前找**「有 checkpoint 的
+    目录」——最近的目录可能只跑过 `--gates-only`（没有 checkpoint）。
+    `RunArtifacts.open_existing()` 保证续训落在**原来那个目录**（另起目录会把同一次实验劈成两半）。
+    ⚠️ **随机数状态没有保存**：数据顺序与遮盖种子由 index 与 `optim.seed` 派生（同一 index 内容一致），
+    但 dropout 的随机流与不中断时不同——这是「续训 ≈ 继续」而非「逐位等价」的边界，已如实登记。
+30. **恢复指纹只覆盖语义字段（本轮口径，收紧/放宽都说清楚）**：指纹与 diff 先经 `_resume_relevant()`
+    去掉 `RESUME_IGNORED_KEYS`（`optim.max_steps`、`run.save_every`/`log_every`/`keep_last`/`keep_best`/
+    `log_level`/`runs_dir`/`experiment`）。理由：这些是**预算与落盘策略**，不是实验语义——不放行它们，
+    「想多跑 5000 步」或「想加密 checkpoint」就必须另起实验目录，而那会把同一次训练劈成两个目录、
+    曲线断在两处。模型 / 数据 / 优化器超参 / 门禁阈值 / seed **仍然**参与指纹（改 lr 照样拒绝）。
+31. **checkpoint 旋转（`run.keep_last` / `run.keep_best`，此前只声明未实现）**：`rotate_checkpoints()`
+    只保留最新 `keep_last` 个 `step-*.pt`（外加 `best.pt`），**先写后删**（新 checkpoint 落盘成功才删旧的）。
+    `best.pt` = 存盘时刻训练损失最低的那一个；**val 路径尚未实现，故它不是模型选择依据**，只是崩溃恢复的
+    第二个候选点。
+32. **增量标量（长跑必须能在线看进度）**：此前的 `write_scalars()` 只在**训练结束后**写一次 TB ⇒
+    人力监控在整轮训练期间**看不到任何曲线**。现改为每 `run.log_every`（默认 50）步：
+    ① 追加 `logs/loss_history.jsonl`（权威、可脚本读、**续训后是同一条曲线**）；
+    ② `writer.add_scalar` + `flush()` 到 TB（`train/loss` / `train/step_time_s` / `train/grad_norm` /
+    `train/lr` / `sys/peak_vram_gib`）。TB 缺失只告警，不影响训练结论。
+33. **`scripts/training_health.py`（巡检脚本，本轮新增）**：把「在跑吗 / 降速了吗 / 显存贴顶了吗 /
+    checkpoint 落后了吗 / ETA 多久」压成一行结论 + 退出码（0 健康 / 1 告警 / 2 无数据），
+    支持 `--watch 7200`（每 2 小时自动巡检）。预警规则：步时后半窗比前半窗慢 1.3× 以上、
+    峰值显存 ≥ 7.5 GiB、标量 30 分钟没更新、checkpoint 落后于当前步。
+    **它不依赖 GPU/驱动**（GB 实况是可选的 `--gpu`）——正好用于「训练在跑、agent 只读文件」的巡检。
+34. **硬件安全（事故记录，写给下一个 session）**：一次「扫 K vs 显存」的 GPU 探测
+    （`sdpa_kernel([...])` 强制后端 + 无界的连续前向/反传）把本机 8 GB 卡拖到驱动层 TDR，
+    **Windows 被重启**。规则写进 `docs/TRAINING.md` §7.5：不强制注意力后端、不跑无界 GPU 扫批、
+    同一时刻只跑一个 GPU 作业、全程盯功耗与显存。另记：硬重启会弄坏 `.mypy_cache`
+    （`INTERNAL ERROR ... database disk image is malformed`）——删缓存重跑即可，不是代码问题。

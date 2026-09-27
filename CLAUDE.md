@@ -90,16 +90,17 @@ beatmorph/
 - ✅ **格式事实已就绪**：`docs/knowledges/phigros-format.md`（RPEJSON 逐字段、坐标几何、来源分级 A/B/C）。
 - ✅ **信息准备已完成（四项全齐）**：[phigros-format.md](docs/knowledges/phigros-format.md)（格式，含勘误横幅）、[phigros-units-and-geometry.md](docs/knowledges/phigros-units-and-geometry.md)（单位/几何，prpr 源码 A 级）、[phira-dataset-survey.md](docs/knowledges/phira-dataset-survey.md)（数据源实测：9649 张、K 中位 30、音频 100% 捆绑）、[chart-generation-literature.md](docs/knowledges/chart-generation-literature.md)（文献与评估协议）。
 - ✅ **两项阻塞已清（2026-08-05）**：① **数据合规已裁定**（风险由决策者承担，硬约束 = 最终不发布权重，见红线 5 附注）；② **Q15 时间网格定为 beat-aligned**（数学改写限定在 `field/` 内，见 BasePlan §3.2.4）。
-- 🔵 **施工进行中**：plan 00 / 02 / 03、plan 04 主干（M1–M4/M6，**B1 臂的模型与 G1 门禁**）、plan 05（M5.1–M5.6）、plan 07（M7.1–M7.8）、plan 06（M6.1–M6.6 + 报告落盘接线）已落地并通过默认 CI（**980 项**）；**合成与真实 200 行切片两套门禁均实跑全绿**；plan 04 的其余消融臂（M7/M9/M10/M11）与 plan 06 M6.7/M6.8、plan 08 待建；plan 05 的 M5.7（双解码臂 B6 出数）待已训练模型；**真实数据训练尚未启动**（前置已清，属算力决定）。
+- 🔵 **施工进行中**：plan 00 / 02 / 03、plan 04 主干（M1–M4/M6，**B1 臂的模型与 G1 门禁**）、plan 05（M5.1–M5.6）、plan 07（M7.1–M7.8）、plan 06（M6.1–M6.6 + 报告落盘接线）已落地并通过默认 CI（**987 项**）；**合成与真实 200 行切片两套门禁均实跑全绿**；plan 04 的其余消融臂（M7/M9/M10/M11）与 plan 06 M6.7/M6.8、plan 08 待建；plan 05 的 M5.7（双解码臂 B6 出数）待已训练模型；**真实数据训练尚未启动**（前置已清，属算力决定）。
 - ⚠️ **2026-09-27 门禁口径修复（重要）**：G2 曾经是**恒真对照**（真实臂 = G1 的遮盖补全臂、打乱臂 = 全事件目标，两者不同批不同损失）⇒ **此前所有 `gates.txt` 里的 G2 数字作废**；现口径 = 同一遮盖批、只置换被遮盖格子内的标签（可见场逐位不变），合成夹具上差距 45%。
 - ⚠️ **2026-09-27 第五轮：τ 轴终点缺陷（RFC-0031）——本轮最大的一处数据侧缺陷**：`duration_s()` 无条件信任 `META.chartTime`，而全库 **52.2%** 的谱面该值虚高（中位 **52.8×**、最大 3.4e6×）⇒ train split 曾切出 **3361 万窗**（98% 空窗）、索引 2.3 h，并**伪造**出「G1 空过（0 事件）/ G2 结构性 FAIL（打乱臂反而更优）」两个假结论。默认口径改为 `data.tau_end_policy="audio"` = `min(谱面口径, 特征缓存的音频时长)`，截断与轴外事件**显式记账**；修复后 train split **634 952 窗**、索引 **36.5 min**，真实切片门禁 **G1-G4 全绿**（EXIT=0）。**同一轮**：门禁批必须非空（`gates.batch_min_events=1`，取不到即抛）、索引**落盘缓存** + 行级 LRU、门禁装配的显存卫生（G3 预计算先跑后释放，避免 8 GB 卡滑进 Windows 共享内存把单步放大 15×）。见 plan 02 §9 第四轮、plan 07 §9-25/§9-26/§9-27、[RFC-0031](docs/decisions/RFC-0031-tau-axis-endpoint.md)。
-- ⚠️ **待 RFC 裁定**：
-  - **[RFC-0031](docs/decisions/RFC-0031-tau-axis-endpoint.md)**（τ 轴终点口径：音频时长 / 最后一事件 / 两者取小；是否含 `META.offset`）——实现已按提案落地，裁定若改变口径 ⇒ 一行配置 + 重跑门禁；
+- ✅ **RFC-0030 与 RFC-0031 均已采纳（2026-09-27 决策者裁定）**：前者＝解码/导出契约归属与 plan 05 六项口径；后者＝**τ 轴终点 = `min(谱面口径, 音频时长)`**（`META.offset` 仍留待后续）。两案实现均已落地。
+- 🔵 **长跑运维已落地（第六轮）**：断点续训 `--resume [latest|目录]`（配置指纹 / 门禁全绿 / data_rev 三项校验，fail-closed；指纹只覆盖语义字段，故可安全延长 `max_steps`）、checkpoint 旋转（`save_every=2000` 即每 4 轮、`keep_last=3`、`keep_best=1`，先写后删）、**在线**标量（TB + `logs/loss_history.jsonl`，每 `log_every=50` 步刷新）、巡检脚本 `scripts/training_health.py`（`--watch 7200`，退出码 0/1/2）。见 plan 07 §9-29~§9-33 与 [docs/TRAINING.md](docs/TRAINING.md) §7.5。
+- ⚠️ **候选决策（不阻塞训练，但影响扩张）**：
   - **遮盖通道的信息泄漏**（plan 04 §9-18）与**遮盖重标定系数** `1/r` vs 文档 `1/(1-r)`（plan 04 §9-6）——两者都已给出默认口径并如实记录；
-  - **[RFC-0030](docs/decisions/RFC-0030-decoder-export-contract-ownership.md)**（解码/导出契约归属 + 六项实现口径，2026-09-27 提出）：实现已按提案落地，待裁定；
-  - RFC-0030 登记的两项**新发现**：① `JudgeLine.pose_at` 的父线位置合成与 prpr A 级证据不一致（父线旋转未作用在子线平移上 ⇒ 含父线谱面的跨线几何计数是**近似值**）；② plan 05 §4.2-1 的 τ 边缘强度算式漏了 `J(τ)`（已按算式笔误修正并登记，见 RFC-0030 §6）。
-  - **global 层的 `O((K·T)²)`**（架构级）：步时 ∝ `K²` 且是 8 GB 卡上的显存墙——扩大 `t_window` 或数据规模前须裁定（plan 07 §9-22/§9-28）。
-
+  - RFC-0030 登记的两项**新发现**：① `JudgeLine.pose_at` 的父线位置合成与 prpr A 级证据不一致（父线旋转未作用在子线平移上 ⇒ 含父线谱面的跨线几何计数是**近似值**）；② plan 05 §4.2-1 的 τ 边缘强度算式漏了 `J(τ)`（已按算式笔误修正并登记，见 RFC-0030 §6）；
+  - **global 层的 `O((K·T)²)`**（架构级）：步时 ∝ `K²` 且是 8 GB 卡上的显存墙——扩大 `t_window` 或数据规模前须裁定（plan 07 §9-22/§9-28）；
+  - **val 路径与模型选择口径**（`optim.val_every` 目前空转；`best.pt` 暂按训练损失，不作为模型选择依据）。
+- ⚠️ **硬件安全（2026-09-27 事故）**：一次 GPU 探测（`sdpa_kernel` 强制后端 + 无界前向/反传扫批）触发驱动层 TDR，**Windows 被重启**。三条禁令已写进 [docs/TRAINING.md](docs/TRAINING.md) §7.5：不强制注意力后端、不跑无界 GPU 扫批、同一时刻只跑一个 GPU 作业并全程盯功耗与显存。
 
 ## 7. 文档导航
 

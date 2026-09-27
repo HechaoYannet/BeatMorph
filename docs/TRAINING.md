@@ -439,6 +439,75 @@ git/data rev）/ `data_provenance.json`（来源与用途）/ `checkpoints/` / `
 
 ---
 
+### 7.5 长跑运维（断点续训 / 巡检 / TB / 显存墙）
+
+全量训练是**十小时级**的单个进程。下面五件事每一条都在短跑里看不出问题、只在长跑里咬人。
+
+**① 存盘节奏与旋转**
+
+- `run.save_every=2000`（= 每 4 轮，1 轮 = `optim.val_every`）+ `run.keep_last=3` + `run.keep_best=1`：
+  崩溃最多丢一个间隔，磁盘只留最新 3 个步级 checkpoint 加一个 `best.pt`（**先写后删**）。
+- 目录：`runs/<experiment>/<timestamp>/checkpoints/step-NNNNNNN.pt`（**文件名就是步号**，恢复靠它）。
+  `best.pt` 是「存盘时刻训练损失最低」的那一个；**val 路径尚未实现，它不作为模型选择依据**。
+
+**② 断点续训**
+
+```bash
+# 从本实验最近一个「有 checkpoint」的目录续跑（不重跑门禁，但要求原目录 gates.txt 全绿）
+uv run beatmorph-train --config-name phigros_masked --resume latest --device cuda --skip-env-doctor
+# 指定目录
+uv run beatmorph-train --config-name phigros_masked --resume 20260927-120000 --device cuda --skip-env-doctor
+```
+
+- 恢复前 `load_checkpoint` 逐项校验：**配置指纹 / 门禁全绿 / data_rev**，任一不符即**拒绝**（退出码 7）。
+  指纹只覆盖**语义字段**；预算与落盘策略（`optim.max_steps`、`run.save_every`/`log_every`/`keep_*`）
+  变更**不会**让旧 checkpoint 失效——否则「想多跑几步」就得另起一个实验目录，把同一次训练劈成两半。
+- 优化器状态（AdamW 动量）一并恢复；**随机数状态没有保存**（数据顺序/遮盖种子由 index 与 seed 派生，
+  因此同一 index 的样本内容仍然一致，但 dropout 的随机流不同）。
+
+**③ 每 2 小时巡检**
+
+```bash
+uv run python scripts/training_health.py --experiment phigros_masked --gpu              # 只查一次
+uv run python scripts/training_health.py --experiment phigros_masked --gpu --watch 7200 # 每 2 小时自动巡检
+```
+
+它把「有没有在跑 / 有没有降速 / 显存有没有贴顶 / checkpoint 有没有落后 / ETA」压成一行结论：
+退出码 `0` 健康 / `1` 有告警 / `2` 无数据。预警规则：步时后半窗比前半窗慢 1.3× 以上、
+峰值显存 ≥ 7.5 GiB、标量超过 30 分钟没更新、checkpoint 落后于当前步。
+
+**④ TensorBoard（对接人力监控）**
+
+```bash
+uv run tensorboard --logdir runs/phigros_masked
+```
+
+标量每 `run.log_every` 步**增量**刷盘（`train/loss` / `train/step_time_s` / `train/grad_norm` /
+`train/lr` / `sys/peak_vram_gib`），因此曲线是**在线**的；同样的行同时追加进
+`logs/loss_history.jsonl`（权威、可脚本读，TB 缺失也不影响训练）。
+
+**⑤ 显存墙：不降速的判据**
+
+- 步时 ∝ `(K·T)²`（`K` = 批内最大判定线数，`T = t_window`），因为 global 层对 `K·T` 做全自注意力。
+  实测（本机 8 GB）：`K=12 → 0.10 s/步`、`K=29（L=5568）→ ~7 s/步`、`K=33 → ~9 s/步`。
+- **贴顶是静默的**：显存到 ~7.9/8.15 GB 时驱动滑进 Windows 共享内存，利用率仍显示 100%，
+  但 `power.draw` 从 ~94 W 掉到 ~88 W 且**步时放大一个量级**（实测 0.57 s → 8.8 s）。
+  判据：`power.draw` 长期明显低于 90 W **且** `sys/peak_vram_gib` 贴顶 ⇒ 立刻停，**不要**「再跑一会儿」。
+- 训练路径是 `batch_size=1`（一个优化步一个样本），因此**单个样本的 K 就是上限**：
+  `K` 大的谱面（`k_max=128`，实测中位 25 / P75 42）会显著拖慢甚至触顶。
+  在扩大 `t_window` 或放开 `data.k_max` 之前，先按上面的曲线估算，必要时先开 RFC 处理 global 层的 `O(K²T²)`。
+
+**⚠️ 硬件安全（2026-09-27 的事故，写给下一个 session）**
+
+一次「扫 K vs 显存」的 GPU 探测把 8 GB 笔记本卡拖到驱动层 TDR，**Windows 被重启**。三条禁令：
+
+1. **不要**用 `torch.nn.attention.sdpa_kernel([...])` 强制注意力后端（会绕过安全回退路径）；
+2. **不要**跑无界的「连续前向+反传」扫批脚本；任何 GPU 探测都要有显存余量检查与单次上限；
+3. 同一时刻**只跑一个** GPU 作业（不要与门禁/训练并行），并全程盯 `nvidia-smi` 的功耗与显存。
+
+（另：硬重启会弄坏 `.mypy_cache`。若 `uv run mypy` 报 `INTERNAL ERROR ... database disk image is
+malformed`，删掉 `.mypy_cache` 重跑即可——那是缓存损坏，不是代码问题。）
+
 ## 8. 常见问题（排障 cheatsheet）
 
 ### 8.1 ⚠️ 警示案例：25 Hz 事件（**必读**）

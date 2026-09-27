@@ -292,6 +292,10 @@ class RunConfig:
     backend: str = Backend.TORCH.value
     log_level: str = "INFO"
     save_every: int = 500
+    #: 过程标量的刷新间隔（步）：每这么多步把 train/* 与 sys/peak_vram_gib 刷进 TB 与
+    #: `logs/loss_history.jsonl`。**长跑必须能在线看到进度**——此前只在训练结束时写一次，
+    #: 人力监控在整轮训练期间看不到任何曲线（plan 07 §4.6 / docs/TRAINING.md §7.5）。
+    log_every: int = 50
     keep_last: int = 3
     keep_best: int = 1
 
@@ -394,6 +398,16 @@ def validate_config(cfg: TrainConfig) -> list[str]:  # noqa: PLR0912, PLR0915 - 
         problems.append(f"optim.betas 必须是两个 [0,1) 内的数，得到 {optim.betas}")
     if optim.val_every < 0:
         problems.append(f"optim.val_every 必须 >= 0，得到 {optim.val_every}")
+
+    run = cfg.run
+    if run.log_every < 1:
+        problems.append(f"run.log_every 必须 >= 1，得到 {run.log_every}")
+    if run.save_every < 0:
+        problems.append(f"run.save_every 必须 >= 0（0 = 不存盘），得到 {run.save_every}")
+    if run.keep_last < 0 or run.keep_best < 0:
+        problems.append(
+            f"run.keep_last / keep_best 必须 >= 0，得到 {run.keep_last} / {run.keep_best}"
+        )
 
     gates = cfg.gates
     if gates.smoke_max_samples < 1:

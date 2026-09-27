@@ -1,6 +1,6 @@
 # RFC-0030 — 解码/导出契约归属与 plan 05 的六项实现口径
 
-- 状态：提案 ｜ 提出日期：2026-09-27 ｜ 决定日期：（待裁定）
+- 状态：**采纳**（2026-09-27 由决策者裁定）｜ 提出日期：2026-09-27 ｜ 决定日期：2026-09-27
 - 提出者：解码与后处理组（plan 05）
 - 影响模块：plan 00（`beatmorph/core/contracts/`）、plan 05（`beatmorph/decoder/`、`beatmorph/io/formats/rpejson/` 写侧）、
   plan 06（`eval/` 消费合法性指标）、plan 08（`cli/` 的 `report/legality.json` 与退出码）

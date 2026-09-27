@@ -7,7 +7,17 @@ run:
   purpose: train
   backend: torch        # 目标栈见 run.backend=lightning（需要 uv sync --extra train）
   runs_dir: runs
-  save_every: 1000
+  # ── 长跑运维（plan 07 §4.5/§4.6；事故/教训见 docs/TRAINING.md §7.5）──────────
+  # save_every = 每 4 轮（1 轮 = 一个 val 周期 = optim.val_every=500 步）⇒ 2000 步一次存盘。
+  # 代价上界：崩溃最多丢一个存盘间隔的工作量。⚠️ 若实测步时明显偏离（纯 GPU 分钟级 vs
+  # 分钟以上），按「丢 ≤ 30-40 分钟」重新对齐这个数，别照抄。
+  save_every: 2000
+  # 过程标量的刷新间隔：每 50 步刷进 TB 与 logs/loss_history.jsonl。
+  # **长跑必须能在线看到曲线**——此前只在训练结束时写一次，人力监控整轮什么也看不到。
+  log_every: 50
+  # checkpoint 旋转：只保留最新 3 个步级存盘（外加最优快照 best.pt），先写后删。
+  keep_last: 3
+  keep_best: 1
 
 data:
   source: manifest

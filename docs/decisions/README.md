@@ -78,7 +78,8 @@
 | RFC-0028 | 修宪议案：tokenizer 范式 VQ-VAE 小节粒度 → BPE/event（范式级首选） | 02/04/07（BasePlan §3.2） | [采纳](RFC-0028-bpe-event-tokenizer-constitutional-amendment.md)（BPE/event tokenizer，2026-08-04） |
 | RFC-0029 | 修宪议案：目标转向 Phigros + 生成范式改为「判定线局部系**多线**标记点过程 + 掩码补全」 | 全量（BasePlan §1/§2/§3/§4/§7） | [采纳](RFC-0029-phigros-continuous-chart-generation.md)（2026-08-05；Q1/Q2/Q4/Q6/Q7/Q8 已批复） |
 | RFC-0030 | 解码/导出契约归属（`legality.py`）与 plan 05 的六项实现口径（分母策略 / 无 scipy / τ 边缘强度的 J 因子 / Hold 配对 / M5.3 口径细化 / D1 两个细节） | 00/05/06/08 | [提案](RFC-0030-decoder-export-contract-ownership.md)（2026-09-27；实现已按本提案落地，待裁定） |
+| RFC-0031 | τ 轴终点口径（`T` 取自 `chartTime` / 最后一事件 / 音频时长）：实测 `chartTime` 在 52% 语料上虚高（中位 52.8×），提议 **`min(谱面口径, 音频时长)`** | 00/02/03/04/07 | [提案](RFC-0031-tau-axis-endpoint.md)（2026-09-27；实现已按本提案落地，待裁定） |
 
 > ⚠️ **RFC-0029 采纳后**：RFC-0006~0023 中与「4K VSRG / VQ-VAE / BPE-event tokenizer / planner 密度规划 / osu! 数据源」相关的开放项**随之失效**，待按 Phigros 范式重写；RFC-0001（Note 时间单位=秒）、0005（变速 bpm 时间点）、0026（小节相位对齐）的**思想仍适用**，但载体契约需重设。
 
-> 下一个可用编号：**RFC-0031**。
+> 下一个可用编号：**RFC-0032**。

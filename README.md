@@ -10,7 +10,7 @@
 
 BeatMorph 从原始音频（WAV/MP3）+ 难度（+ 可选判定线事件轨）出发，端到端生成高质量、可玩的 **Phigros 谱面（RPEJSON）**。模型从社区海量自制谱自主学习创作规律，无需人工标注（标注成本 ≈ 0）。
 
-> 📌 **状态**：Pre-Alpha。范式（[RFC-0029](docs/decisions/RFC-0029-phigros-continuous-chart-generation.md)）、奠基文档（v3.0）、事实库已就绪；**核心契约 / 数据流水线 / 强度场 / 生成主干 / 解码与导出 / 训练基础设施六层已落地并通过默认 CI**（859 项测试），**真实 Phira 全库已拉取到本地（8551 张 RPE 谱面 + 42.8 GB 音频，不入库）**，**门禁有两套 slow 实跑 + `beatmorph-train --gates` 三种证据**；真实特征的**全量提取**、消融臂与评估接线待建（见下方交接件）。
+> 📌 **状态**：Pre-Alpha。范式（[RFC-0029](docs/decisions/RFC-0029-phigros-continuous-chart-generation.md)）、奠基文档（v3.0）、事实库已就绪；**核心契约 / 数据流水线 / 强度场 / 生成主干 / 解码与导出 / 训练基础设施六层已落地并通过默认 CI**（**980 项测试**），**真实 Phira 全库已拉到本地（8551 张 RPE 谱面 + 42.8 GB 音频，不入库）**，特征提取 **8005/8084**、训练窗口 **634 952**（索引有落盘缓存）；**合成门禁与真实 200 行切片门禁均全绿**（真实一轮 EXIT=0，见下方交接件）；**真实数据训练、消融臂与评估接线待建**。
 
 ---
 
@@ -18,77 +18,92 @@ BeatMorph 从原始音频（WAV/MP3）+ 难度（+ 可选判定线事件轨）�
 
 > 本节读者是**下一个 session 的 agent**，不是历史记录。
 > **每次交接必须整节重写，不得追加**（规则见 [AGENTS.md](AGENTS.md) §6）。
-> 上次交接：**2026-09-27** ｜ 交接人：主会话（真实数据落地：plan 02 M12 驱动脚本 + 全库拉取 + 真实数据缺陷修复）
+> 上次交接：**2026-09-27（第五轮）** ｜ 交接人：主会话（定位并修掉 τ 轴终点缺陷 ⇒ 真实门禁首次全绿；门禁批非空；索引落盘缓存）
 
 ### 当前状态
 
-自检（默认 CI，无网络 / 无权重 / 无 GPU）：`make lint && make typecheck && make test-fast` → **859 passed**（约 90 s）；
-另有实跑证据：`uv run pytest tests/unit/field/test_sanity_gates.py tests/unit/generation/test_sanity_gates.py -m slow`（6 项全绿）
-与 `uv run beatmorph-train --config-name smoke --gates-only`（退出码 0、六件套落盘、gates.txt 四道 [PASS]）。
+自检（默认 CI，无网络 / 无权重 / 无 GPU）：`uv run ruff check . && uv run mypy beatmorph && uv run pytest -m "not slow and not gpu and not e2e"` → **980 passed**（约 57 s；另有 17 项 slow/gpu/e2e 默认不跑）。
 
-**真实数据已落地（本轮，全部在 `data/processed/`，不入库）**
+**实跑证据**：
+
+- ★ **真实数据门禁首次全绿**：`uv run beatmorph-train --config-name phigros_masked --gates-only --device cuda --skip-env-doctor data.max_samples=200` → **EXIT=0、2305.8 s ≈ 38 min**：
+  G1 PASS（47455.4 → 65.1，`g1_events=20` **非空**）｜ **G2 PASS**（真实 **1672.99** vs 打乱 **3875.21** ⇒ 打乱臂 2.32× 更差，门限 1.05×）｜ G3 PASS（107.77 ≤ 2412.17，0.040× 基线）｜ G4 PASS（215 帧）。
+  权威记录：`runs/phigros_masked/20260927-043828/gates.txt`。**⇒ 真实数据训练的前置已清**（只剩算力决定 + RFC-0031 的口径确认）。
+- **合成门禁全绿**：`uv run beatmorph-train --config-name smoke --gates-only`（CPU 约 2 min；G2 差距 45%）。
+- **训练通路验证（合成夹具）**：`--config-name smoke --gates --skip-env-doctor optim.max_steps=2000 run.save_every=500` → EXIT=0、218.8 s、六件套齐全。**这是通路验证，不是训练结果**。
+- **全量特征提取**：已完成 **8005 / 8084（99.0%）**；余 79 首是解不开的 mp3（`pairs` 已重建）。
+
+**真实数据（`data/processed/`，不入库）**
 
 | 项 | 实测值 |
 |----|--------|
-| 元数据枚举 | **9651** 张（调研基线 9649，+2） |
-| 已入库谱面 | **8551** 张 RPE（拒收 **1099**：PEC 872 / 官谱 14 / 解析 191 / 质检 22；未解网络失败 1） |
-| 音频 | **42.8 GB**，**8084** 个唯一音频（内容 sha1 去重，同曲重复率 5.5%） |
-| 谱面文件 | 34.5 GB；共 77 GB（与调研「全量直抓 ≈76 GB」吻合） |
-| 唯一曲目 | **6807**（同曲重复率 **20.4%**）→ 真实 (audio, chart) 对的数量级 |
-| 特征缓存 | **24 首**（冒烟；全量待抽，实测 ≈2 s/首） |
-| 判定线 | 中位 **25**（P25 24 / P75 42，范围 1–770）；note 计 1107 万 |
-| 分布 | Tap 55.7% / 背面 **3.11%**（调研基线 2.4–3.0%，被 `corpus_outliers` 标为轻微离群）；越界 0.13% |
+| 谱面 | **8551** 张 RPE（枚举 9651；拒收 1099） |
+| 音频 | **42.8 GB** / **8084** 个唯一音频（sha1 去重）；唯一曲目 **6807** |
+| 判定线 / note | 中位 25 条；note 计 1107 万（Tap 55.7% / 背面 3.11%） |
+| 特征缓存 | **8005 / 8084**（可续跑；生产配置 0.76 s/首、GPU 96%） |
+| ★ **τ 轴截断** | **3580 / 6750 行（53%）** 的 `META.chartTime` 虚高（中位 **52.8×**）⇒ 改由音频时长截断，省下 **30.8 万小时**空窗（RFC-0031） |
+| ★ 训练窗口 | train **634 952**（94.1 窗/行）—— 旧口径是 3361 万（98% 空窗） |
+| 训练清单 | `pairs.json`：train 6750 / val 814 / test 890 / 泛化 658（按曲目切分） |
+| 索引 | 全库首次构建 **36.5 min**（0.325 s/行），落盘缓存后**秒级**命中 |
 
-两条驱动脚本：`scripts/fetch_phira.py`（`meta` / `fetch` / `pairs` / `stats` / `all`，可续跑、记账齐全）
-与 `scripts/extract_features.py`（按音频 sha1 去重 + 缓存六项校验）。用法见 [docs/TRAINING.md](docs/TRAINING.md) §3/§5。
+驱动脚本：`scripts/fetch_phira.py`（`meta` / `fetch` / `pairs` / `stats` / `all`）与 `scripts/extract_features.py`（按音频 sha1 去重 + 缓存六项校验），用法见 [docs/TRAINING.md](docs/TRAINING.md) §3/§5。
 
-**已通的三条链**
+**已通的四条链**
 
 1. **解码导出**：λ 场 → `decoder.decode_field`（D1 峰值 / D2 thinning）→ 合法性后处理 → `io/formats/rpejson` 写出 → 读回；
-2. **训练通路**：清单 + 特征缓存 → `data.ChartPairDataset`（窗口化）→ `collate_field_batch` → `FieldBatch` → `MaskedFieldModel` → 泊松 NLL → checkpoint；
-3. **真实数据通路（本轮新增）**：Phira API → 预筛 + 选择性下载 → RPEJSON 解析 → 三级质检 → 带 provenance 的清单 → **真实 MERT 权重**特征 → 窗口数据集（冒烟 19 行 → **354620 个窗口**）。
+2. **训练通路**：清单 + 特征缓存 → `data.ChartPairDataset`（窗口化 + 行级 LRU）→ `collate_field_batch` → `FieldBatch` → `MaskedFieldModel` → 泊松 NLL → checkpoint；
+3. **真实数据通路**：Phira API → 预筛 + 选择性下载 → RPEJSON 解析 → 三级质检 → 带 provenance 的清单 → 真实 MERT 权重特征 → 窗口数据集 + **索引落盘缓存**；
+4. **门禁通路**：`--gates-only` 在**合成夹具**与**真实 200 行切片**上都给出全绿结论（真实一轮 38 min，必须 `--device cuda`）。
 
-**本轮修掉的真实数据缺陷**（每条都有回归测试；详细现象见 plan 02 §9 与 TRAINING.md §3.3）
+**本轮修掉的三处真缺陷**（都有回归测试 + 实跑证据）
 
-1. `info.yml` 文本字段实测常为 `null` / 数字 / 布尔（`tip` / `level` / `charter` / `composer`），裸 `str` 声明让 pydantic 拒收整包——首批 20 张里 **10 张**、全库 5 张被误判为「结构错误」；
-2. **PEC 语法族比调研样例大**（`&` / `cf` / `cr` 三种符号命令），旧谱面 PEC 实测占 **9.0%**（调研抽样给 2.5%，抽样偏差比原估计更大）；
-3. `build_pairs` 把**已解析**路径写进 `chart_path` ⇒ `ChartPairDataset` 再拼一次 chart_dir ⇒ 20/20 行判「谱面缺失」，门禁装配直接失败（跨模块往返 bug）；
-4. token 扩张会拆散**跨 token 的长 Hold 配对**（数据集抛「hold 配对点被拆散」）→ 新增 `close_hold_pairs`（token 级收口）；
-5. 分页路径**没有重试**：实跑第 54 / 87 / 286 页各命中一次读超时，没有重试时整轮 322 页枚举直接报废；
-6. **必须强制 IPv4**：httpx 串行尝试 getaddrinfo 的地址，本机 IPv6 黑洞让每次连接等满 connect 超时（整体 ~0.2 MB/s）；`local_address="0.0.0.0"` 后同一 URL **≈20 MB/s**（100 倍）；
-7. 装齐 `--extra train / audio` 后 `mypy --strict` 才暴露 `mert.py` 的 3 处第三方无类型调用（此前依赖缺失 ⇒ Any ⇒ 静默通过）——**类型门禁是环境相关的**。
+1. **τ 轴终点缺陷（本轮最大的一处，RFC-0031）**：`PhigrosChart.duration_s() = max(最后一事件, META.chartTime)` 无条件信任 `chartTime`，而全库 **52.2%** 的谱面 `chartTime` 虚高（中位 52.8×、最大 3.4e6×）。
+   后果：train split 切出 **3361 万窗**（98% 是空窗 + 音频整段补零）、全库索引 2.3 h、**G1 抽到 0 事件窗口报假绿**、**G2 打乱对照被伪造成「结构性失效」**（打乱臂 0.835× 反而更优）。
+   修法：`data.tau_end_policy="audio"`（默认）= `min(谱面口径, 特征缓存元数据的音频时长)`，截断行数 / 轴外事件**显式记账**；`"chart"` 一行回退。
+   ⇒ train split **634 952 窗**、索引 36.5 min，**同一配置下 G2 从 FAIL 变 PASS**（plan 02 §9 第四轮 / plan 07 §9-25）。
+2. **门禁批可以是空的**（`gates.batch_min_events=1`）：`BatchSource.batch(min_events=k)` 重抽到达标为止，取不到即抛（fail-closed）；`gates.txt` 现落盘 `g1_events`/`g1_lines`/`g2_events`/`g2_hidden_events`/`g2_lines`/`g3_events`/`g3_lines`，让「空过」当场可判。
+3. **门禁装配的显存卫生**：四个批 + 四个模型同时在场时 8 GB 卡会滑进 **Windows 共享内存**（实测 7.88/8.15 GB、功耗 88 W），同一个 G3 步从 **0.57 s 变成 8.8 s**，整轮跑不完；现改为 **G3 预计算先跑、跑完立即释放**（峰值回到 6.0-6.6 GB、74-94 W、38 min 完成）。
+   ⚠️ 运维判据：`nvidia-smi` 的 `power.draw` 应稳定在 ~90 W；长期偏低且显存贴顶 ⇒ 先怀疑共享内存回退，**不要**盲目加步数。
+
+**随本轮一起落地的吞吐修复**（plan 02 §9 ④）：索引**落盘缓存**（指纹覆盖口径版本/配置/行身份/文件 stat，损坏或指纹不符一律回退重建；写入原子）+ **行级 LRU**（`chart_cache_size=8` / `feature_cache_size=2`，同一行的多个窗口不再重复解析 4 MB 谱面、不再重复读 40-50 MB 特征）。
 
 **未落地 / 未验证**
 
-- **全量 MERT 特征提取**（8551 首 ≈ 5 h GPU；本轮只做了 24 首冒烟）：这是训练前的唯一大块前置；
-- **真实批次上的 G1–G4 全绿**：可装配（19 行 → 35 万窗口 → 批次 → 前向），但受 **G2 内存标度**限制——`shuffle_samples=16` 时单次分配 5.4 GB 直接 OOM，`4` 时进程私有内存涨到 32 GB（本机 31 GB）⇒ 已降到 `2` 并记入 plan 07 §9-15；
-- plan 04 消融臂 M7–M11、plan 06 M6.7（B1–B6 矩阵）/ M6.8（人评）、plan 05 M5.7（需已训练模型）、plan 02 的驱动脚本之外的自动化、`api/`（plan 08）；
-- Lightning 后端仍**未真机实跑**（`--extra train` 已装齐、env doctor E4 已 PASS）。
+- **真实数据训练尚未启动**：门禁已全绿、fail-closed 不再拦，唯一前置是**算力决定**（一条命令，见「下一步」1）；
+- **RFC-0031 待裁定**（τ 轴终点口径：音频时长 / 最后一事件 / 两者取小；是否含 `META.offset`）；实现已按提案落地，裁定若改变口径 ⇒ 一行配置 + 重跑门禁；
+- **评估入口只差一行**（plan 06 §9-11 / plan 08）：`eval/pipeline.py` 已就绪并测过，缺的是「评估入口长什么样」这个政策决定；接上之前 `metrics.json` 不会有 `eval` 分节；
+- plan 04 的其余消融臂（M7 B4 / M9 B3 / M10 B5 / M11 矩阵）与 **B1 的 G3 常数基线口径**（focal 不适用泊松闭式，plan 04 §9-20，**未定之前不得给 B1 报 G3**）；plan 06 M6.7/M6.8、plan 08 待建；plan 05 M5.7（双解码臂 B6 出数）待已训练模型；
+- **Lightning 后端真机实跑**（`--extra train` 已装齐、env doctor E4 PASS，但 `run.backend=lightning` 未真机跑过）；
+- ⚠️ **global 层的 `O((K·T)²)`**（架构级，须 RFC）：门禁/训练步时 ∝ `K²`（`K` = 批内最大判定线数，中位 25、`k_max=128`）⇒ `K=29` 单步 ~7 s、`K=33` ~9 s。它同时是**显存墙**与**吞吐墙**，在扩大 `t_window`/数据规模之前必须先裁定（候选：SDPA/分块注意力/降 `t_window`）。
 
 ### 下一步
 
-1. **全量特征提取**（唯一的训练前置）：`uv run python scripts/extract_features.py`（可续跑）→ 完成后**必须重跑** `uv run python scripts/fetch_phira.py pairs` 重建清单（当前 `pairs.json` 只含 24 首冒烟子集）。
-2. **真实批次的门禁预算**（plan 07 §9-14 / §9-15）：G2 的内存标度要么换更大内存的机器，要么把 G2 改成分批前向（代码改动）；改之前先量「真实数据上多少样本才够」。
-3. **评估接线**（plan 06 M6.7 + plan 07 §3.2）：`eval/` 指标库已就绪，等解码/生成臂出数接成完整报告（六件套已留好位置）。
-4. **plan 04 消融臂**（M7–M11）：每个新目标先过 G1–G4，结果写进训练日志。
-5. **两个数字已可直接引用**（`data/processed/stats.json`）：唯一曲目 6807 / 同曲重复率 20.4% ⇒ 真实对数规模；判定线中位 25 ⇒ `RPE_X_GRID_BINS` 的消融口径。⚠️ `max_simultaneous_onsets = 12012` 是明显离群值，**先查它是不是数据异常**，再拿去定「同刻跨线并发上限」。
+0. **裁定 [RFC-0031](docs/decisions/RFC-0031-tau-axis-endpoint.md)（τ 轴终点口径，当前唯一挡住真实训练的「口径」问题）**：实测证据、三条备选、代价与记账都已在 RFC 内；实现已按提案落地（`data.tau_end_policy=audio`），裁定若改变口径 ⇒ 改一行 + 重跑权威 `gates.txt`。
+1. **真实数据训练（前置已清，属算力决定）**：
+   `uv run beatmorph-train --config-name phigros_masked --gates --device cuda --skip-env-doctor data.max_samples=200 optim.max_steps=2000`
+   —— `--gates` 会先重跑一遍门禁（约 38 min，索引命中缓存），随后训练；步时 ∝ `K²`（真实批 `K` 中位 25）⇒ **先跑 2000 步量真实吞吐**，再谈全量 `max_samples=null`。
+2. **评估接线只差一行**（政策决定：入口形态）：`eval/pipeline.py` 已就绪并测过，缺的是「评估入口长什么样」这个政策决定（plan 06 §9-11 / plan 08）——裁定后接上，`metrics.json` 才会有 `eval` 分节。
+3. **plan 04 消融臂**（M9 B3 / M7 B4 / M10 B5 / M11 矩阵）：每个新目标先过 G1–G4，结果写进训练日志；**B1 的 G3 基线口径先裁定**（plan 04 §9-20）。
+4. **门禁预算曲线**优先度已下降（16 样本已给出 2.32× 差距，门限 1.05×；更大的样本数会被 `K²` 步时劝退）⇒ 真要压，先处理 global 层的 `O(K²T²)`（架构级，须 RFC）。
+5. **若之后补抽特征**：`uv run python scripts/extract_features.py`（可续跑）→ 再 `uv run python scripts/fetch_phira.py pairs`；索引缓存会因清单/文件 stat 变化自动重建。
 
-### 未决项（不阻塞第 1–5 步）
+### 未决项（不阻塞 1–5）
 
 | 未决 | 出处 |
 |------|------|
+| **[RFC-0031](docs/decisions/RFC-0031-tau-axis-endpoint.md)：τ 轴终点口径**（实现已按提案落地，待裁定） | RFC-0031 |
 | **[RFC-0030](docs/decisions/RFC-0030-decoder-export-contract-ownership.md) 整体待裁定**：解码/导出契约归属 + 六项实现口径；**实现已按提案落地** | RFC-0030 |
 | **契约父线合成**与 A 级证据不一致 ⇒ 含父线谱面（实测 26%）的跨线几何计数为近似值（需 contracts-agent） | RFC-0030 §后果-2 |
-| **跨谱 batching 的契约缺口**：`FieldBatch` 只带一个 grid，且**没有 `time_mask`**（音频 padding 是伪造静音）⇒ 跨谱批训练前须裁定 | 本轮（plan 07 §9-13） |
-| **门禁在真实数据上的内存标度**：G2 一次性 collate 全部样本 ⇒ 需分批或换机器 | plan 07 §9-15 |
-| **G2 的真实样本数预算**：`shuffle_samples` 从 16 降到 2 是为内存让路，对照是否仍有效需实测曲线 | plan 07 §9-12 / §9-14 |
+| **跨谱 batching 的契约缺口**：`FieldBatch` 只带一个 grid，且**没有 `time_mask`**（音频 padding 是伪造静音）⇒ 跨谱批训练前须裁定 | plan 07 §9-13 / plan 02 §9 |
+| **global 层的 `O((K·T)²)`**：既是显存墙也是吞吐墙（架构级，须 RFC）；候选＝SDPA / 分块注意力 / 降 `t_window` | plan 07 §9-22 / §9-28 |
+| **B1 的 G3 常数基线口径未定**（泊松闭式 `N(1+log|Ω|/N)` 不适用于 focal；未定之前不得给 B1 报 G3） | plan 04 §9-20 |
 | **遮盖重标定口径**：`hidden`(1/r，实现默认) vs 文档字面 `observed`(1/(1-r)) vs 不自洽的 `hidden_doc` | plan 04 §9-6 |
 | **mask 泄漏口径**：默认「以事件为锚的 token 区块遮盖 + 空格稀释」偏离 §4.2 字面表述 | plan 04 §9-18 |
 | plan 04 报告方法学两项：条件学习的「边际盆地」loss 差监控（R-04-5）、G2 合成任务与训练预算 | plan 04 §9-15 / §9-16 |
 | 输出头**直连 skip** 是否写进 BasePlan §3.3 的架构描述 | plan 04 §9-17 |
 | eval 三项口径待复核：多重比较校正、相位搜索范围/步长、难度分档边界 | plan 06 §9-1 / §9-3 / §9-5 |
-| `N` 的最终取值（默认 128 已裁；仍需碰撞率–N / NLL–N / F1–N 三条曲线；全库最小同线同刻间距实测 **0.0** ⇒ 该统计口径本身要复核） | plan 03 §9-7、plan 02 §9-5 |
-| 秒↔τ 两个换算点是否合并为一份实现；τ 轴终点口径 | plan 02 §9-11、plan 03 §9-13 / §9-14 |
+| `N` 的最终取值（默认 128 已裁；仍需碰撞率–N / NLL–N / F1–N 三条曲线；**最小同线同刻间距 = 0.0 已复核**：现口径漏 type 通道，见 plan 02 §9 第三轮 ⇒ 统计函数待改） | plan 03 §9-7、plan 02 §9-5 |
+| 秒↔τ 两个换算点是否合并为一份实现；τ 轴终点口径的**实现落点**（已在 dataset） | plan 02 §9-11、plan 03 §9-13 / §9-14 |
 | BPM 变更点落在 1/48 拍格内时 `J_j` 的取值（默认 `left`） | plan 03 §9-16 |
 | `RPE_HEIGHT_RATIO` 的出处（D3）；旋转正方向的屏幕含义（D1）；`META.offset` 的符号解释 | plan 00 §9-6/§9-8、plan 05 §9-8 |
 

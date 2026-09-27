@@ -173,7 +173,11 @@ class DataConfig:
         provenance: 数据来源与用途（**必填**）。
         split_train / split_val: 训练 / 验证切分名。
         t_window: τ 轴窗口长度（格）。
-        tau_end_s: τ 轴终点口径（None = 由谱面自身决定，见 plan 03 §9-14）。
+        tau_end_s: τ 轴终点的**显式**覆盖（秒）；None = 由 `tau_end_policy` 决定。
+        tau_end_policy: τ 轴终点口径（plan 03 §9-14 未裁定；`beatmorph/data/dataset.py`
+            的模块 docstring 有实测依据）：`"audio"`（默认）= min(谱面口径, 音频时长)，
+            用于消除真实语料里大面积不可信的 `META.chartTime`；`"chart"` = 旧行为。
+        chart_cache_size / feature_cache_size: 取批时的行级 LRU 容量（0 = 关闭）。
         x_bins: x 轴桶数（默认取契约值；消融见 RPE_X_GRID_BIN_SWEEP）。
         k_max: 判定线容量（与模型 k_max 一致）。
         occlusion_ratio: 训练遮盖比例 r。
@@ -193,6 +197,9 @@ class DataConfig:
     split_val: str = "val"
     t_window: int = 192
     tau_end_s: float | None = None
+    tau_end_policy: str = "audio"
+    chart_cache_size: int = 8
+    feature_cache_size: int = 2
     x_bins: int = RPE_X_GRID_BINS
     k_max: int = DEFAULT_K_MAX
     occlusion_ratio: float = 0.5
@@ -223,6 +230,7 @@ class GatesConfig:
         smoke_max_samples: 冒烟规模上限；data.max_samples 超过它即视为扩大数据规模。
         overfit_steps / overfit_target_loss / overfit_target_ratio: G1。
         shuffle_steps / shuffle_min_gap_ratio: G2。
+        batch_min_events: 门禁批的最小事件数（G1/G2/G3 的空批会让判据空过）。
         baseline_min_improvement: G3（相对改进比例，**不是**绝对阈值——泊松 NLL 随场体积缩放）。
         frame_rate_tol_frames: G4 容差帧数。
         constant_baseline_normalized: G3 基线是否按事件数归一（§9-3 的归一化口径）。
@@ -237,13 +245,38 @@ class GatesConfig:
     #: G2 的样本数：**必须足够大**，否则打乱臂可以直接背下少量样本、让对照失效
     #: （plan 04 §9-17 的实测结论：样本少时两臂差距会缩到门限以下）。
     shuffle_samples: int = 16
+    #: G2/G3 前向的**分段数**（plan 07 §9-15 的内存墙）：样本数足够大与内存够用
+    #: 是一对矛盾，分段让二者同时成立——内存回到「一段样本」的量级，而按样本求和的
+    #: 损失下梯度与标量 loss 与不分段**一致**（见 `infra.train_loop.make_step_fn`）。
+    #: 1 = 不分段（旧行为，真实数据上会 OOM）。
+    shuffle_chunks: int = 4
     shuffle_min_gap_ratio: float = 0.05
+    #: 门禁批的**最小事件数**（默认 1 = 非空）。判据在空批上会空过：真实数据实测 G1 批
+    #: K=2 / 0 事件 ⇒ 报了「loss 7819.5 → 0.0014」却没有任何事件可过拟合（plan 07 §9-23）。
+    #: 取不到就**重抽**，重抽上限内仍取不到则抛（fail-closed，不静默降级）。
+    batch_min_events: int = 1
     baseline_min_improvement: float = 0.1
     frame_rate_tol_frames: int = 2
     constant_baseline_normalized: bool = True
     #: 建门禁模型时把累积强度头的 bias 初始化为该值（G1/G2 用**相对**判据，
     #: 首步必须远离最优才不会退化成「永远通过」；plan 04 §9-17 的实测口径）。
     initial_head_bias: float = 0.0
+    #: G2/G3（对照臂）的初始累积强度偏置。**默认 0 = 模型的自然初始化**。
+    #: `initial_head_bias` 是**为 G1 的相对判据服务的**（首步必须远离最优，否则
+    #: 「末步 ≤ 0.1 x 首步」会退化成永远通过）。把同一个人为初值强加给 G2/G3 会让它们
+    #: 先花一半预算把与任务无关的积分项压回去：真实数据实测（2026-09-27 第四轮）
+    #: bias=20 时 G3 在 100 步内比常数基线差 68 倍、G2 两臂都停在初始点附近；
+    #: 对照臂用自然初始化后 G3 在 300 步内收敛到 0.37 x 基线。**这不是放宽判据**，
+    #: 而是去掉一个属于 G1 的人为初值。
+    contrast_initial_head_bias: float = 0.0
+    #: 门禁优化器的学习率；None = 沿用 `optim.lr`（旧行为，向后兼容）。
+    #: ⚠️ 门禁的优化预算（steps x lr）必须大到让模型**真的收敛**，否则 G2 的
+    #: 「打乱后 loss 必须显著变差」与 G3 的「优于常数基线」都会退化成恒 FAIL——
+    #: 因为两臂都还停在初始点附近（初始化 bias 由 `initial_head_bias` 抬高，
+    #: 需要足够的优化量才能落回最优尺度）。合成夹具在 `configs/smoke.yaml` 里
+    #: 用 0.05 校准（其注释记录 bias=20 / 16 样本 / 100 步的取值）；
+    #: 真实配置的训练 lr 是 3e-4，直接沿用会让门禁模型几乎不动。
+    gate_optimizer_lr: float | None = None
 
 
 @dataclass(slots=True)
@@ -324,6 +357,13 @@ def validate_config(cfg: TrainConfig) -> list[str]:  # noqa: PLR0912, PLR0915 - 
         for name in ("manifest_path", "chart_dir", "feature_dir"):
             if not str(getattr(data, name)).strip():
                 problems.append(f"data.{name} 不得为空（data.source=manifest 时必须给出路径）")
+    if data.tau_end_policy not in {"audio", "chart"}:
+        problems.append(
+            f"data.tau_end_policy={data.tau_end_policy!r} 不在 ['audio', 'chart'] 中"
+            "（见 beatmorph/data/dataset.py 的 τ 轴终点口径说明）",
+        )
+    if data.chart_cache_size < 0 or data.feature_cache_size < 0:
+        problems.append("data.chart_cache_size / feature_cache_size 必须 >= 0")
     if data.t_window < 1:
         problems.append(f"data.t_window 必须 >= 1，得到 {data.t_window}")
     if data.x_bins < 1:
@@ -402,7 +442,7 @@ def config_to_dict(cfg: TrainConfig) -> dict[str, Any]:
             return str(value)
         if isinstance(value, dict):
             return {key: convert(item) for key, item in value.items()}
-        if isinstance(value, (list, tuple)):
+        if isinstance(value, list | tuple):
             return [convert(item) for item in value]
         return value
 

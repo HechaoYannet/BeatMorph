@@ -45,6 +45,21 @@
 派生后切片；批内音频长度不一致时由 :func:`collate_field_batch` 补零到批内最长
 （`FieldBatch` 没有 `time_mask` 字段，这是当前契约的已知缺口）。
 
+**τ 轴终点（本轮实测的语料级缺陷 → `tau_end_policy`）**
+`PhigrosChart.duration_s()` 取 `max(最后一事件, META.chartTime)`，而 **`chartTime` 在真实语料里大面积不可信**：
+全库 8551 张里 `time_span_s / audio_duration_s > 10` 的有 **4452 张（52.2%）**，中位比值 **52.8×**、
+p99 2575×、最大 3 407 201×（chart 26102：span 7.49e8 s vs 音频 220 s）；
+中位 `time_span_s` 是 **7766 s（2.2 小时）**，而中位音频只有 151 s。
+分布是**双峰**的：47% 的谱面（`chartTime` 缺省或为 0）落在音频时长 1.1× 以内，另 53% 远超音频长度。
+后果（本轮实测）：200 行切片切出 **6 744 925 个窗口**（≈3.4 万窗/行，而正常谱面只有 50–110 窗），
+其中绝大多数是**空窗**（无事件、音频整段越界补零）；全库索引因此约 2.3 h 才轮到第一个优化步，
+且 G1 抽到的批实测 K=2 / 0 事件（门禁空过）。
+因此默认 `tau_end_policy="audio"`：**τ 轴终点 = min(谱面口径, 特征缓存记录的音频时长)**，
+并按 `tau_end_truncated_rows` / `events_beyond_tau_end` **显式记账**（不静默截断）；
+`policy="chart"` 保留旧行为。端点口径本身仍是 plan 03 §9-14 的**未裁定**项
+（`chartTime` / 最后一事件 / 音频时长），本默认值的作用是**先消除不可信输入**，
+不替该裁定下结论。
+
 **存疑（需主会话裁定，未擅自改契约）**
 
 1. 批内音频长度不一致时只能**补零**（`FieldBatch` 无 `time_mask`），补零帧是伪造的
@@ -59,9 +74,12 @@
 
 from __future__ import annotations
 
+import dataclasses
+import hashlib
 import json
 import zlib
 from bisect import bisect_left
+from collections import OrderedDict
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from itertools import pairwise
@@ -94,6 +112,7 @@ from beatmorph.data.parsers.rpejson import RpeParseError, parse_rpejson
 from beatmorph.data.parsers.sniff import sniff_format_with_evidence
 from beatmorph.data.pipeline.embed import (
     SPLIT_NAMES,
+    FeatureCacheMeta,
     PairRow,
     SplitError,
     feature_cache_paths,
@@ -152,6 +171,14 @@ class DatasetManifestError(ValueError):
     """清单 JSON 结构不合法（不是 `PairSplits.to_dict()` 的形状 / 行缺字段）。"""
 
 
+#: 索引缓存的格式版本：**改了窗口规划口径就要 +1**（否则旧缓存会被当成新口径复用）。
+_PLAN_CACHE_VERSION: int = 1
+#: 索引缓存默认目录名（放在清单旁边；`data/processed/` 不入库）。
+_PLAN_CACHE_DIRNAME: str = ".dataset_index"
+
+#: τ 轴终点口径的合法取值（见模块 docstring 的实测依据）。
+TAU_END_POLICIES: frozenset[str] = frozenset({"audio", "chart"})
+
 #: 遮盖种子重掷上限：`build_occlusion_batch` 选中的遮盖单位集可能恰好覆盖**全部**事件，
 #: 此时窗口的 r == 1，而 :func:`beatmorph.generation.losses.masked_poisson_loss` 会**拒绝**它
 #: （「全部事件都被遮盖，事件项没有可见上下文」）。数据集是遮盖的产出方，因此必须保证
@@ -199,6 +226,26 @@ def _note_bins(
         return start, None
     end = tau_bin_index(float(seconds_to_tau(note.t + note.hold_time, bpm_points)))
     return start, (end if 0 <= end < t_bins else None)
+
+
+def _count_events_beyond_axis(
+    chart: PhigrosChart,
+    bpm_points: Sequence[BpmPoint],
+    t_bins: int,
+) -> int:
+    """起点落在 τ 轴之外、因而**整条不会被计入目标**的事件数（与 build_target 的跳过口径一致）。
+
+    只在 τ 轴被截断（`tau_end_policy="audio"` 且 `chartTime` 虚高）时才会非 0：
+    这些事件是**被口径丢掉的真实数据**，因此必须显式记账而不是静默消失。
+    """
+    n_beyond = 0
+    for note in chart.notes:
+        if note.is_fake or abs(note.position_x) > RPE_STAGE_HALF_WIDTH:
+            continue
+        start = tau_bin_index(float(seconds_to_tau(note.t, bpm_points)))
+        if start >= t_bins:
+            n_beyond += 1
+    return n_beyond
 
 
 def _hold_blocked_boundaries(
@@ -420,8 +467,15 @@ class DatasetConfig:
             :func:`~beatmorph.data.pipeline.embed.feature_cache_paths` 定位。
         t_window: tau 轴窗口长度（格）；一个样本 = 一个窗口。
         split: `"train"` / `"val"` / `"test"`。
-        tau_end_s: tau 轴终点（秒）；None = 谱面自带口径
-            （`FieldGrid.for_chart` 的默认，plan 03 §9-14 未裁定）。
+        tau_end_s: τ 轴终点（秒）的**显式**覆盖；None = 由 `tau_end_policy` 决定。
+        tau_end_policy: τ 轴终点口径（模块 docstring 有实测依据）——
+            `"audio"`（默认）= `min(chart.duration_s(), 音频时长)`，用于消除真实语料里
+            大面积不可信的 `chartTime`；`"chart"` = 旧行为 `chart.duration_s()`（保留以便对照）。
+            `tau_end_s` 非 None 时本字段不生效。
+        chart_cache_size: 已解析谱面的 LRU 容量（`__getitem__` 不再重复解析同一行；0 = 关闭）。
+        feature_cache_size: 已载入特征数组的 LRU 容量（0 = 关闭）。
+        index_cache_dir: 索引落盘缓存目录；None = `<manifest 所在目录>/.dataset_index`，
+            `False`（或 `index_cache=False`）= 关闭缓存（每次都重建，测试与对照用）。
         x_bins: x 轴桶数（默认契约值 `RPE_X_GRID_BINS`）。
         k_max: 判定线容量（默认 `generation.model.DEFAULT_K_MAX`）；超过它的谱面在索引期**跳过并记账**。
         occlusion_ratio: 每个窗口独立的遮盖比例 r（按**事件**计，见 generation.masks）。
@@ -440,6 +494,11 @@ class DatasetConfig:
     t_window: int
     split: str = field(default="train", kw_only=True)
     tau_end_s: float | None = None
+    tau_end_policy: str = "audio"
+    chart_cache_size: int = 8
+    feature_cache_size: int = 2
+    index_cache: bool = True
+    index_cache_dir: Path | None = None
     x_bins: int = RPE_X_GRID_BINS
     k_max: int = DEFAULT_K_MAX
     occlusion_ratio: float = 0.5
@@ -464,6 +523,14 @@ class DatasetConfig:
             raise ValueError(f"limit 必须 >= 0 或 None，得到 {self.limit}")
         if self.tau_end_s is not None and self.tau_end_s <= 0.0:
             raise ValueError(f"tau_end_s 必须为正或 None，得到 {self.tau_end_s}")
+        if self.tau_end_policy not in TAU_END_POLICIES:
+            raise ValueError(
+                f"tau_end_policy 必须是 {sorted(TAU_END_POLICIES)} 之一，得到 {self.tau_end_policy!r}",
+            )
+        if self.chart_cache_size < 0 or self.feature_cache_size < 0:
+            raise ValueError("chart_cache_size / feature_cache_size 必须 >= 0")
+        if self.index_cache_dir is not None:
+            object.__setattr__(self, "index_cache_dir", Path(self.index_cache_dir))
 
 
 @dataclass(frozen=True, slots=True)
@@ -527,6 +594,14 @@ class DatasetIndexStats:
     dropped_events_no_visible_context: int
     shifted_windows: int
     dropped_tail_bins: int
+    #: τ 轴被音频时长截断的行数（`chartTime` 不可信的规模；\u2260 0 就是语料缺陷的度量）。
+    tau_end_truncated_rows: int = 0
+    #: 被截断掉的 τ 轴长度合计（秒）——即「旧口径会多切出多少秒的空窗」。
+    tau_end_truncated_seconds: float = 0.0
+    #: 音频时长不可用（缺特征缓存元数据）而回退到谱面口径的行数。
+    tau_end_fallback_rows: int = 0
+    #: 落在 τ 轴之外、未被计入目标的事件数（`build_target` 的同口径统计）。
+    events_beyond_tau_end: int = 0
     skipped_format: dict[str, int] = field(default_factory=dict)
 
     def describe(self) -> str:
@@ -544,7 +619,10 @@ class DatasetIndexStats:
             f"跨 BPM 变更点 {self.skipped_windows_bpm_crossing}、"
             f"无法满足 r<1 {self.skipped_windows_no_visible_context}"
             f"（连带 {self.dropped_events_no_visible_context} 个事件点） | "
-            f"前移 {self.shifted_windows} 窗口 | 丢弃尾巴 {self.dropped_tail_bins} 格"
+            f"前移 {self.shifted_windows} 窗口 | 丢弃尾巴 {self.dropped_tail_bins} 格 | "
+            f"τ 轴截断 {self.tau_end_truncated_rows} 行"
+            f"（{self.tau_end_truncated_seconds / 3600:.1f} 小时空窗）"
+            f"、回退 {self.tau_end_fallback_rows} 行、轴外事件 {self.events_beyond_tau_end}"
         )
 
 
@@ -603,6 +681,10 @@ class _IndexCounters:
     dropped_events_no_visible_context: int = 0
     shifted_windows: int = 0
     dropped_tail_bins: int = 0
+    tau_end_truncated_rows: int = 0
+    tau_end_truncated_seconds: float = 0.0
+    tau_end_fallback_rows: int = 0
+    events_beyond_tau_end: int = 0
     skipped_format: dict[str, int] = field(default_factory=dict)
 
     def add_skip(self, skip: _SkipRow) -> None:
@@ -631,6 +713,10 @@ class _IndexCounters:
             dropped_events_no_visible_context=self.dropped_events_no_visible_context,
             shifted_windows=self.shifted_windows,
             dropped_tail_bins=self.dropped_tail_bins,
+            tau_end_truncated_rows=self.tau_end_truncated_rows,
+            tau_end_truncated_seconds=self.tau_end_truncated_seconds,
+            tau_end_fallback_rows=self.tau_end_fallback_rows,
+            events_beyond_tau_end=self.events_beyond_tau_end,
             skipped_format=dict(self.skipped_format),
         )
 
@@ -641,6 +727,133 @@ class _DatasetPlan:
 
     entries: tuple[_WindowEntry, ...]
     stats: DatasetIndexStats
+
+
+# ══════════════════════════════════════════════════════════════
+# 索引落盘缓存（plan 02 §9 ④ 的修法①③）
+# ══════════════════════════════════════════════════════════════
+#
+# 为什么要它：索引构建要对**每一行**读文件 + 嗅探 + 解析 + 规划（全库 8551 行，实测
+# 0.19 s/行 ⇒ 约 27 min），而它对同一份（清单 + 配置 + 谱面文件）是**纯函数**。
+# 不缓存 ⇒ 每次开训都要先等半小时才轮到第一个优化步；训练因此被数据侧饿死。
+#
+# 纪律：
+# - 指纹覆盖**一切影响规划的输入**（口径版本 / 配置 / 行身份 / 谱面与特征元数据的 stat），
+#   因此「改了配置却复用旧计划」不可能发生；
+# - 任何读失败都**回退到重建**（缓存是加速器，不是事实源）；写入是**原子**的。
+
+
+def _plan_cache_path(config: DatasetConfig, rows: Sequence[PairRow]) -> Path | None:
+    """索引缓存的落盘路径（None = 该配置下不缓存）。"""
+    if not config.index_cache:
+        return None
+    directory = (
+        config.index_cache_dir
+        if config.index_cache_dir is not None
+        else config.manifest_path.parent / _PLAN_CACHE_DIRNAME
+    )
+    return directory / f"{_plan_fingerprint(config, rows)}.npz"
+
+
+def _file_stamp(path: Path) -> str:
+    """文件的 `(size, mtime_ns)` 戳（读失败 => `missing`；不读内容，只 stat）。"""
+    try:
+        info = path.stat()
+    except OSError:
+        return "missing"
+    return f"{info.st_size}:{info.st_mtime_ns}"
+
+
+def _plan_fingerprint(config: DatasetConfig, rows: Sequence[PairRow]) -> str:
+    """索引指纹：配置 + 每一行的身份 + 谱面/特征元数据文件的 stat。
+
+    **不哈希文件内容**（那正是要避免的 O(全库) 读盘）；stat 里的 `mtime_ns` 已足以
+    发现文件被替换。清单本身由调用方传入的行序列代表（已按 split/limit 切好）。
+    """
+    digest = hashlib.sha1()
+    digest.update(f"plan-v{_PLAN_CACHE_VERSION}".encode())
+    payload = {
+        "split": config.split,
+        "limit": config.limit,
+        "t_window": config.t_window,
+        "x_bins": config.x_bins,
+        "k_max": config.k_max,
+        "occlusion_ratio": config.occlusion_ratio,
+        "tau_end_s": config.tau_end_s,
+        "tau_end_policy": config.tau_end_policy,
+    }
+    digest.update(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode())
+    for row in rows:
+        chart_path = config.chart_dir / row.chart_path
+        feature_key = None if row.feature_key is None else str(row.feature_key)
+        meta_path = (
+            None if feature_key is None else feature_cache_paths(config.feature_dir, feature_key)[1]
+        )
+        digest.update(
+            (
+                f"|{row.chart_id}|{row.chart_path}|{row.feature_key}|{row.difficulty}"
+                f"|{_file_stamp(chart_path)}|{'n/a' if meta_path is None else _file_stamp(meta_path)}"
+            ).encode(),
+        )
+    return digest.hexdigest()
+
+
+def save_plan_cache(path: Path, plan: _DatasetPlan, *, fingerprint: str) -> None:
+    """原子落盘索引（先写临时文件再 `replace`，避免半个文件被当成有效缓存）。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    entries = plan.entries
+    temporary = path.with_suffix(".tmp.npz")
+    with temporary.open("wb") as handle:
+        np.savez(
+            handle,
+            row_index=np.asarray([e.row_index for e in entries], dtype=np.int32),
+            window_index=np.asarray([e.window_index for e in entries], dtype=np.int32),
+            tau_start_bins=np.asarray([e.tau_start_bins for e in entries], dtype=np.int32),
+            bpm_eff=np.asarray([e.bpm_eff for e in entries], dtype=np.float64),
+            fingerprint=np.asarray(fingerprint),
+            stats=np.asarray(json.dumps(dataclasses.asdict(plan.stats), ensure_ascii=False)),
+        )
+    temporary.replace(path)
+
+
+def load_plan_cache(path: Path, *, fingerprint: str) -> _DatasetPlan | None:
+    """读回索引缓存；**任何异常都返回 None**（缓存不是事实源，坏了就重建）。"""
+    try:
+        with np.load(path, allow_pickle=False) as data:
+            stored = str(data["fingerprint"])
+            if stored != fingerprint:
+                logger.warning(
+                    "索引缓存指纹不符（存 %s / 算 %s），改为重建：%s",
+                    stored[:12],
+                    fingerprint[:12],
+                    path,
+                )
+                return None
+            stats = DatasetIndexStats(**json.loads(str(data["stats"])))
+            entries = tuple(
+                _WindowEntry(
+                    row_index=int(row),
+                    window_index=int(window),
+                    tau_start_bins=int(start),
+                    bpm_eff=float(bpm),
+                )
+                for row, window, start, bpm in zip(
+                    data["row_index"],
+                    data["window_index"],
+                    data["tau_start_bins"],
+                    data["bpm_eff"],
+                    strict=True,
+                )
+            )
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        logger.warning("索引缓存不可用（%s），改为重建：%s", exc, path)
+        return None
+    if len(entries) != stats.n_windows:
+        logger.warning(
+            "索引缓存自相矛盾（条目 %d != 记账 %d），改为重建", len(entries), stats.n_windows
+        )
+        return None
+    return _DatasetPlan(entries=entries, stats=stats)
 
 
 class ChartPairDataset(torch.utils.data.Dataset[PairSample]):
@@ -679,6 +892,15 @@ class ChartPairDataset(torch.utils.data.Dataset[PairSample]):
             rows = rows[: config.limit]
         self._rows: tuple[PairRow, ...] = tuple(rows)
         self._plan: _DatasetPlan | None = None
+        #: 特征缓存**元数据**（含音频时长）：小的 JSON，索引期就要用（τ 轴终点口径），
+        #: 且每行只读一次。不做 LRU —— 全库 8551 条也只占几 MB。
+        self._meta_cache: dict[str, FeatureCacheMeta] = {}
+        #: 已解析谱面的 LRU（plan 02 §9 ④：`__getitem__` 曾对同一行重复解析）。
+        self._chart_cache: OrderedDict[int, PhigrosChart | _SkipRow] = OrderedDict()
+        #: 已载入特征数组的 LRU（同上；单首 (T, 1024) fp16 约 40-50 MB）。
+        self._feature_cache: OrderedDict[str, NDArray[Dynamic]] = OrderedDict()
+        #: 本次索引是否来自落盘缓存（诊断用；**不影响**任何结果）。
+        self._plan_from_cache = False
         #: 「重掷种子后仍 r == 1 => 退化为无遮盖」的窗口数（**诊断计数**，
         #: 逐进程累加：DataLoader 各 worker 各有一份副本）。
         self._no_context_fallbacks = 0
@@ -724,6 +946,7 @@ class ChartPairDataset(torch.utils.data.Dataset[PairSample]):
             f"x_bins={config.x_bins}, k_max={config.k_max}, "
             f"occlusion_ratio={config.occlusion_ratio}, seed={config.seed})",
             self.stats().describe(),
+            "索引来源：" + ("落盘缓存" if self._plan_from_cache else "本次构建"),
             f"退化（重掷种子后仍 r==1 => 无遮盖）窗口数：{self._no_context_fallbacks}",
         ]
         return "\n".join(lines)
@@ -742,13 +965,118 @@ class ChartPairDataset(torch.utils.data.Dataset[PairSample]):
         if not 0 <= index < total:
             raise IndexError(f"窗口下标 {index} 越界（共 {total} 个窗口）")
         entry = plan.entries[index]
-        return self._build_sample(self._rows[entry.row_index], entry)
+        return self._build_sample(self._rows[entry.row_index], entry, row_index=entry.row_index)
+
+    # ── τ 轴终点口径（模块 docstring 的实测依据）────────────────────
+    def _feature_meta(self, row: PairRow) -> FeatureCacheMeta | None:
+        """特征缓存的**元数据**（小 JSON，含 `duration_s` = 音频时长）。
+
+        索引期读它是必要的：τ 轴终点口径要音频时长（模块 docstring），而 meta 只有几 KB，
+        与「索引期不载特征数组」的纪律并不冲突。每行只读一次并缓存。
+
+        Returns:
+            None = 缺 `feature_key` / meta 不可读 / 结构非法（调用方按回退记账）。
+        """
+        key = row.feature_key
+        if key is None:
+            return None
+        cached = self._meta_cache.get(str(key))
+        if cached is not None:
+            return cached
+        _npz_path, meta_path = feature_cache_paths(self.config.feature_dir, str(key))
+        try:
+            meta = FeatureCacheMeta.model_validate_json(meta_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            logger.warning("特征缓存元数据不可读：%s（τ 轴终点回退到谱面口径）", meta_path)
+            return None
+        self._meta_cache[str(key)] = meta
+        return meta
+
+    def _axis_end_s(
+        self,
+        chart: PhigrosChart,
+        row: PairRow,
+        *,
+        counters: _IndexCounters | None,
+    ) -> float:
+        """τ 轴终点（秒）：显式 `tau_end_s` > `tau_end_policy`（见模块 docstring）。
+
+        `counters` 为 None 时只算不记账（`__getitem__` 路径复用同一口径，保证与索引逐位一致）。
+        """
+        config = self.config
+        if config.tau_end_s is not None:
+            return float(config.tau_end_s)
+        chart_end = float(chart.duration_s())
+        if config.tau_end_policy == "chart":
+            return chart_end
+        meta = self._feature_meta(row)
+        if meta is None:
+            if counters is not None:
+                counters.tau_end_fallback_rows += 1
+            return chart_end
+        audio_end = float(meta.duration_s)
+        if chart_end > audio_end:
+            if counters is not None:
+                counters.tau_end_truncated_rows += 1
+                counters.tau_end_truncated_seconds += chart_end - audio_end
+            return audio_end
+        return chart_end
+
+    # ── 行级缓存（plan 02 §9 ④：取批成本是训练吞吐的前置）────────────
+    def _chart_for(self, row_index: int, row: PairRow) -> PhigrosChart | _SkipRow:
+        """取该行的谱面（带 LRU；`__getitem__` 不再重复解析同一行）。"""
+        size = self.config.chart_cache_size
+        if size <= 0:
+            return self._read_chart_or_skip(row)
+        cached = self._chart_cache.get(row_index)
+        if cached is not None:
+            self._chart_cache.move_to_end(row_index)
+            return cached
+        chart = self._read_chart_or_skip(row)
+        self._chart_cache[row_index] = chart
+        if len(self._chart_cache) > size:
+            self._chart_cache.popitem(last=False)
+        return chart
+
+    def _embedding(self, row: PairRow) -> NDArray[Dynamic]:
+        """取该行的特征数组（带 LRU；同一谱面的相邻窗口取批时命中率高）。"""
+        key = None if row.feature_key is None else str(row.feature_key)
+        size = self.config.feature_cache_size
+        if size <= 0 or key is None:
+            return self._load_feature(row)[0]
+        cached = self._feature_cache.get(key)
+        if cached is not None:
+            self._feature_cache.move_to_end(key)
+            return cached
+        embedding, _frames = self._load_feature(row)
+        self._feature_cache[key] = embedding
+        if len(self._feature_cache) > size:
+            self._feature_cache.popitem(last=False)
+        return embedding
 
     # ── 索引构建 ────────────────────────────────────────────────
     def _ensure_plan(self) -> _DatasetPlan:
-        """惰性构建索引（幂等；构建完成前失败则下次重试）。"""
-        if self._plan is None:
-            self._plan = self._build_plan()
+        """惰性构建索引（幂等；构建完成前失败则下次重试）。
+
+        优先读**落盘缓存**（指纹覆盖配置与文件 stat，见 :func:`_plan_fingerprint`）：
+        索引是全库级的 O(行数) 解析，不缓存就等于每次开训先等半小时（plan 02 §9 ④）。
+        缓存缺失 / 损坏 / 指纹不符都回退到重建，且**任何**回退都不改变结果。
+        """
+        if self._plan is not None:
+            return self._plan
+        path = _plan_cache_path(self.config, self._rows)
+        if path is not None and path.is_file():
+            cached = load_plan_cache(path, fingerprint=_plan_fingerprint(self.config, self._rows))
+            if cached is not None:
+                self._plan = cached
+                self._plan_from_cache = True
+                logger.info("索引缓存命中：%s（窗口 %d）", path, cached.stats.n_windows)
+                return self._plan
+        self._plan = self._build_plan()
+        if path is not None:
+            save_plan_cache(
+                path, self._plan, fingerprint=_plan_fingerprint(self.config, self._rows)
+            )
         return self._plan
 
     def _build_plan(self) -> _DatasetPlan:
@@ -756,7 +1084,7 @@ class ChartPairDataset(torch.utils.data.Dataset[PairSample]):
         entries: list[_WindowEntry] = []
         for row_index, row in enumerate(self._rows):
             counters.n_rows += 1
-            planned = self._plan_row(row)
+            planned = self._plan_row(row_index, row, counters)
             if isinstance(planned, _SkipRow):
                 counters.add_skip(planned)
                 continue
@@ -808,17 +1136,34 @@ class ChartPairDataset(torch.utils.data.Dataset[PairSample]):
         except RpeParseError:
             return _SkipRow("parse_error")
 
-    def _plan_row(self, row: PairRow) -> _RowPlan | _SkipRow:
-        """一行的窗口规划；跳过时返回原因（每一类都有计数器）。"""
+    def _plan_row(
+        self,
+        row_index: int,
+        row: PairRow,
+        counters: _IndexCounters,
+    ) -> _RowPlan | _SkipRow:
+        """一行的窗口规划；跳过时返回原因（每一类都有计数器）。
+
+        走 :meth:`_chart_for`（带 LRU）：索引期解析出的谱面**留在缓存里**，
+        于是训练的第一个批次不必把同一张谱再解析一遍。
+        """
         config = self.config
-        chart = self._read_chart_or_skip(row)
+        chart = self._chart_for(row_index, row)
         if isinstance(chart, _SkipRow):
             return chart
         if len(chart.lines) > config.k_max:
             return _SkipRow("too_many_lines")
-        grid = FieldGrid(x_bins=config.x_bins).for_chart(chart, tau_end_s=config.tau_end_s)
+        grid = FieldGrid(x_bins=config.x_bins).for_chart(
+            chart,
+            tau_end_s=self._axis_end_s(chart, row, counters=counters),
+        )
         if grid.t_bins < config.t_window:
             return _SkipRow("no_windows")
+        counters.events_beyond_tau_end += _count_events_beyond_axis(
+            chart,
+            grid.bpm_points,
+            grid.t_bins,
+        )
         planned = _plan_windows(
             chart, grid, config.t_window, occlusion_ratio=config.occlusion_ratio
         )
@@ -858,16 +1203,23 @@ class ChartPairDataset(torch.utils.data.Dataset[PairSample]):
         embedding, _meta = load_feature_cache(npz_path, meta_path)
         return embedding, int(embedding.shape[0])
 
-    def _build_sample(self, row: PairRow, entry: _WindowEntry) -> PairSample:
-        """构建一个窗口样本（纯函数式：全部输入来自 config / 行 / 索引项）。"""
+    def _build_sample(self, row: PairRow, entry: _WindowEntry, *, row_index: int) -> PairSample:
+        """构建一个窗口样本（纯函数式：全部输入来自 config / 行 / 索引项）。
+
+        `row_index` 只用于**行级 LRU 的键**（不影响输出：同一行两次取值逐位一致）。
+        """
         config = self.config
-        chart = self._read_chart_or_skip(row)
+        chart = self._chart_for(row_index, row)
         if isinstance(chart, _SkipRow):  # 索引期已通过；文件在两次访问之间变化才会到这里
             raise RuntimeError(
                 f"索引期可用的行在取样本时失败（{chart.reason}）：chart_id={row.chart_id}",
             )
-        embedding, _n_frames = self._load_feature(row)
-        grid = FieldGrid(x_bins=config.x_bins).for_chart(chart, tau_end_s=config.tau_end_s)
+        embedding = self._embedding(row)
+        # 与索引期**同一个**终点口径（显式覆盖 > policy），否则窗口定位会对不上。
+        grid = FieldGrid(x_bins=config.x_bins).for_chart(
+            chart,
+            tau_end_s=self._axis_end_s(chart, row, counters=None),
+        )
         start = entry.tau_start_bins
         window_grid = _window_grid(
             config.x_bins,

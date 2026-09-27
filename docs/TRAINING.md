@@ -254,7 +254,16 @@ uv run python scripts/fetch_phira.py stats                     # 语料统计 �
 uv run python scripts/extract_features.py --dry-run      # 只报账（不加载权重、不写缓存）
 uv run python scripts/extract_features.py --limit 24     # 冒烟
 uv run python scripts/extract_features.py                # 全量（可续跑：已有缓存跳过）
+
+# ★ 全量推荐：store 压缩（省掉 52% 的纯 CPU zlib）+ 3 分片（按缓存键 sha1 取模，键集不交）
+uv run python scripts/extract_features.py --shard 0/3 --npz-compression store --log-every 200
+uv run python scripts/extract_features.py --shard 1/3 --npz-compression store --log-every 200
+uv run python scripts/extract_features.py --shard 2/3 --npz-compression store --log-every 200
 ```
+
+> ⚠️ **不要在 GPU 被别的作业占着时开多个分片**：每分片各持一份模型（≈1.6 GB 显存），
+> 显存不够会直接 CUDA OOM。分片记账各写 `features_report.shard{i}of{N}.json`，
+> 规范口径的 `features_report.json` 由 `--dry-run` 重新生成。
 
 - 音频由清单的 `audio_path` 定位（**内容 sha1** 命名）；**缓存键 = 音频内容 sha1**
   ⇒ 「同曲多谱只抽一次」是结构性的，不靠调用方记得去重。
@@ -263,9 +272,19 @@ uv run python scripts/extract_features.py                # 全量（可续跑：
   `models/pretrained/m-a-p/MERT-v1-330M` 优先（缺失才回落 HF id）。
 - 缓存元数据六项校验（rate / sample_rate / layer / model_rev / duration→帧数 / dtype / adapter），
   其中 `rate` 必须 == `MERT_FRAME_RATE_HZ = 75`（派生量，红线 7）。
-- **实测（2026-09-27，RTX 5070 Laptop 8 GB / 115 W 限功耗）**：24 首 1.7–3.3 分钟曲目共 **48 s**
-  （≈2 s/首，含首次权重加载 ~10 s）；帧数全部满足 `T_seq == round(duration_s × 75)`
-  （例：148.77 s → 11157 帧）。
+- **实测吞吐（2026-09-27，RTX 5070 Laptop 8 GB / 115 W 限功耗）**：
+
+  | 配置 | 秒/首 | GPU 利用率 |
+  |---|---|---|
+  | 单进程 + 默认 deflate（旧口径） | 1.65 | 33–36%（峰谷） |
+  | **3 分片 + `store`（生产推荐）** | **0.76** | **96%** |
+
+  瓶颈**不是 GPU**：单首 1.65 s 里 `np.savez_compressed` 占 **52%**（deflate 对 fp16 特征
+  只有 1.09× 压缩比，L1/L3/L6 无差别），GPU 前向只占 36%。`store` 把落盘降到 0.015 s
+  （39–48×），代价是文件大约 +9%（数组与元数据逐字段一致，加载器校验照常通过）。
+  `--pipeline`（预取 + 后台落盘）基准里 2.85×，但**生产上会挂住**（CPU 满载、GPU 0%、
+  无输出）⇒ **暂不可用**，见 plan 02 §9 待办。
+- 帧数全部满足 `T_seq == round(duration_s × 75)`（例：148.77 s → 11157 帧）。
 - 报告落 `data/processed/features_report.json`（含 provenance、失败清单与 dry-run 计数）。
 
 > 下游：`pairs.json` 只收**特征齐备**的行（`build_pairs(require_feature=True)`），
@@ -304,6 +323,34 @@ uv run python scripts/extract_features.py                # 全量（可续跑：
 
 **两种跑法**：① **命令行（推荐，会落盘并强制 fail-closed）**：`uv run beatmorph-train --gates`
 （或 `--gates-only` 只跑门禁）；② 手工片段（下文），用于研究单个门禁的行为。
+
+**真实数据上的门禁预算（2026-09-27 第五轮实测，务必先读）**：
+
+- **数据侧先自证不是退化的**（本轮两次假结论都出在这里）：门禁 FAIL 时先看 `gates.txt` 上下文的
+  `g1_events` / `g2_events` / `g2_hidden_events` / `g1_lines` / `g2_lines` / `g3_events`。
+  - `g1_events = 0` ⇒ G1 是**空过**（曾经报到 0.0014 的「过拟合」）；现在由
+    `gates.batch_min_events`（默认 1）兜底：取不到非空批就重抽，重抽不到即抛。
+  - `τ 轴终点缺陷`（`chartTime` 虚高，52% 的语料）曾让批里几乎全是空窗，**伪造出**「G2 结构性 FAIL」。
+    详见 **RFC-0031** 与 plan 02 §9 第四轮；默认口径 `data.tau_end_policy=audio` 已落地，改回
+    `chart` 即回旧行为。
+- **G2 的两臂必须同批同损失**：`build_gate_inputs` 会建一对配对臂（真实目标 / 打乱目标，
+  同批同 seed），**不得**拿 G1 的遮盖补全臂当 G2 的真实臂——两者不同测度，比值由批大小与
+  重标定系数决定，对照会变成恒真。装配处有 fail-closed 断言兜底。
+- **8 GB 卡上不要让它滑进 Windows 共享内存**（本轮实测的坑）：四个批 + 四个模型同时在场时
+  `nvidia-smi` 到 **7.88 / 8.15 GB**、功耗掉到 88 W，**同一个 G3 步从 0.57 s 变成 8.8 s**，
+  整轮门禁跑不完（表现为「GPU 100% 但迟迟不结束」）。装配已改为 G3 预计算先跑、跑完立即释放
+  （plan 07 §9-27）。判据：`nvidia-smi` 的 `power.draw` 应稳定在 **90 W 上下**；若长期 < 90 W
+  且显存贴顶，先怀疑共享内存回退，**不要**盲目加大步数预算。
+- **时间预算（实测）**：200 行切片整轮 **38 min**（`--device cuda`；其中 G2 两臂 100 步 ≈ 23 min）。
+  **步时 ∝ (K·T)²**（global 层对 `K·T` 做全自注意力）：G1 批 `K=12` → 0.10 s/步、
+  `K=29`（`L=5568`）→ ~7 s/步、`K=33` → ~9 s/步。CPU 上是小时级，必须给设备：
+
+  ```bash
+  uv run beatmorph-train --config-name phigros_masked --gates-only --device cuda --skip-env-doctor data.max_samples=200
+  ```
+
+- **索引有落盘缓存**（plan 02 §9 ④）：全库（6750 行）首次重建 **36.5 min**，命中缓存后是**秒级**
+  （日志会写「索引缓存命中」）。缓存指纹覆盖配置与文件 stat，改配置/换谱面会自动重建。
 
 `gates.txt` 里除了 `summarize()` 原文，还会写**本次生效的阈值**（例如 `g1_steps`、`g2_samples`、
 `g3_min_improvement`）与上下文（git rev / 数据来源 / 派生帧率）——因为门禁阈值对量纲敏感，
@@ -348,7 +395,7 @@ assert all(results), results  # 未全绿 → 停止，不要扩数据
 
 | 项 | 状态 |
 |----|------|
-| ✅ **门禁冒烟（今天就能跑）** | `uv run beatmorph-train --config-name smoke --gates-only` —— 合成谱、无权重、无网络、无 GPU，数秒跑完 G1-G4 并把六件套写进 `runs/smoke/<时间戳>/` |
+| ✅ **门禁冒烟（今天就能跑）** | `uv run beatmorph-train --config-name smoke --gates-only` —— 合成谱、无权重、无网络、无 GPU，**CPU 约 2 分钟**跑完 G1-G4 并把六件套写进 `runs/smoke/<时间戳>/`（G2 改成「同输入、只打乱被遮盖标签」的严格口径后比原先慢，见 §7.1 与 plan 07 §9-19） |
 | ✅ **训练入口** | `uv run beatmorph-train --config-name phigros_masked --gates`（真实清单 + 特征缓存）。`--gates` 先跑 G1-G4，**任一 FAIL 即以退出码 5 中止**；不跑门禁而数据规模超过冒烟上限时 **fail-closed 拒绝启动** |
 | ✅ 训练栈 | `beatmorph/infra/train_loop.py`（torch 参考循环，默认 `run.backend=torch`）；`beatmorph/infra/lightning_module.py`（Lightning 目标栈，需 `uv sync --extra train`，缺失时给出安装命令而**不静默回落**） |
 | ✅ 环境自检 | `uv run python -m beatmorph.infra.env_doctor`（退出码 0/1/2 = 全 PASS / 有 FAIL / 有 UNKNOWN）；训练入口默认先跑它，可用 `--skip-env-doctor` 跳过（仅测试/容器） |

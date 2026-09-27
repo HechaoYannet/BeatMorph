@@ -698,7 +698,15 @@ run_gates(*, step_fns: GateStepFns, out_path: Path, cfg) -> list[GateResult]
     - 护栏：`tests/unit/data/test_plan.py`（9）+ `tests/unit/infra/test_plan_batches.py`（6，
       含 **workers=0/2 逐位一致**的真实 spawn 等价性）+ 集成 pickle 往返。默认 CI **1033 passed**。
     - **未做**：S5 巡检；worker 侧 `r == 0` 计数的旁路汇总（docstring 已写明是已知缺口）；
-      验收判据 3/5/6（`perf/data_share` <20%、峰值显存差 ≤50 MiB、2 万步 ≤2.0 h）**待一次
-      带 `data.workers=3` 的真实训练**。
+      验收判据 3/5/6。
+
+    **验收已实测（2026-09-27 19:55，`--resume latest` 从 step 4000 起，`OMP_NUM_THREADS=2` +
+    `data.workers=3`）**：索引缓存命中、**未跑门禁**、指纹校验通过（RFC §5 三条论证在真实路径上成立）。
+    `perf/data_share` 中位 **5.0%**（数据 0.00 s / 计算 0.08 s，目标 <20% ✅）；
+    步时中位 **0.539 → 0.099 s（5.4×）**；剩余 15,500 步 ETA **1.01 h**（旧管线 4.69 h，目标 ≤2.0 h ✅）；
+    峰值显存 4.87 GiB（无回退，但注意 `max_memory_allocated` 是**进程内**高水位，不是受控对比）；
+    K 中位 25 / p90 58（旧 26 / 66）⇒ 取批顺序变更**没有**偏斜 K。
+    **未达标一项**：GPU 利用率中位 **42%**（目标 >50%）—— 数据侧已不是瓶颈，剩余空转在**主进程串行段**
+    （collate + 同步 H2D；`pin_memory` 已开但 `to(device)` 未用 `non_blocking`）。
 
 [POSTMORTEM-2026-08-05]: ../POSTMORTEM-2026-08-05-frame-rate-misalignment.md

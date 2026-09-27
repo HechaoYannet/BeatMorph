@@ -369,6 +369,24 @@ def build_gate_inputs(
     # **0.57 s 放大到 8.8 s（15×）**，整轮门禁从分钟级变成小时级且迟迟不结束。
     # G3 是独立臂（它只要 `model_loss` / 基线 / 帧数 / 时长这四个标量），因此没有理由
     # 和其余三个模型共处；释放后 G1/G2 的显存回到「三个模型 + 三个批」的量级。
+    # 门禁是**分钟级静默**的（此前整轮跑完才写第一行日志）⇒ 外部无法区分「慢」与「卡死」。
+    # 这三个批的形状（尤其是 K）**就是**门禁耗时的决定量：步时 ∝ (K·T)²，G2/G3 还要 ×16 段。
+    logger.info(
+        "门禁批：G1 K=%d samples=%d events=%.0f｜G2 K=%d samples=%d events=%.0f（遮盖内 %.0f）"
+        "｜G3 K=%d samples=%d events=%.0f；chunks=%d precision=%s",
+        g1_batch.n_lines(),
+        g1_batch.batch_size(),
+        event_total(g1_batch),
+        real_batch.n_lines(),
+        real_batch.batch_size(),
+        event_total(real_batch),
+        event_total(shuffled_batch),
+        g3_batch.n_lines(),
+        g3_batch.batch_size(),
+        event_total(g3_batch),
+        g2_chunks,
+        cfg.optim.precision,
+    )
     g3_model = build_model(
         g3_batch.grid, model_seed=seed + 1, head_bias=gates.contrast_initial_head_bias
     )
@@ -380,9 +398,16 @@ def build_gate_inputs(
         chunks=g2_chunks,
         precision=cfg.optim.precision,
     )
+    logger.info(
+        "门禁 G3 预计算开始：%d 步 x %d 段（K=%d）——这一项在正常 K 下就要十几分钟",
+        max(1, gates.shuffle_steps),
+        g2_chunks,
+        g3_batch.n_lines(),
+    )
     model_loss = g3_step()
     for _ in range(max(1, gates.shuffle_steps) - 1):
         model_loss = g3_step()
+    logger.info("门禁 G3 预计算完成：model_loss=%.4f", model_loss)
     g3_events = event_total(g3_batch)
     g3_lines = float(g3_batch.n_lines())
     g3_samples_used = float(g3_batch.batch_size())

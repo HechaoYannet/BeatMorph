@@ -17,7 +17,8 @@ from __future__ import annotations
 
 import copy
 import re
-from collections.abc import Mapping, Sequence
+import time
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -104,33 +105,68 @@ def thresholds_of(cfg: GatesConfig) -> dict[str, float | int]:
     }
 
 
-def run_gates(inputs: GateInputs, cfg: GatesConfig) -> list[GateResult]:
-    """按 `sanity.py` 的判据跑完 G1-G4（**只组装，不落盘、不抛错**）。"""
-    return [
-        overfit_single_batch(
-            inputs.step_fn_real,
-            steps=cfg.overfit_steps,
-            target_loss=cfg.overfit_target_loss,
-            target_ratio=cfg.overfit_target_ratio,
+def run_gates(
+    inputs: GateInputs,
+    cfg: GatesConfig,
+    *,
+    progress: Callable[[str], None] | None = None,
+) -> list[GateResult]:
+    """按 `sanity.py` 的判据跑完 G1-G4（**只组装，不落盘、不抛错**）。
+
+    `progress` 是逐门禁进度回调（默认 None = 静默）。**为什么必须有它**：
+    正常 K 下门禁的预算是 **~38-45 min**（G2 = 200 步 x 16 段串行前向），而此前
+    `execute_gates` 直到全部跑完才写第一行日志 ⇒ 外部**无法区分「慢」与「卡死」**，
+    只能靠功耗 / util 猜。2026-09-27 实测踩坑：据此把一个**正常在跑**的门禁误判为卡死、
+    掐掉两次（浪费约 40 min GPU）。逐门禁的耗时日志是那个误判的唯一解药。
+    """
+    stages: list[tuple[str, Callable[[], GateResult]]] = [
+        (
+            "G1 单batch过拟合",
+            lambda: overfit_single_batch(
+                inputs.step_fn_real,
+                steps=cfg.overfit_steps,
+                target_loss=cfg.overfit_target_loss,
+                target_ratio=cfg.overfit_target_ratio,
+            ),
         ),
-        shuffled_target_control(
-            inputs.step_fn_g2_real,
-            inputs.step_fn_g2_shuffled,
-            steps=cfg.shuffle_steps,
-            min_gap_ratio=cfg.shuffle_min_gap_ratio,
+        (
+            "G2 打乱标签对照",
+            lambda: shuffled_target_control(
+                inputs.step_fn_g2_real,
+                inputs.step_fn_g2_shuffled,
+                steps=cfg.shuffle_steps,
+                min_gap_ratio=cfg.shuffle_min_gap_ratio,
+            ),
         ),
-        constant_baseline_gate(
-            inputs.model_loss,
-            inputs.baseline_loss,
-            min_improvement=cfg.baseline_min_improvement,
+        (
+            "G3 常数基线",
+            lambda: constant_baseline_gate(
+                inputs.model_loss,
+                inputs.baseline_loss,
+                min_improvement=cfg.baseline_min_improvement,
+            ),
         ),
-        frame_rate_gate(
-            inputs.frames,
-            inputs.duration_s,
-            inputs.frame_rate,
-            tol_frames=cfg.frame_rate_tol_frames,
+        (
+            "G4 帧率契约",
+            lambda: frame_rate_gate(
+                inputs.frames,
+                inputs.duration_s,
+                inputs.frame_rate,
+                tol_frames=cfg.frame_rate_tol_frames,
+            ),
         ),
     ]
+    results: list[GateResult] = []
+    for name, run in stages:
+        if progress is not None:
+            progress(f"门禁 {name}：开始")
+        started = time.perf_counter()
+        result = run()
+        results.append(result)
+        if progress is not None:
+            state = "PASS" if result.passed else "FAIL"
+            progress(f"门禁 {name}：{state}（{time.perf_counter() - started:.1f}s）{result.detail}")
+    return results
 
 
 def bounded_gate_config(cfg: TrainConfig) -> TrainConfig:
@@ -310,7 +346,7 @@ def execute_gates(
     Raises:
         GateFailure: 存在 FAIL（训练必须中止，退出码非 0）。
     """
-    results = run_gates(inputs, cfg.gates)
+    results = run_gates(inputs, cfg.gates, progress=lambda message: logger.info("%s", message))
     text = format_gates_text(results, thresholds=thresholds_of(cfg.gates), context=context)
     target = Path(gates_path)
     target.parent.mkdir(parents=True, exist_ok=True)

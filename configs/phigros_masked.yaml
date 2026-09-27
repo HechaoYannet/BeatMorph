@@ -54,8 +54,13 @@ data:
   #   **语义无关**（RFC-0034 §5）：顺序与覆盖率都是「计划层」的纯函数（beatmorph/data/plan.py）
   #   ⇒ 改它不改变样本序列、不改变覆盖率、不改变续训指纹（进 checkpoint.RESUME_IGNORED_KEYS）。
   #   ⚠️ 必须同时限住每个 worker 的 BLAS 线程，否则 N 个 worker 各自开满 24 核会过度订阅：
-  #      启动前设 OMP_NUM_THREADS=2 MKL_NUM_THREADS=2（未设时训练会打 WARNING）。
-  workers: 3
+  #      启动前设 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1（未设时训练会打 WARNING）。
+  #   ★ 8 是**实测标定**出的拐点（2026-09-27 第十轮，scripts/local_worker_scaling.py；真实
+  #     train split、只改本字段）：供给能力 2.51 / 4.42 / **6.33** / 5.75 / 6.28 窗口/s
+  #     @ N=3/6/8/10/12 ⇒ **N≥8 起不再上涨**（OMP 取 1 或 2、pin_memory 开或关都不改变）。
+  #     训练需求约 11.5 窗口/s（计算段中位 0.087 s）⇒ 加 worker 到 8 为止；再加只吃内存
+  #     （每 worker 约 1 GiB，N=12 时可用物理内存已从 18.8 掉到 7.4 GiB）。
+  workers: 8
   max_samples: null
 
 model:

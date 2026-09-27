@@ -84,7 +84,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from itertools import pairwise
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import numpy as np
 import torch
@@ -905,6 +905,43 @@ class ChartPairDataset(torch.utils.data.Dataset[PairSample]):
         #: 逐进程累加：DataLoader 各 worker 各有一份副本）。
         self._no_context_fallbacks = 0
 
+    #: 交给 DataLoader worker 时**不**序列化的派生 / 进程内状态（各 worker 自己按需重建）。
+    #:
+    #: 为什么必须剥掉（RFC-0034 S2）：
+    #: ① `_plan` 是 10 MB 量级的派生结构，每个 worker 一份纯属浪费，而它可以从**落盘索引
+    #:    缓存**按需重建（秒级命中，不重解析任何谱面）；
+    #: ② 两个 LRU 是**进程内**状态，带着主进程的命中记录过去毫无意义，而命中率只与访问
+    #:    顺序有关（计划层决定）；
+    #: ③ 诊断计数必须**各进程独立**累加——复制过去等于把主进程的数字抄成 N 份，越加越错。
+    _WORKER_LOCAL_STATE: ClassVar[tuple[str, ...]] = (
+        "_plan",
+        "_chart_cache",
+        "_feature_cache",
+        "_plan_from_cache",
+        "_no_context_fallbacks",
+    )
+
+    def __getstate__(self) -> dict[str, Any]:
+        """序列化给 DataLoader worker 的视图（剥掉派生 / 进程内状态，见 `_WORKER_LOCAL_STATE`）。
+
+        没有它，spawn 出来的每个 worker 都会收到一份完整索引计划与主进程的 LRU —— 内存按
+        worker 数翻倍，而诊断计数还会被复制成 N 份。
+        """
+        return {
+            key: value
+            for key, value in self.__dict__.items()
+            if key not in self._WORKER_LOCAL_STATE
+        }
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        """worker 侧还原：派生状态留空，首次访问时按需从落盘缓存重建。"""
+        self.__dict__.update(state)
+        self._plan = None
+        self._chart_cache = OrderedDict()
+        self._feature_cache = OrderedDict()
+        self._plan_from_cache = False
+        self._no_context_fallbacks = 0
+
     # ── 只读诊断 ────────────────────────────────────────────────
     def rows(self) -> list[PairRow]:
         """本 split 的行（`limit` 已生效；只读副本）。"""
@@ -918,7 +955,11 @@ class ChartPairDataset(torch.utils.data.Dataset[PairSample]):
         """重掷种子后仍全遮、因而**退化为无遮盖（`r == 0`）**的窗口数（只增的诊断计数）。
 
         与索引期的 `skipped_windows_no_visible_context`（**与种子无关、必然全遮**而跳过的
-        窗口）相对。逐进程累计：DataLoader 各 worker 各持一份副本，全量只在主进程累计。
+        窗口）相对。
+
+        ⚠️ **口径**：逐**进程**累计。`data.workers=0` 时它就是全程精确值；workers>0 时每个
+        worker 各持一份副本，**worker 侧的计数目前不上报**（主进程只看到自己那份）——这是
+        RFC-0034 S3 明确记录的缺口（旁路汇总见该 RFC §7-S3），不是「已经精确」。
         """
         return self._no_context_fallbacks
 

@@ -23,16 +23,16 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections import deque
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
-import numpy as np
 import torch
-from numpy.typing import NDArray
 from torch import nn
 
 from beatmorph.core.logging import get_logger
@@ -73,6 +73,7 @@ __all__ = [
 
 if TYPE_CHECKING:
     from beatmorph.data.dataset import ChartPairDataset
+    from beatmorph.data.plan import WindowPlan
 
 logger = get_logger("infra.train_loop")
 
@@ -114,6 +115,17 @@ class BatchSource(Protocol):
         Returns:
             至少含 `epoch` / `windows_seen` / `windows_total` / `charts_seen` /
             `charts_total` 五个键；无有限数据集（合成来源）时 total 记 0。
+        """
+        ...
+
+    def batches(
+        self, *, start_step: int = 1, first: FieldBatch | None = None
+    ) -> Iterator[FieldBatch]:
+        """**流式**产出批次（训练主循环的唯一取批入口；`batch()` 留给门禁的重抽循环）。
+
+        为什么协议里要有它：把「一批一批拉」和「一次性拉一批」分开之后，真实来源才可以在
+        后台**预取**下一批（RFC-0034），而冒烟来源照旧逐批合成。`start_step` / `first`
+        的口径见 `ManifestBatchSource.batches`。
         """
         ...
 
@@ -777,6 +789,9 @@ def train(  # noqa: PLR0915 - 训练循环的语句数靠注释说明更清楚�
             model, optimizer, cfg, data_rev=data_rev, resume_from=resume_from, report=report
         )
     model.train()
+    # 取批入口：同步或 DataLoader（见 `ManifestBatchSource.batches`）。探测批在 start_step==1
+    # 时就是第一步的批（不白抽一个窗口）；续训时它只用来拿 grid，游标由 start_step 定位。
+    stream = source.batches(start_step=start_step, first=first_batch if start_step == 1 else None)
     history: list[tuple[int, float]] = []
     best = float("inf")
     log_every = max(1, int(cfg.run.log_every))
@@ -785,7 +800,7 @@ def train(  # noqa: PLR0915 - 训练循环的语句数靠注释说明更清楚�
     try:
         for step in range(start_step, cfg.optim.max_steps + 1):
             started = time.perf_counter()
-            raw = first_batch if step == start_step else source.batch(masked=True)
+            raw = next(stream)
             # 数据侧到此为止（选桶 → 取窗口 → 解析谱面 → 建场 → collate）。这一段全在
             # **主进程单线程关键路径**上，此刻 GPU 是空的（plan 07 §9-42）。
             drawn = time.perf_counter()
@@ -884,21 +899,15 @@ class ManifestBatchSource:
     split: str = "train"
     seed: int = 0
     _dataset: ChartPairDataset | None = None
-    _buckets: list[list[int]] | None = None
-    #: 每个桶在**本 epoch** 的抽签顺序（值 = 全局窗口下标，桶内按 seed 洗牌）。
-    _orders: list[NDArray[np.int64]] | None = None
-    #: 与 `_orders` 平行的每个桶已抽位置。
-    _positions: list[int] | None = None
-    #: 本 epoch 的随机流（先给各桶洗牌，再用于「按剩余窗口数加权选桶」）。
-    _epoch_rng: np.random.Generator | None = None
-    #: 当前 epoch（0 起；走完全部窗口 +1）。epoch 内每个窗口**恰好**被抽一次。
+    #: 当前 epoch 的取批计划（**纯函数产物**）：顺序与覆盖率全部由它回答，本对象不记账。
+    _plan: WindowPlan | None = None
+    #: 当前 plan 实际生效的块长（请求更大时按需重建，见 `plan`）。
+    _plan_chunk: int = 0
+    #: 本 epoch 已消费的槽位数。**两条路径（同步 / DataLoader）共用同一口径**
+    #: ⇒ `coverage()` 与 `data.workers` 无关。
+    _cursor: int = 0
+    #: 当前 epoch 序号（0 起；走完全部窗口后 +1）。
     _epoch: int = 0
-    #: 本 epoch 已抽走的窗口数（coverage 的 epoch 进度）。
-    _drawn_in_epoch: int = 0
-    #: 覆盖率记账（**跨 epoch 累计**）：见过的窗口 / 谱面。
-    _seen_windows: NDArray[np.bool_] | None = None
-    _seen_rows: NDArray[np.bool_] | None = None
-    _charts_total: int = 0
 
     def _ensure(self) -> ChartPairDataset:
         if self._dataset is None:
@@ -925,19 +934,29 @@ class ManifestBatchSource:
             )
         return self._dataset
 
-    def _grouped(self, dataset: ChartPairDataset) -> list[list[int]]:
-        """把窗口下标按网格身份分桶（桶序稳定：按 key 排序；桶内保持 index 升序）。
+    def plan(self, *, chunk: int | None = None) -> WindowPlan:
+        """当前 epoch 的取批计划（惰性构建；`chunk` 变大时重建并从头开始）。
 
-        复杂度 O(窗口数)（`grid_key` 只读索引计划，不解析谱面），首次调用后缓存。
-        桶序在构造时**不做随机化**（按 key 排序），桶内顺序也只由 `_ensure_epoch` 按
-        (seed, epoch) 派生的种子洗牌——「同一份配置两次运行逐位一致」是 M7.8 的硬要求。
+        为什么把顺序搬进一个**不可变对象**：修复前顺序由 `self._positions` 决定、覆盖率在
+        取批时**就地累加**，于是 worker 各持副本既不可复现、覆盖率还会静默失真（RFC-0033
+        的那类失效）。现在两者都是 `(seed, epoch, 数据集索引)` 的纯函数
+        ⇒ `data.workers` 取任何值都给出同一顺序、同一串覆盖率数字（RFC-0034 §5）。
         """
-        if self._buckets is None:
-            grouped: dict[tuple[int, int, float], list[int]] = {}
-            for index in range(len(dataset)):
-                grouped.setdefault(dataset.grid_key(index), []).append(index)
-            self._buckets = [grouped[key] for key in sorted(grouped)]
-        return self._buckets
+        need = max(int(chunk) if chunk is not None else self.cfg.optim.batch_size, 1)
+        if self._plan is None or need > self._plan_chunk:
+            from beatmorph.data.plan import plan_epoch
+
+            self._plan = plan_epoch(
+                self._ensure(),
+                seed=self.seed,
+                epoch=self._epoch,
+                chunk=need,
+                batch_size=self.cfg.optim.batch_size,
+            )
+            self._plan_chunk = self._plan.chunk
+            # 重建会换一套顺序 ⇒ 游标必须回到 epoch 开头（否则会跳过或重复窗口）。
+            self._cursor = 0
+        return self._plan
 
     #: 为满足 `min_events` 而重抽的上限（超过即抛，不无限重试）。
     max_event_draws: int = 64
@@ -966,84 +985,31 @@ class ManifestBatchSource:
             attempts=self.max_event_draws,
         )
 
-    def _ensure_epoch(
-        self,
-        buckets: Sequence[Sequence[int]],
-    ) -> tuple[list[NDArray[np.int64]], list[int]]:
-        """确保本 epoch 的抽签顺序存在：**每个桶各自洗牌、游标各自独立**。
-
-        为什么必须洗牌：桶内成员原本按 (行, 窗) 升序，只从前往后推进的话，一个 epoch
-        抽走的前 k 个永远落在固定的前几张谱面上——即使游标不再饱和，采样仍然是**有偏**的。
-        种子由 (run seed, epoch) 派生 ⇒ 同一份配置两次运行逐位一致（M7.8 的硬要求）。
-        """
-        if self._orders is None or self._positions is None:
-            rng = np.random.default_rng(self.seed * 1_000_003 + self._epoch)
-            self._orders = [
-                np.asarray(bucket, dtype=np.int64)[rng.permutation(len(bucket))]
-                for bucket in buckets
-            ]
-            self._positions = [0] * len(self._orders)
-            self._epoch_rng = rng
-        return self._orders, self._positions
-
     def _start_next_epoch(self) -> None:
-        """一个 epoch 抽完（每个窗口**恰好**抽过一次）：重开一轮并重新洗牌。"""
+        """一个 epoch 抽完（每个窗口**恰好**抽过一次）：进入下一轮并重建计划。"""
         self._epoch += 1
-        self._drawn_in_epoch = 0
-        self._orders = None
-        self._positions = None
-        self._epoch_rng = None
+        self._plan = None
+        self._plan_chunk = 0
+        self._cursor = 0
 
-    def _pick_bucket(self, want: int) -> int | None:
-        """按**剩余窗口数加权**随机选一个桶；都抽完则 None。
-
-        为什么不是简单轮转：桶大小极不均（min 1 / 中位 66 / max 35,751）。轮转会让每个桶
-        每次 sweep 各拿 1 个，于是小桶被整桶抽干、大桶只被抽走 0.06% —— 而桶是按
-        `bpm_eff` 分的，BPM 常见的大桶恰好装着最多的谱面。实测：轮转在 20,000 步只覆盖
-        3,122/6,614 张谱面（47%），而**按窗口均匀**抽样应当覆盖 ≈91%（每谱约 96 个窗口）。
-        按剩余数加权后，「抽一个窗口」就是均匀抽全库剩余窗口；同时仍只从一个桶里取，
-        因此 `collate_field_batch` 的网格身份约束照旧成立（batch_size > 1 也一样）。
-
-        `want` 优先满足：只要还有桶的剩余 >= want，就只在那些桶里加权选，
-        免得一个只剩 1 个窗口的桶把 16 样本的门禁批切成 1。
-        """
-        orders = self._orders
-        positions = self._positions
-        rng = self._epoch_rng
-        if orders is None or positions is None or rng is None:  # pragma: no cover - 前置条件
-            return None
-        remaining = [
-            int(order.shape[0]) - position
-            for order, position in zip(orders, positions, strict=True)
-        ]
-        candidates = [index for index, left in enumerate(remaining) if left >= want]
-        if not candidates:
-            candidates = [index for index, left in enumerate(remaining) if left > 0]
-            if not candidates:
-                return None
-        weights = np.asarray([remaining[index] for index in candidates], dtype=np.float64)
-        total = float(weights.sum())
-        if total <= 0.0:  # pragma: no cover - candidates 里每个 remaining 都 > 0
-            return candidates[0]
-        picked = int(rng.choice(len(candidates), p=weights / total))
-        return candidates[picked]
-
-    def _record_seen(self, dataset: ChartPairDataset, indices: Sequence[int]) -> None:
-        """覆盖率记账：累计「见过哪些窗口 / 哪些谱面」（跨 epoch 只增不减）。"""
-        if self._seen_windows is None:
-            self._seen_windows = np.zeros(len(dataset), dtype=np.bool_)
-            self._seen_rows = np.zeros(len(dataset.rows()), dtype=np.bool_)
-            self._charts_total = int(dataset.stats().n_rows_used)
-        rows = self._seen_rows
-        if rows is None:  # pragma: no cover - 与 _seen_windows 同生
-            return
-        for index in indices:
-            self._seen_windows[index] = True
-            rows[dataset.window_row_index(index)] = True
+    def _consume(self, *, size: int) -> list[int]:
+        """从计划里取**同一网格身份**的至多 `size` 个窗口下标（epoch 走完自动翻页）。"""
+        plan = self.plan(chunk=size)
+        if self._cursor >= plan.n_windows:
+            self._start_next_epoch()
+            plan = self.plan(chunk=size)
+        start = self._cursor
+        stop = min(start + size, int(plan.run_end[start]))
+        self._cursor = stop
+        return [int(value) for value in plan.order[start:stop]]
 
     def coverage(self) -> dict[str, float]:
-        """本 run 的数据覆盖（口径见 `BatchSource.coverage`）。"""
-        if self._seen_windows is None:
+        """本 run 的数据覆盖（口径见 `BatchSource.coverage`）。
+
+        **完全由计划前缀回答**，不做任何就地累加 ⇒ 与 worker 数无关（RFC-0034 §5）。
+        """
+        plan = self._plan
+        if plan is None:
             return {
                 "epoch": 0.0,
                 "windows_seen": 0.0,
@@ -1051,16 +1017,119 @@ class ManifestBatchSource:
                 "charts_seen": 0.0,
                 "charts_total": 0.0,
             }
-        total = int(self._seen_windows.shape[0])
-        progress = float(self._drawn_in_epoch) / total if total else 0.0
-        seen_rows = 0.0 if self._seen_rows is None else float(int(self._seen_rows.sum()))
+        seen, charts = plan.coverage_at(self._cursor)
+        total = float(plan.n_windows)
         return {
-            "epoch": float(self._epoch) + progress,
-            "windows_seen": float(int(self._seen_windows.sum())),
-            "windows_total": float(total),
-            "charts_seen": seen_rows,
-            "charts_total": float(self._charts_total),
+            "epoch": float(self._epoch) + (seen / total if total else 0.0),
+            "windows_seen": seen,
+            "windows_total": total,
+            "charts_seen": charts,
+            "charts_total": float(plan.charts_total),
         }
+
+    def batches(
+        self, *, start_step: int = 1, first: FieldBatch | None = None
+    ) -> Iterator[FieldBatch]:
+        """按计划顺序**流式**产出批次（训练主循环的唯一取批入口）。
+
+        `data.workers > 0` 时走 `torch.utils.data.DataLoader`（样本构造在 worker 进程里
+        并行，与 GPU 计算重叠）；否则走同步路径。**两条路径消费同一份 plan、同一 `_cursor`
+        口径** ⇒ 样本顺序、覆盖率、续训定位逐位一致（`data.workers` 因此是语义无关字段，
+        见 RFC-0034 §5）。
+
+        Args:
+            start_step: 从第几步开始（1 起）。`first is None` 且 `start_step > 1` 时把游标
+                直接定位到 `start_step - 1`（续训 O(1)，不重放前面的批次）。
+            first: 调用方已经先取过一批（建模型要 `FieldBatch.grid`）时交回来复用；
+                仅当 `start_step == 1` 时允许——续训必须从计划里定位，不能白抽一个窗口。
+
+        Raises:
+            ValueError: `first` 与 `start_step > 1` 同时给出。
+        """
+        if first is not None and start_step != 1:
+            raise ValueError(f"first 只在 start_step == 1 时可用（得到 start_step={start_step}）")
+        workers = max(0, int(self.cfg.data.workers))
+        if workers == 0:
+            yield from self._batches_sync(start_step=start_step, first=first)
+        else:
+            yield from self._batches_parallel(start_step=start_step, first=first, workers=workers)
+
+    def _seek(self, consumed: int) -> None:
+        """把游标定位到本 epoch 的第 `consumed` 个槽位（续训 O(1)）。"""
+        plan = self.plan()
+        if consumed >= plan.n_windows:  # pragma: no cover - 续训步数不会超过一个 epoch
+            raise ValueError(f"续训定位超出本 epoch（consumed={consumed} >= {plan.n_windows}）")
+        self._cursor = max(0, int(consumed))
+
+    def _batches_sync(self, *, start_step: int, first: FieldBatch | None) -> Iterator[FieldBatch]:
+        """同步路径（workers=0；门禁、冒烟与默认 CI 走它，行为与重构前一致）。"""
+        if first is None and start_step > 1:
+            self._seek(start_step - 1)
+        if first is not None:
+            yield first
+        while True:
+            yield self._draw(masked=True)
+
+    def _batches_parallel(
+        self, *, start_step: int, first: FieldBatch | None, workers: int
+    ) -> Iterator[FieldBatch]:
+        """DataLoader 路径：worker 只做**纯函数**的样本构造；顺序与记账都在主进程。
+
+        显存纪律（RFC-0034 §4）：worker **不建 CUDA context**（只在 CPU 上构造样本），
+        预取队列只落在**主机内存**（`prefetch_factor=2` ⇒ 在飞样本数有界），
+        GPU 上同时只有一个 batch（H2D 与计算仍由主循环串行驱动）。
+        """
+        from torch.utils.data import DataLoader
+
+        from beatmorph.data.dataset import collate_field_batch
+        from beatmorph.data.plan import PlanBatchSampler
+
+        batch_size = max(1, int(self.cfg.optim.batch_size))
+        if workers > 1 and not os.environ.get("OMP_NUM_THREADS"):
+            # 不在这里**替**调用方设环境变量：本进程的 BLAS 线程池早已初始化，改 os.environ
+            # 只对之后 spawn 的子进程有效，属于「看起来生效、实际半生效」的写法。
+            # 因此改为显式告警——过度订阅会让并行取批比串行更慢（RFC-0034 §4）。
+            logger.warning(
+                "data.workers=%d 但未设 OMP_NUM_THREADS：每个 worker 的 BLAS 可能各开满核"
+                "（本机 24 逻辑核，串行时单进程已用约 6.45 核）⇒ 建议 "
+                "OMP_NUM_THREADS=2 MKL_NUM_THREADS=2，否则并行取批可能比串行更慢。",
+                workers,
+            )
+        dataset = self._ensure()
+        step = int(start_step)
+        if first is not None:
+            # 探测批已在主进程取走 ⇒ 计划槽位 0 已消费，本轮从槽位 1 所在的批次继续。
+            self._cursor = 1
+            yield first
+            step += 1
+        else:
+            self._cursor = step - 1
+        plan = self.plan(chunk=batch_size)
+        sampler = PlanBatchSampler(plan, batch_size=batch_size, start_step=step)
+        # 批次切分在**主进程**完成（只有 dataset 与 collate_fn 进 worker）。槽位终点由
+        # batch_sampler 自己上报，**不**从 collate 出来的批次反推——记账不依赖物化。
+        pending: deque[int] = deque()
+        order = plan.order
+
+        def _indices() -> Iterator[list[int]]:
+            for start, stop in sampler.spans():
+                pending.append(stop)
+                yield [int(value) for value in order[start:stop]]
+
+        loader = DataLoader(
+            dataset,
+            batch_sampler=_indices(),
+            collate_fn=collate_field_batch,
+            num_workers=workers,
+            persistent_workers=True,
+            prefetch_factor=2,
+            pin_memory=torch.cuda.is_available(),
+        )
+        # 生成器被提前关闭时由 GC 回收 loader（DataLoader.__del__ 会收掉 worker 进程）；
+        # 长跑里 generator 与训练同寿命，不必手动收尾。
+        for batch in loader:
+            self._cursor = pending.popleft()
+            yield batch
 
     def _draw(
         self,
@@ -1071,10 +1140,10 @@ class ManifestBatchSource:
     ) -> FieldBatch:
         """取一批（`batch` 的重抽循环用它）。
 
-        **一个 epoch = 走遍全库、每个窗口恰好抽一次**：按网格桶轮转，桶内按 seed 洗牌，
-        每个桶有自己的游标。旧实现用一个**全局共享游标** `(start + take) % len(bucket)`，
-        而桶长最小为 1：只要碰到长度 1 的桶游标就被清零 ⇒ **1000 步后饱和在 993 个窗口**
-        （全库 0.156%）、674 张谱面（10%），此后 max_steps 加到多少都不见新数据
+        **一个 epoch = 走遍全库、每个窗口恰好抽一次**：顺序由 `beatmorph.data.plan` 一次性
+        物化（桶内按谱面分层轮转发牌、桶间按窗口数成比例交错）。修复前的实现用**一个全局
+        共享游标** `(start + take) % len(bucket)`，而桶长最小为 1 ⇒ 碰到就被清零、
+        **1000 步后饱和在 993 个窗口（全库 0.156%）/ 674 张谱面（10%）**
         （2026-09-27 实测，见 [RFC-0033](../../docs/decisions/RFC-0033-sampler-coverage-and-epoch.md)）。
 
         Raises:
@@ -1084,24 +1153,9 @@ class ManifestBatchSource:
 
         dataset = self._ensure()
         size = max(1, int(self.cfg.optim.batch_size if samples is None else samples))
-        buckets = self._grouped(dataset)
-        if not buckets:
-            raise ValueError("清单里没有可用样本（检查 split / max_samples / 特征缓存）")
-        orders, positions = self._ensure_epoch(buckets)
-        chosen = self._pick_bucket(size)
-        if chosen is None:
-            self._start_next_epoch()
-            orders, positions = self._ensure_epoch(buckets)
-            chosen = self._pick_bucket(size)
-            if chosen is None:  # pragma: no cover - 新 epoch 必然有窗口可抽
-                raise ValueError("索引里有 0 个窗口：无法取批")
-        order = orders[chosen]
-        start = positions[chosen]
-        take = min(size, int(order.shape[0]) - start)
-        indices = [int(value) for value in order[start : start + take]]
-        positions[chosen] = start + take
-        self._drawn_in_epoch += take
-        self._record_seen(dataset, indices)
+        indices = self._consume(size=size)
+        if not indices:  # pragma: no cover - 新 epoch 必然有窗口可抽
+            raise ValueError("索引里有 0 个窗口：无法取批")
         windows = [dataset[index] for index in indices]
         batch = collate_field_batch(windows)
         if not masked:
@@ -1112,7 +1166,7 @@ class ManifestBatchSource:
 
     def describe(self) -> str:
         """一行来源说明（含清单路径与切分）。"""
-        buckets = "" if self._buckets is None else f"，网格桶={len(self._buckets)}"
+        buckets = "" if self._plan is None else f"，网格桶={int(self._plan.bucket_id.max()) + 1}"
         return (
             f"manifest({self.split})：{self.cfg.data.manifest_path}"
             f"（max_samples={self.cfg.data.max_samples}，t_window={self.cfg.data.t_window}{buckets}）"

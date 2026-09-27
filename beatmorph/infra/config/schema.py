@@ -200,6 +200,11 @@ class DataConfig:
     tau_end_policy: str = "audio"
     chart_cache_size: int = 8
     feature_cache_size: int = 2
+    #: 取样本的 DataLoader worker 进程数（0 = 主进程同步取批）。
+    #: **语义无关字段**（RFC-0034 §5）：顺序与覆盖率都是「计划层」的纯函数，与 workers
+    #: 取值无关 ⇒ 它不参与续训指纹（见 `checkpoint.RESUME_IGNORED_KEYS`），
+    #: 改它不会让已有 checkpoint 失效，也不会改变样本序列。
+    workers: int = 0
     x_bins: int = RPE_X_GRID_BINS
     k_max: int = DEFAULT_K_MAX
     occlusion_ratio: float = 0.5
@@ -375,6 +380,8 @@ def validate_config(cfg: TrainConfig) -> list[str]:  # noqa: PLR0912, PLR0915 - 
         )
     if data.chart_cache_size < 0 or data.feature_cache_size < 0:
         problems.append("data.chart_cache_size / feature_cache_size 必须 >= 0")
+    if data.workers < 0:
+        problems.append(f"data.workers 必须 >= 0，得到 {data.workers}")
     if data.t_window < 1:
         problems.append(f"data.t_window 必须 >= 1，得到 {data.t_window}")
     if data.x_bins < 1:

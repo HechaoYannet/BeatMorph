@@ -161,6 +161,32 @@ def _dataset(tmp_path: Path) -> ChartPairDataset:
     )
 
 
+def test_dataset_pickle_round_trip_drops_derived_state(tmp_path: Path) -> None:
+    """worker 序列化必须**剥掉**派生状态，且还原后逐位给出同样的样本（RFC-0034 S2）。
+
+    没有 `__getstate__`，spawn 出来的每个 worker 都会收到一份完整索引计划与主进程的 LRU
+    （内存按 worker 数翻倍），而诊断计数还会被复制成 N 份。
+    """
+    import pickle
+
+    dataset = _dataset(tmp_path)
+    before = dataset[0]
+    assert dataset._plan is not None
+    assert len(dataset._chart_cache) > 0
+
+    restored = pickle.loads(pickle.dumps(dataset))
+    assert restored._plan is None, "索引计划被序列化给了 worker（应当按需从落盘缓存重建）"
+    assert not restored._chart_cache
+    assert not restored._feature_cache
+    assert restored.no_visible_context_fallbacks() == 0
+
+    after = restored[0]
+    assert after.chart_id == before.chart_id
+    assert torch.equal(after.counts, before.counts)
+    assert torch.equal(after.audio_emb, before.audio_emb)
+    assert torch.equal(after.line_tracks, before.line_tracks)
+
+
 def test_dataset_window_trains_generation_on_cpu(tmp_path: Path) -> None:
     """一个真实窗口 -> FieldBatch -> 前向 loss 有限 -> 反向梯度有限。"""
     dataset = _dataset(tmp_path)

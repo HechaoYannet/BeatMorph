@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass, replace
 
 import torch
@@ -157,6 +158,20 @@ class SmokeBatchSource:
         grid = FieldGrid(x_bins=self.cfg.data.x_bins).for_chart(chart)
         grid.assert_grid()
         return chart, grid
+
+    def batches(
+        self, *, start_step: int = 1, first: FieldBatch | None = None
+    ) -> Iterator[FieldBatch]:
+        """合成来源没有计划层：逐批调用 `batch`（同 seed 逐位一致）。
+
+        `start_step` / `first` 只为满足 `BatchSource` 协议：合成批次由 `seed + 批内下标`
+        决定，与步号无关，因此不需要定位。
+        """
+        del start_step
+        if first is not None:
+            yield first
+        while True:
+            yield self.batch(masked=True)
 
     def batch(
         self,

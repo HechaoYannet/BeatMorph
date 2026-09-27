@@ -77,6 +77,10 @@ RESUME_IGNORED_KEYS: tuple[str, ...] = (
     "run.log_level",
     "run.runs_dir",
     "run.experiment",
+    # 取样本的**并行度**：顺序与覆盖率都是计划层的纯函数（RFC-0034 §5）⇒ 改变它既不改
+    # 样本序列也不改任何语义，只改跑多快。把它算进指纹的代价是「为了让取批并行而重启实验
+    # 目录」——那正是这条清单要避免的事。
+    "data.workers",
 )
 
 

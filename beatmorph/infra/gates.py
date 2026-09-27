@@ -187,6 +187,10 @@ def bounded_gate_config(cfg: TrainConfig) -> TrainConfig:
         return cfg
     bounded = copy.deepcopy(cfg)
     bounded.data.max_samples = int(cfg.gates.gate_samples)
+    # 门禁**不走 worker**（RFC-0034 §5）：门禁批只有 1~16 个样本，worker 的启动成本
+    # （Windows spawn 要重新 import torch）会盖过收益，而门禁要的是**确定的耗时与显存**。
+    # 训练侧仍按 `data.workers` 取批——它才是有 20,000 步的地方。
+    bounded.data.workers = 0
     return bounded
 
 

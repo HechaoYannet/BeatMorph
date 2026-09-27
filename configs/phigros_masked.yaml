@@ -50,6 +50,12 @@ data:
   # 取批的行级 LRU（plan 02 §9 ④）：同一行的多个窗口不再重复解析 4 MB 谱面 / 重复读 40-50 MB 特征。
   chart_cache_size: 8
   feature_cache_size: 2
+  # 取样本的 DataLoader worker 进程数（0 = 主进程同步取批）。
+  #   **语义无关**（RFC-0034 §5）：顺序与覆盖率都是「计划层」的纯函数（beatmorph/data/plan.py）
+  #   ⇒ 改它不改变样本序列、不改变覆盖率、不改变续训指纹（进 checkpoint.RESUME_IGNORED_KEYS）。
+  #   ⚠️ 必须同时限住每个 worker 的 BLAS 线程，否则 N 个 worker 各自开满 24 核会过度订阅：
+  #      启动前设 OMP_NUM_THREADS=2 MKL_NUM_THREADS=2（未设时训练会打 WARNING）。
+  workers: 3
   max_samples: null
 
 model:

@@ -548,3 +548,89 @@ run_gates(*, step_fns: GateStepFns, out_path: Path, cfg) -> list[GateResult]
     `runs/ownline_check/20260927-082835/logs/loss_history.jsonl`。默认 CI **1009 passed**、ruff / mypy 干净。
     **遗留**：`--gates` 需在真机重跑一轮（随启动顺带，不额外占 GPU）；装饰线旁路按决策者口径
     登记为**后续扩展**（plan 04 §9-24）。
+
+38. **采样器覆盖率缺陷与 epoch 定义（2026-09-27 第八轮；RFC-0033 已采纳）**：
+    起因是排查「GPU 长期空转（利用率 **21.4%**、功耗中位 7 W）」。剖面定位到 `line_tracks_at`
+    占每窗口 CPU **52.5%**（见下一条），但**顺带暴露了一个严重得多的缺陷**：
+    `ManifestBatchSource._draw` 只有**一个全局共享游标**，且每步都被写成「按**当前桶**长度取模」
+    `(start + take) % len(bucket)`；桶长极不均（min **1**、中位 66、max 35,751），
+    **撞到长度 1 的桶就把游标清零** ⇒ 它永远在「每个桶的前几个窗口」之间震荡。
+    用**仓库里那份 `_draw` 本身**（只把样本构建换成 stub）实测：
+
+    | 步数 | 抽到的不同窗口 | 不同谱面 |
+    |---|---|---|
+    | 1,000 | **993** | **674** |
+    | 3,000 | **993（不变）** | **674（不变）** |
+    | 20,000 | **993（不变）** | **674（不变）** |
+
+    ⇒ **`max_steps` 加到多少都不见新数据**；「全量大规模训练」实际只在 **0.156% 的窗口 /
+    10.2% 的谱面**上训练，而 loss 曲线完全正常——与 [POSTMORTEM-2026-08-05] 的 25 Hz 事故同类。
+
+    **修法**：① 每桶**独立的**抽签顺序（桶内按 (seed, epoch) 派生种子洗牌）+ 每桶独立游标；
+    ② **按剩余窗口数加权选桶**（简单轮转让小桶被抽干、大桶只走 0.06%；而桶按 `bpm_eff` 分，
+    BPM 常见的大桶恰好装着最多谱面——轮转 20,000 步只覆盖 47.2% 谱面，加权后 **91.3%**，
+    与「按窗口均匀」的理论值 91.1% 一致）；③ `want`（批大小）优先，避免把 16 样本的门禁批切成 1。
+    **epoch 定义**：一个 epoch = 全库窗口的一个**排列**（train split = **634,952** 步）；
+    新增覆盖率在线标量 `epoch` / `coverage/windows_seen` / `coverage/charts_seen`（jsonl + TB）。
+    「chart_epoch（≈6,614 步）」被否掉：每谱窗口数分布极不均（均值 96 / min 1 / 中位 90 / **max 922**），
+    「每谱一个窗口」不是一致的量，直接报**谱面覆盖率**才诚实。
+
+    **预算含义（修复后）**：6,614 步 → 谱面覆盖 59.9%；**20,000 步（当前配置）→ 91.3%**；
+    50,000 步 → 99.0%；全量 epoch 634,952 步 ≈ **88 h @0.5 s/步**（8 GB 笔记本上不可行）。
+    ⇒ 「epoch」在本机只能当**可观测指标**，不能当日常预算单位。
+
+    **护栏**：`tests/unit/infra/test_sampler_coverage.py`（6 项）钉死「epoch 内每个窗口恰好一次 /
+    覆盖率只增不减 / 同 seed 可复现 / 选桶按剩余加权 / 同批同网格」。**旧写法不报任何错**——
+    没有这条护栏，这个缺陷能一直活到训练结束。
+    证据脚本：`scripts/local_draw_verify.py`、`local_coverage_check.py`、`local_chart_lru_sim.py`、
+    `local_windows_per_chart.py`。
+
+    **顺带否掉两个猜想**：① 调大 `data.chart_cache_size` 不划算（同一取批顺序下 LRU 命中率
+    cap=8 → 18.6%、cap=32 → 26.1%、cap=64 → 28.7%，而同谱复用间隔中位 **991** 步）；
+    ② 「空事件窗口」不是瓶颈（它只是少了监督信号，且门禁另有 `batch_min_events` 兜底）。
+
+39. **事件轨求值的向量化：每窗口 CPU 1.218 → 0.582 s（逐位等价，32.9x）**：
+    剖面（`scripts/local_profile_dataset.py`，cProfile，24 个真实窗口）显示每窗口 1.206 s 里
+    **52.5%** 花在 `beatmorph/data/tracks.py::line_tracks_at`：它按 `tau` 逐点调
+    `JudgeLine.sum_track`，后者又线性扫过整条轨的关键帧并在扫描中反复调 `Beat.to_beats()`
+    —— 实测 **1.46e6 次 `track_value` / 3.97e7 次 `to_beats`**。
+
+    修法：① 每条 (轨, 层) 只算一次 `starts` / `ends`（`to_beats` 调用降到 1.3e6）；
+    ② 用 `searchsorted(starts, "right") - 1` 与 `searchsorted(prefix_max(ends), "left")`
+    向量化定位 **列表序首个命中的关键帧**（证明写进 `_first_matching_keyframe` 的 docstring，
+    **不假设关键帧不重叠**：重叠时契约取「先出现的那个」，该式同样成立）；
+    ③ 取值**仍然调用契约层的 `EventKeyframe.numeric_at`**（快路径只覆盖「Linear + 默认切割 +
+    两端 float」并逐字复刻 `value_at` 的分支顺序），因此**数值逐位不变**。
+
+    实测：该段 **32.9x**（21.97 s → 0.67 s：12 张真实谱面 × ~660 个 tau，含端点与边界扰动），
+    每窗口 **1.218 → 0.582 s**，函数调用数 7.97e7 → 2.22e7；
+    等值判据是 `torch.equal`（**不是** `allclose`），护栏
+    `tests/unit/data/test_tracks_vectorized.py`（4 项：空隙 / 重叠 / 贝塞尔 / 非默认切割 /
+    多层 / 端点 / 空轨 / 通道序）。**剩下的大头变成谱面解析（46%）**——那是下一轮的结构性优化
+    （每窗口重解析同一张谱；见 §9-38 的 chart LRU 结论）。
+
+40. **本轮默认 CI 口径**：`ruff` / `mypy --strict` 干净；`pytest -m "not slow and not gpu and not e2e"`
+    **1005 passed**（17 deselected）。新增护栏 10 项（采样器 6 + 事件轨 4）。
+
+41. **门禁成本的真相与「慢 vs 卡死」的可观测性（2026-09-27 第八轮）**：
+    采样器修好后门禁从 **5 min 涨到 ~40 min**，但**这不是回归**：旧 sampler 的坏游标让门禁永远
+    只取「最小 `bpm_eff` 桶的前几个窗口」，实测批是 **K=29/11/6**；修好后取的是**代表性**桶
+    （本轮实测：200 行切片最大桶 K=**39**、中位桶 K=**40**；全量切片最大桶也是 K=39）。
+    门禁单步成本 ∝ `(K·T)²`，且 `shuffle_chunks=16` 使 G2/G3 的**一步 = 16 次串行单样本前向**
+    ⇒ G3 从 K=6 → 40 就是 **~44x**。**第五轮记录 2305.8 s ≈ 38 min 才是正常 K 下的预算**，
+    r1 的 5 min 是「抽到退化批」的运气。
+
+    - `gates.gate_samples=200` 限住**数据池**，但**限不住 K**（两个切片的最大桶 K 都是 39）
+      ⇒ 不要指望它把门禁变快。
+    - **教训（本轮的真实代价）**：我据此把两个**正在正常运行**的门禁误判成卡死并掐掉
+      （r2 26 min、r3 16 min），浪费约 **40 min GPU**。根因是 `execute_gates`
+      **整轮跑完才写第一行日志** ⇒ 外部只能靠功耗 / util 猜。
+      已修（commit `d234f55`）：`run_gates(..., progress=)` 逐门禁上报「开始 / PASS|FAIL（耗时）」，
+      `build_gate_inputs` 打印三个批的 K / samples / events 与 **G3 预计算的起止**
+      ——G3 的 100 步在 `build_gate_inputs` 里跑，正是门禁里最大的一块静默时间。
+      护栏：`tests/unit/infra/test_gate_progress.py`（2 项）。
+    - **判据修正**：门禁期间 `memory.used ≈ 7.7 GiB / 8.15 GiB` 在当前 batch 口径下是**常态**，
+      **不是**共享内存回退的特征（util 99-100%、功耗 47-92 W、连续 26 min 无 OOM）。
+      **先看逐门禁日志，再看功耗**；不要仅凭显存贴顶就判卡死。
+
+[POSTMORTEM-2026-08-05]: ../POSTMORTEM-2026-08-05-frame-rate-misalignment.md

@@ -341,13 +341,25 @@ uv run python scripts/extract_features.py --shard 2/3 --npz-compression store --
   整轮门禁跑不完（表现为「GPU 100% 但迟迟不结束」）。装配已改为 G3 预计算先跑、跑完立即释放
   （plan 07 §9-27）。判据：`nvidia-smi` 的 `power.draw` 应稳定在 **90 W 上下**；若长期 < 90 W
   且显存贴顶，先怀疑共享内存回退，**不要**盲目加大步数预算。
-- **时间预算（实测）**：200 行切片整轮 **38 min**（`--device cuda`；其中 G2 两臂 100 步 ≈ 23 min）。
-  **步时 ∝ (K·T)²**（global 层对 `K·T` 做全自注意力）：G1 批 `K=12` → 0.10 s/步、
-  `K=29`（`L=5568`）→ ~7 s/步、`K=33` → ~9 s/步。CPU 上是小时级，必须给设备：
+- **时间预算（实测）**：整轮 **~38-45 min**（`--device cuda`；其中 G2 两臂 100 步 ≈ 23 min、
+  G3 预计算 100 步 ≈ 十几分钟）。**步时 ∝ (K·T)²**（global 层对 `K·T` 做全自注意力），
+  而 `shuffle_chunks=16` 让 G2/G3 的**一步 = 16 次串行单样本前向** ⇒ 成本**强依赖 K**：
+  `K=6` 是分钟级、`K≈40` 就是上面这个量级。CPU 上是小时级，必须给设备。
+
+  ⚠️ **不要用「跑了几分钟」判断卡死**（2026-09-27 实测踩坑：把两个正在跑的门禁误判为卡死
+  掐掉，浪费约 40 min GPU）。门禁现在有**逐门禁进度日志**（`门禁 G1 … 开始 / PASS（耗时）`
+  与 `门禁 G3 预计算开始/完成`）——**先看日志，再看功耗**。
+  门禁期间 `memory.used ≈ 7.7 / 8.15 GiB` 是当前批口径下的**常态**，不是共享内存回退的特征
+  （那是「功耗塌陷 + 步时放大一个量级」）。见 plan 07 §9-41。
+
+  **门禁的数据规模已与训练解耦**（`gates.gate_samples`，默认 200 行），无需再手工传覆盖：
 
   ```bash
-  uv run beatmorph-train --config-name phigros_masked --gates-only --device cuda --skip-env-doctor data.max_samples=200
+  uv run beatmorph-train --config-name phigros_masked --gates-only --device cuda --skip-env-doctor
   ```
+
+  注意：`gate_samples` 限住的是**数据池**，**限不住 K**（实测 200 行切片与全量切片的最大桶
+  K 都是 39）——它让门禁可复现、可对照，但不会让它更快。
 
 - **索引有落盘缓存**（plan 02 §9 ④）：全库（6750 行）首次重建 **36.5 min**，命中缓存后是**秒级**
   （日志会写「索引缓存命中」）。缓存指纹覆盖配置与文件 stat，改配置/换谱面会自动重建。
@@ -483,8 +495,24 @@ uv run tensorboard --logdir runs/phigros_masked
 ```
 
 标量每 `run.log_every` 步**增量**刷盘（`train/loss` / `train/step_time_s` / `train/grad_norm` /
-`train/lr` / `sys/peak_vram_gib`），因此曲线是**在线**的；同样的行同时追加进
-`logs/loss_history.jsonl`（权威、可脚本读，TB 缺失也不影响训练）。
+`train/lr` / `sys/peak_vram_gib` / `batch_n_lines` / `batch_events`），因此曲线是**在线**的；
+同样的行同时追加进 `logs/loss_history.jsonl`（权威、可脚本读，TB 缺失也不影响训练）。
+
+**④b 数据覆盖率（必看，2026-09-27 第八轮新增；[RFC-0033](decisions/RFC-0033-sampler-coverage-and-epoch.md)）**
+
+同一条 jsonl 里还有 `epoch` / `windows_seen` / `charts_seen`（TB 里是
+`coverage/epoch` / `coverage/windows_seen` / `coverage/charts_seen`）。**这三个数不是装饰**：
+
+> ⚠️ 旧采样器（`ManifestBatchSource` 的全局共享游标）在 **1000 步后彻底饱和**——
+> 之后无论 `max_steps` 加到多少，永远只抽同一批 **993 个窗口（全库 0.156%）/ 674 张谱面（10%）**。
+> **loss 曲线完全看不出来**（它只是反复拟合同一小撮样本）。本轮修好后才有了覆盖率可看。
+
+- **`epoch`**：一个 epoch = **走遍全库、每个窗口恰好一次** = `len(dataset)` 步
+  （train split = **634,952** 步）。**本机跑不完一个 epoch**（≈88 h @0.5 s/步）。
+- **`coverage/charts_seen`**：累计去重的谱面覆盖率（只增不减）。这才是「训练到底见了多少音乐」。
+- **判据**：`max_steps=20000` 时 **≈91% 谱面覆盖**（≈3.15% window-epoch）。
+  若这条曲线**平掉**（长时间不涨）⇒ 采样器又饱和了，立刻停并查
+  `tests/unit/infra/test_sampler_coverage.py` 覆盖的几条不变量，**不要**靠加步数掩盖。
 
 **⑤ 显存墙：上限是多少、怎么判降速（2026-09-27 第六轮实测）**
 

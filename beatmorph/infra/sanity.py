@@ -115,7 +115,13 @@ def shuffled_target_control(
     """
     _, real_last = _run(step_fn_real, steps)
     _, shuf_last = _run(step_fn_shuffled, steps)
-    need = real_last * (1.0 + min_gap_ratio)
+    # 符号稳健的差距口径（2026-09-27 第四轮）：
+    #   real_last > 0 时与旧式 real_last * (1 + min_gap_ratio) **逐位相同**；
+    #   real_last < 0 时旧式会乘出更负的值（更"好"）⇒ 只要打乱臂稍好一点就 PASS，
+    #   判据方向反了（真实数据实测的真实臂 −326.33 / 打乱臂 −327.25 就是这种假绿）。
+    #   改成 real_last + min_gap_ratio * |real_last|：负 loss 时要求打乱臂**更大**
+    #   （= 更差）才通过。这是**收紧**，不是放宽。
+    need = real_last + min_gap_ratio * abs(real_last)
     passed = shuf_last >= need
     return GateResult(
         "G2 打乱标签对照",

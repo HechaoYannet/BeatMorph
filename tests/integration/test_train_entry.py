@@ -194,6 +194,32 @@ def test_runs_are_reproducible_with_fixed_seed(tmp_path: Path) -> None:
     assert all(isinstance(value, float) for _, value in histories[0])
 
 
+def test_train_moves_every_batch_to_the_requested_device(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """设备搬运回归（plan 07 §9-22）：`--device` 必须**同时**作用于批次，且每一步都搬。
+
+    修复前 `train()` 只对模型 `.to(device)`、把批次留在 CPU ⇒ 训练路径上的
+    `--device cuda` 会因设备不一致直接失败。默认 CI 无 GPU，因此这里做**CPU 等价断言**：
+    记录 `FieldBatch.to` 的调用次数与目标设备（修复前为 0 次）。
+    """
+    from beatmorph.generation.batch import FieldBatch
+
+    calls: list[str] = []
+    real_to = FieldBatch.to
+
+    def spy(self: FieldBatch, device: object) -> FieldBatch:
+        calls.append(str(device))
+        return real_to(self, device)
+
+    monkeypatch.setattr(FieldBatch, "to", spy)
+    payload = _config_payload(tmp_path, steps=3)
+    assert _run(tmp_path, payload, "--no-gates") == EXIT_OK
+    assert calls, "train() 没有把任何批次搬到目标设备（plan 07 §9-22 回归）"
+    assert len(calls) >= 3, f"每一步都必须搬批次，实际只搬了 {len(calls)} 次"
+    assert set(calls) == {"cpu"}, f"目标设备应统一为请求的 cpu，实际 {sorted(set(calls))}"
+
+
 def _real_manifest_fixture(tmp_path: Path) -> tuple[Path, Path, Path]:
     """物化一份**真实格式**的最小数据集：rpe_min 夹具 + 与之自洽的特征缓存 + 清单。
 
@@ -329,7 +355,9 @@ def test_manifest_source_batches_by_grid_identity(tmp_path: Path) -> None:
 def test_shipped_smoke_config_passes_gates(tmp_path: Path) -> None:
     """仓库自带 configs/smoke.yaml 必须真的能跑绿 G1-G4（否则快速开始是错的）。
 
-    标 slow：完整门禁预算（G1 120 步 / G2 100 步 x 16 样本）在 CPU 上要十几秒。
+    标 slow：完整门禁预算（G1 120 步 / G2 100 步 x 16 样本、**两臂配对**）在 CPU 上约 2 分钟
+    （G2 改成「同输入、只打乱被遮盖标签」的严格口径后，两臂必须真的收敛才有差距；
+    旧口径的十几秒来自一次恒真对照，见 plan 07 §9-19）。
     """
     assert (
         main(

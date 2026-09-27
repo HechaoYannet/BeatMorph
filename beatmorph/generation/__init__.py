@@ -8,7 +8,9 @@
   也不实现评估指标与人评协议（plan 06）。
 
 命名速查：`FieldBatch` / `FieldOutput`（契约）、`MaskedFieldModel`（主干 B2）、
-`masked_poisson_loss` / `full_poisson_loss`（目标）、`sample`（迭代并行解码）。
+`masked_poisson_loss` / `full_poisson_loss`（目标）、`sample`（迭代并行解码）、
+`HeatmapArm` / `focal_heatmap_loss`（**B1 消融臂**：热图 + focal，见 `heatmap_arm`；
+它与泊松 NLL **不同测度，严禁混用**）、`focal_step_fn`（G1-G4 门禁的 StepFn）。
 """
 
 from __future__ import annotations
@@ -20,6 +22,28 @@ from beatmorph.generation.batch import (
     N_ORDINARY_TRACKS,
     FieldBatch,
     FieldOutput,
+)
+from beatmorph.generation.heatmap_arm import (
+    DIFFICULTY_ROUND_DIGITS,
+    DifficultyThresholdTable,
+    HeatmapArm,
+    HeatmapDecodeConfig,
+    HeatmapDecodeResult,
+    HeatmapHead,
+    HeatmapObjective,
+    HeatmapOutput,
+    HeatmapStepFn,
+    HeatmapTargetConfig,
+    ThresholdColumns,
+    ThresholdRegime,
+    ThresholdSearchResult,
+    decode_heatmap,
+    decode_threshold_columns,
+    focal_heatmap_loss,
+    focal_step_fn,
+    heatmap_target,
+    search_threshold,
+    threshold_as_alpha,
 )
 from beatmorph.generation.losses import (
     ABLATION_OBJECTIVES,
@@ -85,6 +109,7 @@ __all__ = [
     "DEFAULT_K_MAX",
     "DEFAULT_LEAK_WINDOW",
     "DEFAULT_STEPS",
+    "DIFFICULTY_ROUND_DIGITS",
     "FIELD_DIM_NAMES",
     "FORBIDDEN_LAYERED_TRACKS",
     "MIN_STEPS",
@@ -93,12 +118,21 @@ __all__ = [
     "AdaNorm",
     "Confidence",
     "DecoderLayer",
+    "DifficultyThresholdTable",
     "FieldBatch",
     "FieldHead",
     "FieldOutput",
     "FieldTokenEmbedding",
     "Granularity",
     "HeadMode",
+    "HeatmapArm",
+    "HeatmapDecodeConfig",
+    "HeatmapDecodeResult",
+    "HeatmapHead",
+    "HeatmapObjective",
+    "HeatmapOutput",
+    "HeatmapStepFn",
+    "HeatmapTargetConfig",
     "LayerKind",
     "MaskedFieldModel",
     "ModelConfig",
@@ -108,16 +142,24 @@ __all__ = [
     "SamplingConfig",
     "Schedule",
     "StateFill",
+    "ThresholdColumns",
+    "ThresholdRegime",
+    "ThresholdSearchResult",
     "assert_hold_pairs_not_split",
     "assert_schedule_monotone",
     "build_occlusion",
     "build_occlusion_batch",
     "confidence_map",
+    "decode_heatmap",
+    "decode_threshold_columns",
     "event_term",
     "expected_counts",
+    "focal_heatmap_loss",
+    "focal_step_fn",
     "full_poisson_loss",
     "gaussian_heatmap_target",
     "hamming_smooth",
+    "heatmap_target",
     "integral_term",
     "line_active",
     "local_contrast",
@@ -133,6 +175,8 @@ __all__ = [
     "range_masked_lambda",
     "reveal_schedule",
     "sample",
+    "search_threshold",
     "sinusoidal_encoding",
+    "threshold_as_alpha",
     "timestep_weighted_masked_ce",
 ]

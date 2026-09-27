@@ -235,6 +235,60 @@ def test_build_occlusion_never_splits_a_multi_token_hold(ratio: float, seed: int
     assert_hold_pairs_not_split(counts, mask)
 
 
+def test_close_hold_pairs_is_a_fixed_point_on_a_token_chain() -> None:
+    """回归（实测 2026-09-27 第四轮，真实批暴露）：收口必须取**传递闭包**，单趟会互相拆散。
+
+    真实数据反例的形态是「两个 Hold 配对共享一个 token」：配对 A=(t10, t19)、
+    B=(t19, t21)、C=(t36, t38)，初始只有 token 21 被遮（expand_to_tokens 选中了
+    B 的终点所在 token）。单趟先看 A（10 / 19 均未遮 ⇒ 不动），再看 B 时把 19 / 21
+    都遮上 —— **A 的一端 19 被 B 顺带遮住而 10 没遮，A 反而被拆散**。
+    传递闭包把 A、B 所在的连通分量 {10, 19, 21} 整体遮住，C 的分量不受影响。
+    """
+    grid = _grid()
+    counts = _empty(1, grid)
+    # x 纤维互不相同，避免随机单点事件造成配对归属歧义
+    _hold(counts, k=0, start=10, end=19, x=0, s=0)
+    _hold(counts, k=0, start=19, end=21, x=1, s=0)
+    _hold(counts, k=0, start=36, end=38, x=2, s=0)
+    seeded = torch.zeros_like(counts, dtype=torch.bool)
+    seeded[0, 21, :, :, :] = True  # 只遮 B 的终点所在 token
+
+    closed = close_hold_pairs(counts, seeded)
+    assert_hold_pairs_not_split(counts, closed)
+    for token in (10, 19, 21):  # 种子所在连通分量整体被遮（token 级）
+        assert bool(closed[0, token].all().item()), token
+    for token in (36, 38):  # 无种子的分量原样不动
+        assert not bool(closed[0, token].any().item()), token
+
+
+def test_build_occlusion_never_splits_hold_pairs_on_random_chains() -> None:
+    """回归（同上）：固定 seed 的随机链式 Hold 上，build_occlusion 的产物必须处处不拆散配对。
+
+    单趟收口的缺陷只在「两个配对共享一个 token」时暴露，随机构造专门覆盖这种链。
+    """
+    grid = _grid()
+    rng = np.random.default_rng(20260927)
+    for _ in range(150):
+        counts = _empty(2, grid)
+        for _ in range(int(rng.integers(1, 4))):
+            k = int(rng.integers(0, 2))
+            x = int(rng.integers(0, grid.x_bins))
+            s = int(rng.integers(0, grid.sides))
+            start = int(rng.integers(0, grid.t_bins - 1))
+            end = int(rng.integers(start + 1, grid.t_bins))
+            _hold(counts, k=k, start=start, end=end, x=x, s=s)
+        for _ in range(int(rng.integers(0, 6))):
+            k = int(rng.integers(0, 2))
+            x = int(rng.integers(0, grid.x_bins))
+            s = int(rng.integers(0, grid.sides))
+            t = int(rng.integers(0, grid.t_bins))
+            c = int(rng.integers(0, grid.channels))
+            counts[k, t, x, s, c] = 1
+        for seed in range(3):
+            mask, _stats = build_occlusion(counts, ratio=0.5, granularity="event", seed=seed)
+            assert_hold_pairs_not_split(counts, mask)
+
+
 def test_hold_pair_gate_rejects_a_split_mask() -> None:
     """门禁自检（反例）：把配对的起止点只遮一半，assert_hold_pairs_not_split 必须抛。"""
     grid = _grid()

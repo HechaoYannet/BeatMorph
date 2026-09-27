@@ -218,7 +218,7 @@ EvalReport:            # 冻结字段，供 Plan 07 的日志与 Plan 08 的 CLI
 | **M6.4** | 分解与背面 | 构造用例：背面事件全部漏检时，总准确率仍 ≥ 0.97 而**背面 recall = 0.000**（证明该指标有判别力）；时间组归类在 δ = 0 时全部落入 1/4 组 | ✅ `eval/breakdown.py` + `test_breakdown.py`：背面全漏时总准确率仍 ≥ 0.97 而背面 recall = 0.000；δ = 0 全部落入 1/4 组；1/32 拍（不在 1/48 网格上）归组正确；positionX MAE 与量化下界 dx/4 并列报 |
 | **M6.5** | 校准隔离 | `EvalReport` 中 NLL 字段与质量字段分列；单元测试断言「主判据函数不读 NLL」；`λ ≡ 0` 的 NLL 为 `inf`（契约断言） | ✅ `eval/calibration.py` + `test_calibration.py`：分节隔离（主判据签名只接受 QualityMetrics）+ 校准投毒后主判据逐位不变 + λ ≡ 0 → NLL = +∞ 的契约断言（torch 在函数内惰性引入） |
 | **M6.6** | corruption 准入 | 6 类注入 × 全部主报告指标：dose-rank 关联为负且显著（bootstrap 区间不重叠，多重比较校正后）；2 项预先声明的不变性控制通过；**未通过者被自动排除出主报告**（CI 可验） | ✅ `eval/corruption.py` + `test_corruption.py`：plan §4.8 的 ①-⑥ 注入 + 本实现新增 ⑦ positionX 抖动（偏离声明见 §9 存疑清单）、2 项声明的不变性控制、未通过者自动剔出主报告（main_report_metric_names） |
-| **M6.7** | B1-B6 矩阵 | §4.9 验收表**全格非空**；含损失的臂均有 gates 输出；每臂给出「对照层级」一行声明；固定 seed 重跑一致 | ⬜ 待建（依赖 B1-B6 各臂出数；报告格式与验收表已由 M6.1-M6.3 落地） |
+| **M6.7** | B1-B6 矩阵 | §4.9 验收表**全格非空**；含损失的臂均有 gates 输出；每臂给出「对照层级」一行声明；固定 seed 重跑一致 | 🟡 **报告落盘链路已通**（`eval/pipeline.py`：EvalReport → `metrics.json` 的 `eval` 分节 + git_rev/data_rev；18 项默认 CI 测试）——仍待各臂出数把验收表填满（B1 模型臂已落地，见 plan 04 M8） |
 | **M6.8** | 人评手册 + 首轮执行 | 3 首曲的算法评估全绿；≥ 5 名专家完成评分（报告评分者一致性与缺失率）；社区盲测含**至少 1 张人类谱**的混入，且「指认人类谱」的准确率被报告（含随机基线 1/(臂数+1)） | ⬜ 待建（人评三段式执行） |
 
 > **图例（实施状态列）**：✅ = 代码与默认 CI（无权重、无 GPU）测试均已落地；🟡 = 部分落地；⬜ = 待建。M6.1-M6.6 的实现见 `beatmorph/eval/`，测试见 `tests/unit/eval/`。
@@ -288,8 +288,16 @@ M6.1–M6.6 落地时提出的 8 项口径问题，主会话按下列方式**接
 6. **时间组口径**：默认 plan 的「最近 beat 细分」；另实现「相邻事件拍间隔」口径备查（§4.4-1 的措辞）。
    两者都不依赖 1/48 解码网格（1/32 拍也有断言）。
 7. **NLL 由上游注入**：接受（eval 不重算，走 `field/loss.py` 的权威实现；模块级不引 torch）。
-   `meta.git_rev` / `data_rev` 由 plan 07 的实验产物填充 —— **接线待做**：当前
-   `runs/<exp>/<ts>/metrics.json` 写的是**训练摘要**（loss 轨迹），尚未包含评估报告；
-   等 M6.7/B1-B6 出数时一并接（plan 07 §9-5 的六件套已为它留好位置）。
+   `meta.git_rev` / `data_rev` 由 plan 07 的实验产物填充。
+   **✅ 接线已落地（2026-09-27 第三轮）**：新增 `beatmorph/eval/pipeline.py`
+   （`evaluate_chart_pair` / `merge_eval_into_metrics` / `ExperimentContext` / `write_eval_metrics`），
+   `metrics.json` 的形状定为「**训练摘要键原样保留 + 末尾追加 `eval` 分节**」——向后兼容由
+   `assert_train_summary_preserved` 机器校验，`eval` 分节的键顺序（per_chart / aggregate /
+   breakdown / two_column / phase / calibration / exploratory / legality / meta）由
+   `EVAL_SECTION_ORDER` 冻结并测试锁死；`meta.git_rev` 取 `infra.artifacts.git_rev`、
+   `meta.data_rev` 取**清单文件**的 sha1（`cfg.data.manifest_path`，不是 `charts.jsonl`——
+   后者会让同一实验出现两个不同的 `data_rev`）。
+   **仍缺的一步**：训练入口（`cli/train.py`）里的那一行调用——它同时是「评估入口长什么样」
+   的政策决定（本 plan §9-11 / plan 08），故留待裁定；在此之前 `metrics.json` 里不会有 eval 分节。
 8. **hold_time / is_fake 未进指标**：接受（plan §4.1 未要求）；两栏 per-chart best 的并列打破规则
    （timing-F1@主容差 → 标签字典序）接受为默认。

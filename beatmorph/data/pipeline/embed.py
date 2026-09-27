@@ -200,6 +200,35 @@ def feature_cache_paths(out_dir: Path, key: str) -> tuple[Path, Path]:
     return out_dir / f"{key}.npz", out_dir / f"{key}.meta.json"
 
 
+def save_feature_cache(
+    array: FeatureArray,
+    npz_path: Path,
+    meta_path: Path,
+    meta: FeatureCacheMeta,
+) -> None:
+    """把特征数组与元数据**就地**落盘（`np.savez_compressed` + 元数据 JSON）。
+
+    这是 :func:`extract_features` 的默认落盘动作；抽成独立函数，是为了让调用方
+    （如流水线提取入口）能把这**最耗时的一步**搬到后台线程，而不必复制落盘逻辑
+    ——落盘字节因此逐位一致。
+
+    顺序是「先 npz 后 meta」：中途被杀则 meta 缺失，加载侧的存在性检查会把它当成
+    「未提取」重抽，不会留下一个能被读到的半截缓存。
+    """
+    np.savez_compressed(npz_path, emb=array)
+    meta_path.write_text(meta.model_dump_json(indent=2), encoding="utf-8")
+    logger.info(
+        "已提取特征 %s（%d 帧 × %d 维，%.2fs）", npz_path.name, *array.shape, meta.duration_s
+    )
+
+
+#: 特征落盘器 `(数组, npz 路径, meta 路径, meta) -> None`。
+#:
+#: 传给 :func:`extract_features` 的 `writer` 时，落盘与「已提取特征」日志都由它负责
+#: （可用于把落盘移出关键路径）；传 None 时用 :func:`save_feature_cache`（原行为）。
+FeatureWriter = Callable[[FeatureArray, Path, Path, "FeatureCacheMeta"], None]
+
+
 def _sample_count(wav: Dynamic) -> int:
     """波形样本数（numpy / torch / 序列皆可）。"""
     shape = getattr(wav, "shape", None)
@@ -278,6 +307,7 @@ def extract_features(
     loader: AudioLoader | None = None,
     resampler: Resampler | None = None,
     overwrite: bool = False,
+    writer: FeatureWriter | None = None,
 ) -> FeatureCacheMeta:
     """提取一段音频的 MERT 特征并落盘（`<key>.npz` + `<key>.meta.json`）。
 
@@ -289,6 +319,10 @@ def extract_features(
         key: 覆盖缓存键（默认音频内容 sha1）。
         loader / resampler: 覆盖默认的 `torchaudio` 通路（单测注入，避免依赖 torch）。
         overwrite: False 时命中缓存直接返回既有元数据（**去重的落点**）。
+        writer: 落盘钩子；None（默认）= 就地 :func:`save_feature_cache`（原行为）。
+            传非 None 时**必须在返回前完成落盘**，否则「已提取」会领先于真实字节；
+            典型用法是「投递到有界队列、由后台线程落盘」——此时「已提取特征」
+            日志由调用方在落盘处自行记录。
 
     Returns:
         落盘的 :class:`FeatureCacheMeta`。
@@ -333,9 +367,10 @@ def extract_features(
     )
     meta.verify(array)
     Path(out_dir).mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(npz_path, emb=array)
-    meta_path.write_text(meta.model_dump_json(indent=2), encoding="utf-8")
-    logger.info("已提取特征 %s（%d 帧 × %d 维，%.2fs）", npz_path.name, *array.shape, duration_s)
+    if writer is not None:
+        writer(array, npz_path, meta_path, meta)
+        return meta
+    save_feature_cache(array, npz_path, meta_path, meta)
     return meta
 
 
@@ -936,6 +971,7 @@ __all__ = [
     "FeatureCacheMeta",
     "FeatureCacheMismatchError",
     "FeatureEncoder",
+    "FeatureWriter",
     "GeneralizationPair",
     "PairRow",
     "PairSplits",
@@ -948,4 +984,5 @@ __all__ = [
     "extract_features",
     "feature_cache_paths",
     "load_feature_cache",
+    "save_feature_cache",
 ]

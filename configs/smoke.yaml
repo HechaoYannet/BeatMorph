@@ -56,6 +56,14 @@ gates:
   overfit_steps: 120
   overfit_target_ratio: 0.1
   shuffle_steps: 100
+  # ⚠️ 这是**合成夹具**的预算，不是真实数据的预算（真实数据见 phigros_masked.yaml）。
+  #    G2 现在是配对口径（两臂 = 同一遮盖批 + 只置换被遮盖格子里的标签，plan 07 §9-19），
+  #    因此它要求两臂**真的收敛**才有差距：实测同一夹具下
+  #      bias=20 / 4 样本 / 40 步  → 差距 0.6%（未收敛，判 FAIL）
+  #      bias=20 / 16 样本 / 100 步 → 差距 45%，全绿（本配置的取值）
+  #    `initial_head_bias=20` 不能降：G1 的相对判据（末步 ≤ 0.1×首步）需要首步远离最优，
+  #    实测 bias=0 时 G1 反而 FAIL（531.97 → 179.08，需 ≤ 53.20）。
+  #    代价：`--gates-only` 在 CPU 上约 **2 分钟**（旧口径是十几秒，但那是恒真对照）。
   initial_head_bias: 20.0
 
 # 说明：G1 的判据是 max(target_loss, target_ratio x 首步 loss)。泊松 NLL 的下界不是 0

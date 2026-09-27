@@ -79,6 +79,7 @@ def test_eval_package_has_the_expected_modules() -> None:
         "calibration.py",
         "corruption.py",
         "report.py",
+        "pipeline.py",
         "stats.py",
     } <= modules
     assert (REPO_ROOT / "tests" / "unit" / "eval" / "__init__.py").is_file()
@@ -92,9 +93,9 @@ def test_no_seconds_to_beat_conversion_is_implemented_in_eval() -> None:
             for node in ast.walk(tree)
             if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
         }
-        assert not (defined & TAU_FUNCTION_NAMES), (
-            f"{path.name} 定义了秒 <-> 拍换算函数：{sorted(defined & TAU_FUNCTION_NAMES)}"
-        )
+        assert not (
+            defined & TAU_FUNCTION_NAMES
+        ), f"{path.name} 定义了秒 <-> 拍换算函数：{sorted(defined & TAU_FUNCTION_NAMES)}"
         forbidden = _referenced_names(tree) & (TAU_FUNCTION_NAMES - ALLOWED_TAU_IMPORTS)
         assert not forbidden, f"{path.name} 引用了不该出现的换算接口：{sorted(forbidden)}"
 
@@ -114,9 +115,9 @@ def test_tau_conversion_is_borrowed_from_field_only() -> None:
                         imported.add(alias.asname or alias.name)
             if isinstance(node, ast.Import):
                 for alias in node.names:
-                    assert not any(name in alias.name for name in ALLOWED_TAU_IMPORTS), (
-                        f"{path.name} 以 import 形式引入换算接口：{alias.name}"
-                    )
+                    assert not any(
+                        name in alias.name for name in ALLOWED_TAU_IMPORTS
+                    ), f"{path.name} 以 import 形式引入换算接口：{alias.name}"
         used = _referenced_names(tree) & ALLOWED_TAU_IMPORTS
         assert used <= imported, f"{path.name} 使用了未从 field.grid 引入的换算：{sorted(used)}"
 
@@ -141,9 +142,9 @@ def test_contract_constants_are_imported_from_the_contracts_package() -> None:
         used = {
             name for name in _referenced_names(tree) if name.startswith(CONTRACT_CONSTANT_PREFIX)
         }
-        assert used <= imported, (
-            f"{path.name} 引用了未从契约引入的派生常量：{sorted(used - imported)}"
-        )
+        assert (
+            used <= imported
+        ), f"{path.name} 引用了未从契约引入的派生常量：{sorted(used - imported)}"
 
 
 def test_eval_modules_do_not_import_torch_at_module_level() -> None:
@@ -192,6 +193,6 @@ def test_importing_eval_does_not_pull_torch() -> None:
         timeout=600,
     )
     assert result.returncode == 0, result.stderr
-    assert result.stdout.strip() == "False", (
-        "import beatmorph.eval 意外拉起了 torch：请把重量级依赖改为函数内惰性引入"
-    )
+    assert (
+        result.stdout.strip() == "False"
+    ), "import beatmorph.eval 意外拉起了 torch：请把重量级依赖改为函数内惰性引入"

@@ -479,6 +479,8 @@ def evaluate_charts(
 
 
 # ── 报告 schema 冻结（plan §3.2 的字段清单；缺格即失败）────────────────────
+#: 顺序 == EvalReport 的声明顺序 == 落盘 JSON 的键顺序（plan §3.2 只规定字段集合，
+#: 键顺序由模型决定；beatmorph/eval/pipeline.py 的 EVAL_SECTION_ORDER 直接复用本清单）。
 REQUIRED_REPORT_FIELDS: Final[tuple[str, ...]] = (
     "per_chart",
     "aggregate",
@@ -486,8 +488,8 @@ REQUIRED_REPORT_FIELDS: Final[tuple[str, ...]] = (
     "two_column",
     "phase",
     "calibration",
-    "legality",
     "exploratory",
+    "legality",
     "meta",
 )
 REQUIRED_AGGREGATE_FIELDS: Final[tuple[str, ...]] = ("per_chart_mean", "micro")

@@ -63,6 +63,29 @@ class TestG2ShuffledTargetControl:
         r = shuffled_target_control(real, shuffled, steps=20)
         assert not r.passed
 
+    def test_negative_losses_do_not_false_green(self) -> None:
+        """回归（实测 2026-09-27 第四轮）：真实臂 loss 为负时的「假绿」必须被关闭。
+
+        旧式 `need = real_last * (1 + min_gap_ratio)` 在 real_last < 0 时乘以 1.05 会得到
+        **更负**（= 更好）的阈值 ⇒ 只要打乱臂「稍微更好」也会 PASS，判据方向反了。
+        真实数据实测：真实臂 −326.33 / 打乱臂 −327.25（打乱臂好 0.28%）——按语义必须 FAIL。
+        现口径 `real_last + min_gap_ratio * |real_last|` 在 real_last < 0 时要求打乱臂**更大**
+        （= 更差）才通过。
+        """
+        # ⚠️ `_steps` 默认 floor=0.0 会把负值夹成 0，负 loss 场景必须显式给负 floor。
+        real = _step_fn(_steps(-326.33, 1.0, floor=-1e9))
+        shuffled = _step_fn(_steps(-327.25, 1.0, floor=-1e9))
+        r = shuffled_target_control(real, shuffled, steps=5)
+        assert not r.passed, r.detail
+
+    def test_positive_losses_keep_the_relative_formula(self) -> None:
+        """real > 0 时新旧口径**逐位相同**：need == real * (1 + min_gap_ratio)。"""
+        real = _step_fn(_steps(100.0, 1.0))
+        just_worse = _step_fn(_steps(105.0, 1.0))  # == need => PASS（边界）
+        not_enough = _step_fn(_steps(104.9, 1.0))  # < need => FAIL
+        assert shuffled_target_control(real, just_worse, steps=5).passed
+        assert not shuffled_target_control(real, not_enough, steps=5).passed
+
 
 class TestG3ConstantBaseline:
     def test_passes_when_model_beats_mean(self) -> None:

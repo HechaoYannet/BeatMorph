@@ -63,8 +63,12 @@ class GateInputs:
     """四道门禁所需的全部输入（**数据来源无关**：真实数据与冒烟数据都走这里）。
 
     Attributes:
-        step_fn_real: 真标签上跑一步优化并返回标量 loss。
-        step_fn_shuffled: **同模型同输入**、标签被打乱的一步优化回调（G2）。
+        step_fn_real: **G1** 的真实臂 = 训练路径（遮盖补全）上跑一步优化。
+        step_fn_g2_real: **G2** 的真实臂：必须与 `step_fn_g2_shuffled` **同批、同损失、
+            同起点**（plan 07 §4.3「同模型同输入」）。它**不是** `step_fn_real`：
+            G1 走的是遮盖路径（重标定 `1/r` + 只监督被遮盖事件），与打乱臂的
+            全事件目标不在同一测度上，两者的绝对 loss 不可比。
+        step_fn_g2_shuffled: **G2** 的打乱臂（目标被置换，输入随之失去信息）。
         model_loss: 模型在训练/验证集上的 loss（G3）。
         baseline_loss: 常数基线 loss（`λ = N/|Ω|`，**不是** λ ≡ 0）。
         frames: 实际音频特征帧数（G4）。
@@ -73,7 +77,8 @@ class GateInputs:
     """
 
     step_fn_real: StepFn
-    step_fn_shuffled: StepFn
+    step_fn_g2_real: StepFn
+    step_fn_g2_shuffled: StepFn
     model_loss: float
     baseline_loss: float
     frames: int
@@ -89,6 +94,7 @@ def thresholds_of(cfg: GatesConfig) -> dict[str, float | int]:
         "g1_target_ratio": cfg.overfit_target_ratio,
         "g2_steps": cfg.shuffle_steps,
         "g2_samples": cfg.shuffle_samples,
+        "g2_chunks": cfg.shuffle_chunks,
         "g2_min_gap_ratio": cfg.shuffle_min_gap_ratio,
         "g3_min_improvement": cfg.baseline_min_improvement,
         "g3_normalized": int(cfg.constant_baseline_normalized),
@@ -106,8 +112,8 @@ def run_gates(inputs: GateInputs, cfg: GatesConfig) -> list[GateResult]:
             target_ratio=cfg.overfit_target_ratio,
         ),
         shuffled_target_control(
-            inputs.step_fn_real,
-            inputs.step_fn_shuffled,
+            inputs.step_fn_g2_real,
+            inputs.step_fn_g2_shuffled,
             steps=cfg.shuffle_steps,
             min_gap_ratio=cfg.shuffle_min_gap_ratio,
         ),

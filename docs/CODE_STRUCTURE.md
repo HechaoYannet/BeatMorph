@@ -130,9 +130,11 @@ beatmorph/
 | `generation/losses.py` | ✅ **已交付**：`full_poisson_loss` / `masked_poisson_loss`（HT 重标定）、排列敏感性与「无 line 分类损失」契约、B1/B5 的目标函数 | plan 04 §3.3/§4.3 |
 | `generation/model.py` | ✅ **已交付**：掩码补全 Enc-Dec（滑动窗口 + 周期全局层、难度 AdaLN、轨道/音频 cross-attention、可变 K、因子化 λ 头 + **直连 skip**） | plan 04 §4.1/§4.2 |
 | `generation/sampling.py` | ✅ **已交付**：迭代并行解码（`steps >= 2` 契约、单调 schedule、三种连续场置信度） | plan 04 §4.4 |
+| `generation/heatmap_arm.py` | 🟡 **B1 臂（前半）**：热图 + penalty-reduced focal 的模型臂（复用 B2 主干、输出未归一化热图 logits）、G1 门禁回调、两栏阈值解码骨架；**不 import infra/eval**（避免反向依赖） | plan 04 §4.5 / M8 |
+| `eval/` 的 `pipeline.py` | 🟡 **落盘接线**：图表对 → `EvalReport` → `metrics.json` 的 `eval` 分节（训练摘要原样保留 + 键顺序冻结 + git_rev/data_rev）；生产调用点待「评估入口形态」裁定 | plan 06 §3.2 / §9-7 |
 | ~~`decoder/postprocess/constraints.py`~~ | ✅ **已由 v3.0 形态取代** | 现为 `decoder/postprocess/legality.py`：Phigros 红线（越界**只统计**、同刻上限、Hold 区间、跨线几何冲突、重复事件），`EditKind` **无 clamp 成员**（红线 3 在类型层不可表达），口径见 [RFC-0030](decisions/RFC-0030-decoder-export-contract-ownership.md) |
 | `io/formats/osu.py` / `sm.py` / `base.py` | `.osu`（Reader/Writer 完整）、`.sm`、抽象基类 | `base.py` 可复用；`osu.py`/`sm.py` 归档；新增 `rpejson/` |
-| ~~`core/eval.py`~~ | ✅ **已删除**（v2.x tokenizer 往返度量，属退役范式） | `eval/`（plan 06）重建为事件级 F1 / 校准 / 合法性 |
+| ~~`core/eval.py`~~ | ✅ **已删除**（v2.x tokenizer 往返度量，属退役范式） | `eval/`（plan 06）已重建为事件级 F1 / 校准 / 合法性 / corruption 准入（M6.1–M6.6 落地） |
 | `infra/train_loop.py` | ✅ **已交付**：torch 参考训练循环 + 门禁输入装配（G1-G4 的 step_fn 接线）+ 真实清单批次来源 | plan 07 §4.1/§4.3 |
 | `infra/lightning_module.py` | 🟡 **已交付但未实跑**：`build_trainer` + LightningModule 封装（可选依赖；缺失即抛可操作报错，不静默回落） | plan 07 §4.1 / §9-10 |
 | `infra/config/` | ✅ **已交付**：structured schema（缺字段/类型错启动即失败）+ OmegaConf 严格合并 + `data.provenance` 必填 | plan 07 §4.2 / M7.3 |

@@ -57,8 +57,10 @@ def _decreasing(start: float, *, factor: float = 0.5) -> object:
 def _inputs(**overrides: object) -> GateInputs:
     duration = 2.0
     base: dict[str, object] = {
+        # G1 的真实臂走训练路径；G2 的真实臂必须与打乱臂配对（两者在本文件里都只是假回调）
         "step_fn_real": _decreasing(1.0),
-        "step_fn_shuffled": _decreasing(100.0, factor=0.99),
+        "step_fn_g2_real": _decreasing(1.0),
+        "step_fn_g2_shuffled": _decreasing(100.0, factor=0.99),
         "model_loss": 1.0,
         "baseline_loss": 10.0,
         "frames": round(duration * MERT_FRAME_RATE_HZ),
@@ -75,6 +77,38 @@ def test_run_gates_returns_four_results() -> None:
     results = run_gates(_inputs(), cfg.gates)
     assert [result.name.split()[0] for result in results] == ["G1", "G2", "G3", "G4"]
     assert all(result.passed for result in results)
+
+
+def test_g2_uses_the_matched_real_arm_not_the_g1_arm() -> None:
+    """回归（plan 07 §4.3「同模型同输入」）：G2 不能拿 G1 的遮盖臂当真实臂。
+
+    历史缺陷：`run_gates` 曾把 `step_fn_real`（G1 的**遮盖补全**路径，批大小
+    `optim.batch_size`）当作 G2 的真实臂，而打乱臂是**全事件**目标、批大小
+    `gates.shuffle_samples`。两者的 loss 不在同一测度上（重标定 `1/r` 与批大小都能
+    决定胜负），于是 G2 变成一条恒真门禁。本测试用「两臂取值相差三个数量级」的假回调
+    把这件事钉死：G2 的读数必须来自配对臂。
+    """
+    cfg = config_from_mapping(SMOKE_BASE)
+    calls = {"g1": 0, "g2_real": 0}
+
+    def g1_arm() -> float:
+        calls["g1"] += 1
+        return 1.0
+
+    def g2_real_arm() -> float:
+        calls["g2_real"] += 1
+        return 1000.0
+
+    inputs = _inputs(
+        step_fn_real=g1_arm,
+        step_fn_g2_real=g2_real_arm,
+        step_fn_g2_shuffled=lambda: 2000.0,
+    )
+    results = run_gates(inputs, cfg.gates)
+    g2 = next(result for result in results if result.name.startswith("G2"))
+    assert calls["g2_real"] == cfg.gates.shuffle_steps
+    assert "1000.000000" in g2.detail  # 用的是配对臂的读数，而不是 G1 臂的 1.0
+    assert g2.passed  # 2000 >= 1000 x 1.05
 
 
 def test_thresholds_are_explicit_and_complete() -> None:

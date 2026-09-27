@@ -227,6 +227,94 @@ class FieldBatch:
         self._assert_conditions(self.batch_size())
         self._assert_targets()
 
+    # ── 分批前向（plan 07 §9-15 的内存墙）─────────────────────────
+    def slice_samples(self, start: int, stop: int) -> FieldBatch:
+        """按**样本维**切一段子批次（门禁的 G2/G3 分批前向用）。
+
+        只切 batch 维（dim 0）。`grid` / `frame_rate` / `range_mask` 是**逐批共享**的量，
+        必须原样保留——它们若被切错，测度 `dV_j`、帧率契约或定义域会静默错位。
+
+        Args:
+            start: 起始样本下标（含）。
+            stop: 结束样本下标（不含）。
+
+        Raises:
+            ValueError: 下标越界或 `start > stop`（宁可报错，不静默钳位）。
+        """
+        total = self.batch_size()
+        lo, hi = int(start), int(stop)
+        if not 0 <= lo <= hi <= total:
+            raise ValueError(f"切片 [{lo}, {hi}) 越界（B={total}）")
+
+        def cut_required(tensor: Tensor) -> Tensor:
+            return tensor[lo:hi]
+
+        def cut_optional(tensor: Tensor | None) -> Tensor | None:
+            return None if tensor is None else tensor[lo:hi]
+
+        sliced = FieldBatch(
+            audio_emb=cut_required(self.audio_emb),
+            frame_rate=self.frame_rate,
+            line_tracks=cut_required(self.line_tracks),
+            line_mask=cut_required(self.line_mask),
+            difficulty=cut_required(self.difficulty),
+            grid=self.grid,
+            counts=cut_optional(self.counts),
+            occlusion=cut_optional(self.occlusion),
+            range_mask=self.range_mask,
+            extended_tracks=cut_optional(self.extended_tracks),
+        )
+        sliced.assert_shapes()
+        return sliced
+
+    def to(self, device: torch.device | str) -> FieldBatch:
+        """把批次的**张量**搬到设备上（门禁在 GPU 上跑真实批次的入口）。
+
+        `grid` 是宿主侧对象（不搬）；`frame_rate` / `range_mask` 的语义与取值不变，
+        需要时由 `range_mask_bool()` 按当前设备的 dtype 派生。
+        """
+        target = torch.device(device)
+
+        def move_required(tensor: Tensor) -> Tensor:
+            return tensor.to(target)
+
+        def move_optional(tensor: Tensor | None) -> Tensor | None:
+            return None if tensor is None else tensor.to(target)
+
+        moved = FieldBatch(
+            audio_emb=move_required(self.audio_emb),
+            frame_rate=self.frame_rate,
+            line_tracks=move_required(self.line_tracks),
+            line_mask=move_required(self.line_mask),
+            difficulty=move_required(self.difficulty),
+            grid=self.grid,
+            counts=move_optional(self.counts),
+            occlusion=move_optional(self.occlusion),
+            range_mask=move_optional(self.range_mask),
+            extended_tracks=move_optional(self.extended_tracks),
+        )
+        moved.assert_shapes()
+        return moved
+
+    def split_samples(self, chunks: int) -> list[FieldBatch]:
+        """把批次切成至多 `chunks` 段**非空**子批次（段数不超过 B）。
+
+        段长尽量均分（余数分摊到前几段）；`chunks <= 1` 时返回单段 `[self]`。
+        段内样本数之和恒等于 B，且拼接顺序与原批次一致（G2 的置换在切分**之前**完成）。
+        """
+        total = self.batch_size()
+        count = max(1, min(int(chunks), total))
+        if count == 1:
+            return [self]
+        base, remainder = divmod(total, count)
+        parts: list[FieldBatch] = []
+        start = 0
+        for index in range(count):
+            size = base + (1 if index < remainder else 0)
+            parts.append(self.slice_samples(start, start + size))
+            start += size
+        return parts
+
     def describe(self) -> str:
         """一行诊断文本（训练日志用；不含任何权重）。"""
         grid = self.grid

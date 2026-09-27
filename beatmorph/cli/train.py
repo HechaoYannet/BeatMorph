@@ -180,7 +180,7 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0911, PLR0912, P
             data_path=manifest_path if cfg.data.source == "manifest" else None,
         )
         try:
-            inputs, stats = build_gate_inputs(cfg, source)
+            inputs, stats = build_gate_inputs(cfg, source, device=args.device)
         except Exception as exc:  # 数据侧问题也要以明确退出码收场
             logger.error("门禁输入装配失败（退出码 %d）：%s", EXIT_TRAIN, exc)
             artifacts.write_metrics({"gates_passed": False, "reason": str(exc)})

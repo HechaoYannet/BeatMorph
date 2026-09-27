@@ -274,12 +274,21 @@ def close_hold_pairs(counts: Tensor, occlusion: Tensor) -> Tensor:
     收口口径是 **token 级**而不是格子级：格子级补遮会在未被遮的 token 里留下
     「被遮的孤立格子」，那正是 `expand_to_tokens` 要消除的 mask 泄漏。
 
+    ⚠️ 收口必须取**传递闭包**（2026-09-27 第四轮，真实批实测）：单趟遍历**不是不动点**。
+    反例（3 个配对，token 图上成链）：配对 A = token(10, 19)、配对 B = token(19, 21)、
+    配对 C = token(36, 38)，初始只遮了 token 21。单趟先看到 A（10 与 19 都未遮 ⇒ 不动），
+    再看 B 时把 19 与 21 都遮上 ⇒ **A 的另一端 19 被 B 顺带遮住而 10 没遮**，
+    A 反而被拆散。因此把每个 Hold 配对当作 token 图上的一条边，并查集求连通分量，
+    再把**含已遮 token 的整个连通分量**遮住：这是「只加遮、不加泄漏」的最小不动点
+    （任何满足「配对同遮或不遮」的解都必须对该蕴含关系封闭，而解不可能比种子更小，
+    因为种子 token 里含被选中的事件）。
+
     Args:
         counts: `(K, T, X, S, C)` 计数张量。
         occlusion: 同形状的遮盖（**假定已是 token 级**）。
 
     Returns:
-        同形状的遮盖；未发生拆分时**原样返回**（不复制）。
+        同形状的遮盖；不动点未扩张时**原样返回**（不复制）。
     """
     pairs, _unpaired = _hold_pairs(counts)
     if not pairs:
@@ -289,13 +298,37 @@ def close_hold_pairs(counts: Tensor, occlusion: Tensor) -> Tensor:
     cells_per_token = int(shape[2]) * int(shape[3]) * int(shape[4])
     per_token = occlusion.reshape(k_dim, t_dim, -1).any(dim=-1)
     flat_tokens = per_token.reshape(-1)
-    changed = False
+
+    # 并查集只登记「参与配对的 token」：不参加任何配对的 token 无需传播，
+    # 这样每窗的成本只与 Hold 配对数有关，与大 K×T 无关。
+    parent: dict[int, int] = {}
+
+    def find(token: int) -> int:
+        root = token
+        while parent[root] != root:
+            root = parent[root]
+        while parent[token] != root:  # 路径压缩
+            parent[token], token = root, parent[token]
+        return root
+
     for left, right in pairs:
         left_token = left // cells_per_token
         right_token = right // cells_per_token
-        if bool(flat_tokens[left_token]) != bool(flat_tokens[right_token]):
-            flat_tokens[left_token] = True
-            flat_tokens[right_token] = True
+        parent.setdefault(left_token, left_token)
+        parent.setdefault(right_token, right_token)
+        root_left = find(left_token)
+        root_right = find(right_token)
+        if root_left != root_right:
+            parent[root_left] = root_right
+
+    # 种子 = 已遮 token 所在分量；整个分量都必须遮住（配对同遮的最小闭包）。
+    seeds = {find(token) for token in parent if bool(flat_tokens[token])}
+    if not seeds:
+        return occlusion
+    changed = False
+    for token in parent:
+        if find(token) in seeds and not bool(flat_tokens[token]):
+            flat_tokens[token] = True
             changed = True
     if not changed:
         return occlusion
@@ -363,7 +396,8 @@ def build_occlusion(
             # **不同 token**（长 Hold / 慢段落）。同一 token 里的另一个事件被选中时，
             # 扩张会把这个 token 整体遮住 ⇒「配对只有一端被遮」。实测（2026-09-27，真实谱面）：
             # 数据集在 index=12 的窗口上直接抛「hold 配对点被拆散」，真实数据通路的门禁装配失败。
-            # 因此扩张之后必须**收口**（token 级，不产生半遮 token）。
+            # 因此扩张之后必须**收口**（token 级，不产生半遮 token）；收口取**传递闭包**
+            # （见 close_hold_pairs 的 docstring：单趟遍历不是不动点，一条链上会互相拆散）。
             # ⚠️ 只对**契约路径** `granularity="event"` 收口：`cell` / `frame` 是消融臂，
             # 它们的「实际 r ≈ 请求 r」契约优先于「Hold 配对不拆散」（那两条臂本就不以配对为单位）。
             if granularity == "event":

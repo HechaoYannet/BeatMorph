@@ -10,6 +10,7 @@
 | calibration.py | NLL 校准与探索性指标的**物理隔离**与标注 |
 | corruption.py | dose-controlled 注入 + 不变性控制 + 准入（未通过者不得进主报告） |
 | report.py | EvalReport 汇总 / schema 冻结 / 文本渲染 |
+| pipeline.py | 落盘接线：图表对 -> EvalReport -> metrics.json（合并载荷 + 实验上下文） |
 
 三条硬约束（本包的设计红线）：
 
@@ -94,6 +95,25 @@ from beatmorph.eval.metrics import (
     select_per_chart_best,
     two_column_report,
 )
+from beatmorph.eval.pipeline import (
+    DATA_REV_MISSING,
+    DATA_REV_PREFIX,
+    DATA_REV_SYNTHETIC,
+    DATA_SOURCES,
+    DEFAULT_CHART_KEY,
+    DEFAULT_DATA_MANIFEST_PATH,
+    EVAL_SECTION_KEY,
+    EVAL_SECTION_ORDER,
+    TRAIN_SUMMARY_FIELDS,
+    ExperimentContext,
+    assert_metrics_schema,
+    assert_train_summary_preserved,
+    eval_section,
+    evaluate_chart_pair,
+    merge_eval_into_metrics,
+    with_experiment_context,
+    write_eval_metrics,
+)
 from beatmorph.eval.protocol import (
     DDC_TOLERANCE_S,
     DEFAULT_TOLERANCES_S,
@@ -134,9 +154,17 @@ from beatmorph.eval.stats import (
 
 __all__ = [
     "ALIGNMENT_CONCLUSION",
+    "DATA_REV_MISSING",
+    "DATA_REV_PREFIX",
+    "DATA_REV_SYNTHETIC",
+    "DATA_SOURCES",
     "DDC_TOLERANCE_S",
+    "DEFAULT_CHART_KEY",
+    "DEFAULT_DATA_MANIFEST_PATH",
     "DEFAULT_DOSES",
     "DEFAULT_TOLERANCES_S",
+    "EVAL_SECTION_KEY",
+    "EVAL_SECTION_ORDER",
     "EXPLORATORY_WARNING",
     "GENELIVE_TOLERANCE_S",
     "NLL_WARNING",
@@ -146,6 +174,7 @@ __all__ = [
     "STANDARD_INJECTIONS",
     "TIME_GROUPS",
     "TIME_GROUP_SUBDIVISIONS",
+    "TRAIN_SUMMARY_FIELDS",
     "UNKNOWN_DIFFICULTY_BAND",
     "X_AXIS_INJECTIONS",
     "AggregateMetrics",
@@ -159,6 +188,7 @@ __all__ = [
     "EvalCase",
     "EvalConfig",
     "EvalReport",
+    "ExperimentContext",
     "ExploratoryReadout",
     "FamilyMetrics",
     "Injection",
@@ -186,7 +216,9 @@ __all__ = [
     "assert_admissible",
     "assert_calibration_is_labeled",
     "assert_exploratory_is_labeled",
+    "assert_metrics_schema",
     "assert_report_schema",
+    "assert_train_summary_preserved",
     "assign_time_groups",
     "binned_density",
     "bootstrap_interval",
@@ -200,7 +232,9 @@ __all__ = [
     "difficulty_band",
     "difficulty_breakdown",
     "energy_correlation",
+    "eval_section",
     "evaluate_case",
+    "evaluate_chart_pair",
     "evaluate_charts",
     "event_beats",
     "greedy_match",
@@ -210,6 +244,7 @@ __all__ = [
     "marker_equal",
     "mean_quality",
     "mean_strata",
+    "merge_eval_into_metrics",
     "merge_strata",
     "metrics_from_counts",
     "pearson_correlation",
@@ -224,4 +259,6 @@ __all__ = [
     "shift_events",
     "spearman_rank_correlation",
     "two_column_report",
+    "with_experiment_context",
+    "write_eval_metrics",
 ]

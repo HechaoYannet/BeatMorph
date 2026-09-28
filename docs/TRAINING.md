@@ -540,6 +540,9 @@ uv run tensorboard --logdir runs/phigros_masked
 `train/lr` / `sys/peak_vram_gib` / `batch_n_lines` / `batch_events` / `coverage/*`），因此曲线是**在线**的；
 同样的行同时追加进 `logs/loss_history.jsonl`（权威、可脚本读，TB 缺失也不影响训练）。
 
+> 📖 **每一条曲线的完整定义、单位、判读与陷阱见 [references/tensorboard-scalars.md](references/tensorboard-scalars.md)**
+> （含上面这行没列的 `val/*`、`cond/*`、`gate/*`、分层损失、`vram_reserved_gib`——上面是旧的不完整清单）。
+
 **④b 数据覆盖率（必看，2026-09-27 第八轮新增；[RFC-0033](decisions/RFC-0033-sampler-coverage-and-epoch.md)）**
 
 同一条 jsonl 里还有 `epoch` / `windows_seen` / `charts_seen`（TB 里是
@@ -591,6 +594,13 @@ uv run tensorboard --logdir runs/phigros_masked
 > 真正生效的一个**）、`optim.val_batch: 8 → 4`。
 > ⚠️ `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` 在 **Windows 上是 no-op**（torch 启动警告
 > `not supported on this platform`）——不要指望它。
+>
+> ⚠️ **2026-09-28 追加更正：跨墙 ≠ 必然卡死（plan 07 §9-59）。** 同一 run 里 **val 每轮都跨墙**：
+> 决策者观测共享显存峰值 **5.6 GB**，val 只是变慢（单次 **100.52 / 167.58 / 120.81 s**，三次输入
+> 逐字段相同），训练**没有崩溃**。而 step 951 那次（共享 **13.2 GB**、功耗 31 W **不回来**）是**卡死**。
+> ⇒ **仅凭共享显存量分不开这两种情况**，能分开的是**是否恢复**。
+> **由此：`val` 段会天然满足下面的停机判据**（本轮现场 7824 MiB / 30.6 W），人工盯盘必须先排除
+> 「正在 val」。
 
 **降速怎么判（贴顶是静默的）**
 
@@ -598,6 +608,9 @@ uv run tensorboard --logdir runs/phigros_masked
   （2026-09-28 实测），**步时放大一个量级**（实测 0.57 s → 8.8 s，最坏是**直接卡死**）。
 - 判据：**`nvidia-smi memory.used` > ~7.4 GiB** 或 `power.draw` 长期 < 45 W 且显存 > 5 GiB ⇒ 立刻停。
   巡检脚本已把这个判据做成告警（`scripts/training_health.py`，峰值 ≥ 7.5 GiB / 步时后半窗慢 1.3×）。
+  ⚠️ **但 `val` 段会误报**：val 全程贴顶（实测 7824/8151 MiB）且功耗在 30-65 W 摆动，**那是设计内的
+  成本、不是事故**（§9-59）；停在 val 中段会白丢一个 val 点。**判据只适用于训练步**——不确定就先看
+  `Get-Content runs/_full_train3.log -Tail 3` 有没有刚出现的 `val @step` 行。
   ⚠️ **不要靠自建看门狗自动杀**：2026-09-28 的 v1 版本因「跨 run 的步号基准」误杀过一次健康运行
   （plan 07 §9-57 事故 2）——决策者已指示**由人工盯**并主动通知。
 - **改 `t_window` / 放开 `data.k_max` / 启用 bf16 之前**：先按上表外推，超过 5 GiB 就先停下来开 RFC 或调配置。

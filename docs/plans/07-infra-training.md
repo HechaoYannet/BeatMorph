@@ -1473,7 +1473,10 @@ CUDA 上下文 / cuBLAS·cuDNN workspace / **分配器碎片**，也未计长期
 
 **已落地的处置（都不改训练语义）**
 
-1. `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`（消碎片，驱动侧见效；实测重试同期峰值更低）；
+1. `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` —— ⚠️ **实测在 Windows 上无效**：
+   torch 2.13 启动即警告 `expandable_segments not supported on this platform`（no-op）。
+   因此「重试期驱动峰值更低（5828 vs 7716 MiB）」**不能**归因于它——那只是步构成不同。
+   保留该设置仅因 Linux 上有效、代价为零；**本机真正生效的只有第 2 条的显存卫生**。
 2. **显存卫生** `optim.vram_hygiene_gib`（默认 1.0）：每步 backward+step 后，若
    `memory_reserved() − memory_allocated() > 阈值` 就 `torch.cuda.empty_cache()`，把「保留但
    空闲」的块还给驱动——这正是事故的直接机制（峰值保留量长期占位）。护栏

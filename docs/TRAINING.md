@@ -586,9 +586,11 @@ uv run tensorboard --logdir runs/phigros_masked
 > （`max_memory_allocated`）**，**不含** CUDA 上下文 / cuBLAS·cuDNN workspace / **分配器碎片**。
 > 首次全量训练实测：K=128 的批把 torch 峰值顶到 **5.23 GiB**，但**驱动侧总量**到
 > **7874 / 8151 MiB**，下一步就滑进共享显存（决策者观测 **13.2 GB** 共享内存），step 951 卡死。
-> ⇒ **判据必须是驱动侧**（`nvidia-smi memory.used`），不是 `sys/peak_vram_gib`。已落地的三个杠杆：
-> `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`、`optim.vram_hygiene_gib`（保留量远超实际
-> 分配时回收缓存，见 `sys/vram_reserved_gib`）、`optim.val_batch: 8 → 4`。
+> ⇒ **判据必须是驱动侧**（`nvidia-smi memory.used`），不是 `sys/peak_vram_gib`。已落地的杠杆：
+> `optim.vram_hygiene_gib`（保留量远超实际分配时回收缓存，见 `sys/vram_reserved_gib`——**本机唯一
+> 真正生效的一个**）、`optim.val_batch: 8 → 4`。
+> ⚠️ `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` 在 **Windows 上是 no-op**（torch 启动警告
+> `not supported on this platform`）——不要指望它。
 
 **降速怎么判（贴顶是静默的）**
 

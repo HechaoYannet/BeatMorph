@@ -51,9 +51,10 @@ BeatMorph 从原始音频（WAV/MP3）+ 难度（+ 可选判定线事件轨）�
 加 CUDA 上下文/workspace/**分配器碎片**后驱动侧贴顶；第七轮「K=128 亦可训」是**分配器口径**，
 **不适用于全量长跑**（该结论已更正）。
 
-**已落地（不改训练语义）**：`PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`；
-`optim.vram_hygiene_gib=1.0`（每步把「保留但空闲」的缓存还给驱动，新增遥测
-`vram_reserved_gib`）；`val_batch: 8→4`；**看门狗已按决策者要求撤下**（他人工盯并主动通知，
+**已落地（不改训练语义）**：`optim.vram_hygiene_gib=1.0`（每步把「保留但空闲」的缓存还给驱动，
+新增遥测 `vram_reserved_gib`——**这是本机唯一真正生效的杠杆**）；`val_batch: 8→4`；
+⚠️ `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` 在 **Windows 上是 no-op**（torch 启动即警告
+`not supported on this platform`）⇒ 先前「它让峰值更低」的判断**已更正**（那只是步构成不同）；**看门狗已按决策者要求撤下**（他人工盯并主动通知，
 不要自动杀进程——v1 曾因跨 run 的步号基准误杀一次健康运行，见 plan 07 §9-57 事故 2）。
 
 **当前正在跑**：`runs/_full_train3.log`（无看门狗）。它先跑门禁（~3.5 min），再 20 000 步。

@@ -44,7 +44,7 @@ BeatMorph 从原始音频（WAV/MP3）+ 难度（+ 可选判定线事件轨）�
 
 ### 下一步（按性价比排序，只留仍然有效的）
 
-1. **裁定 [RFC-0036](docs/decisions/RFC-0036-gate-batch-caliber-and-g2-power.md) §3**（推荐＝C：A 夹具确定性抽取 + B 八批口径，P0/P1 为必做前置；通过阈值需同时定死，证据基线＝线内置换 6 批 5 PASS）→ 实现 → `--gates` 全绿。**这是现在唯一挡住全量训练的东西。**
+1. **裁定 [RFC-0036](docs/decisions/RFC-0036-gate-batch-caliber-and-g2-power.md)**——决策者已质疑 G2 有效性本身，§2.8 复核**质疑成立**（单批 100 步「速度赛」比的是未归一化 sum 损失，量级 ∝ E^0.93，真实批判别力未被证明）；选项扩为 A–E，提议者改推荐 **D2（held-out 置换对照）** 或 **E（退役门禁 G2，改用已落地的 `val/nll_shuffled_delta` + `val/ratio` + G3/G4；E 触及红线 7 文字，修宪级）**。P0（fp32）各选项都保留；P1（线内置换）叠加进 D 或移入 val 路径 → 实现 → 门禁/对照全绿。**这是现在唯一挡住全量训练的东西。**
 2. **跑全量大规模训练**：配置已就绪（`max_samples: null`、`data.window_cache_dir: data/processed/window_cache` 已写入 `configs/phigros_masked.yaml` 并过 CI）⇒ `beatmorph-train --config-name phigros_masked --gates --device cuda`（20 000 步，单步 ≈0.195 s ⇒ ≈65 min + 门禁；缓存把数据侧等待压到 ≈10 ms/窗）。
 3. **val 的真实墙钟仍未实跑验证**（33 s 是推导值），需一次 GPU 前向。
 4. **评估入口未接线**（形态已定＝独立 `beatmorph-eval`），待训练产出 checkpoint。

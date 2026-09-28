@@ -1,8 +1,9 @@
-"""plan 07 §9-15：门禁 G2/G3 的**分批前向**（内存墙）——等价性与边界（默认 CI）。
+"""plan 07 §9-15：门禁 G3 的**分批前向**（内存墙）——等价性与边界（默认 CI）。
 
-真实窗口上 G2 需要足够多的样本（样本太少时打乱臂会直接背样本，§9-12），而一次性
-collate + 前向会在 `shuffle_samples = 16` 时 OOM（§9-15 的实测）。修法是**按样本维
-分段前向/反传**：内存回到「一段样本」的量级，而门禁判据不变。
+真实窗口上 G3 需要足够多的样本（样本太少时模型可以在预算内背下小批），而一次性
+collate + 前向会在 `baseline_samples = 16` 时 OOM（§9-15 的实测）。修法是**按样本维
+分段前向/反传**：内存回到「一段样本」的量级，而门禁判据不变（per_event 归一化下
+的分段等价靠 `make_step_fn` 的除子修正保证，RFC-0037）。
 
 判据不变是这里的**唯一**验收点，因此本文件的核心断言是「分段与不分段逐位等价」：
 同一 seed 的同一模型、同一批次，一段走与四段走必须给出同一个 loss、同一组参数。
@@ -207,7 +208,7 @@ def test_chunks_below_one_is_a_no_op() -> None:
 
 
 def test_gate_batches_carry_the_declared_sample_count() -> None:
-    """门禁装配的样本数来自配置（回归：分段不得悄悄改掉 G2 的样本数）。"""
+    """门禁装配的样本数来自配置（回归：分段不得悄悄改掉 G3 的样本数）。"""
     grid = make_grid(t_bins=T_BINS, x_bins=X_BINS)
     batch = make_batch(k=K_LINES, grid=grid, batch=SAMPLES, events=4, holds=0, seed=2)
     frames = audio_frames_for(grid)

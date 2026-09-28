@@ -11,12 +11,10 @@
 **门禁必须在默认 CI 里能跑**（CLAUDE.md §4：契约级与门禁级断言不得依赖权重/GPU/可选依赖）。
 Lightning 后端仍然提供，并在缺失时给出可操作的报错（而不是静默降级）。
 
-两个同名的打乱助手（都在 `infra/smoke.py`，**别混用**）：
-
-- `shuffle_hidden_counts`：**G2 门禁用的严格口径**——只在被遮盖格子内置换标签，
-  可见场逐位不变 ⇒ 满足 plan 07 §4.3 的「同模型同输入，真标签 / 打乱标签」；
-- `shuffled_counts`：整体置换（`BatchSource.batch(shuffled=True)` 的历史口径），
-  会连输入一起换掉，只适合「目标结构被破坏」那类对照，**门禁已不再使用**。
+置换对照（RFC-0037：门禁 G2 已删除）：`shuffle_counts_within_line`（在 `infra/smoke.py`）
+给 val 的 `nll_shuffled` 对照用——在**每条判定线各自的被遮盖集合内**置换计数：
+可见场逐位不变、每线事件数不变（修掉旧全局置换连「每线事件预算」一起改的
+ nuisance，RFC-0036 §2.5 实证）。
 """
 
 from __future__ import annotations
@@ -48,7 +46,11 @@ from beatmorph.field.grid import FieldGrid
 from beatmorph.field.integrate import omega
 from beatmorph.field.loss import constant_baseline_nll
 from beatmorph.generation.batch import FieldBatch, FieldOutput
-from beatmorph.generation.losses import integral_term, masked_poisson_loss
+from beatmorph.generation.losses import (
+    event_normalizer,
+    integral_term,
+    masked_poisson_loss,
+)
 from beatmorph.generation.model import MaskedFieldModel
 from beatmorph.infra.artifacts import RunArtifacts, git_rev
 from beatmorph.infra.checkpoint import (
@@ -60,7 +62,7 @@ from beatmorph.infra.checkpoint import (
 from beatmorph.infra.config.schema import TrainConfig
 from beatmorph.infra.gates import GateInputs
 from beatmorph.infra.sanity import StepFn
-from beatmorph.infra.smoke import shuffle_hidden_counts, shuffled_counts
+from beatmorph.infra.smoke import shuffle_counts_within_line
 
 __all__ = [
     "SCALAR_TAGS",
@@ -103,10 +105,13 @@ HISTORY_FILENAME: str = "loss_history.jsonl"
 #: :func:`stratified_step_loss`（`loss_empty` 等）；`tests/unit/infra/test_val_path.py`
 #: 断言产出方给出的每个键都在本表里（漂移即测试失败）。
 SCALAR_TAGS: Mapping[str, str] = {
-    # ── 训练侧分层（plan 07 §9-46 / §9-47 I：量具修复，不改损失数学）──────────
+    # ── 训练侧分层（plan 07 §9-46 / §9-47 I；RFC-0037 R3 增补归一化标量）────────
     "integral_per_event": "train/integral_per_event",
     "loss_empty": "train/loss_empty",
     "loss_nonempty": "train/loss_nonempty",
+    "loss_nonempty_per_event": "train/loss_nonempty_per_event",
+    "loss_sum_raw": "train/loss_sum_raw",
+    "clip_active": "train/clip_active",
     "empty_share": "train/empty_share",
     "nonempty_share": "train/nonempty_share",
     # ── val（plan 07 §9-47 C/D）────────────────────────────────────────────
@@ -132,7 +137,7 @@ SCALAR_TAGS: Mapping[str, str] = {
     "cond_track_zero_delta": "cond/track_zero_delta",
 }
 
-#: val 批内置换标签（G2 同口径）的种子偏移；与 G2 用同一个常量，便于对照。
+#: val 批内**线内置换**标签的种子偏移（RFC-0037 R5；沿用被删 G2 的常量便于历史对照）。
 VAL_SHUFFLE_SEED_OFFSET: int = 991
 
 
@@ -202,7 +207,6 @@ class BatchSource(Protocol):
         self,
         *,
         masked: bool,
-        shuffled: bool = False,
         samples: int | None = None,
         min_events: int = 0,
     ) -> FieldBatch:
@@ -321,7 +325,7 @@ def model_from_config(
 
 
 def set_initial_head_bias(model: MaskedFieldModel, value: float) -> None:
-    """把累积强度头的 bias 初始化到 `value`（G1/G2 的相对判据需要首步远离最优）。
+    """把累积强度头的 bias 初始化到 `value`（G1 的相对判据需要首步远离最优）。
 
     Raises:
         AttributeError: 输出头结构不含 `cum_head`（换头之后必须同步这里的口径）。
@@ -374,19 +378,21 @@ def make_step_fn(
 ) -> StepFn:
     """把「前向 + 反传 + 一步优化」包成 `sanity.StepFn`（返回标量 loss）。
 
-    `chunks > 1` 时**分批前向/反传**（plan 07 §9-15 的内存墙）：门禁的 G2/G3 需要
+    `chunks > 1` 时**分批前向/反传**（plan 07 §9-15 的内存墙）：门禁的 G3 需要
     足够多的样本（样本太少时打乱臂会直接背样本，plan 07 §9-12），而真实窗口的
     激活显存/内存随批大小线性增长 ⇒ 一次性前向会在 16 个样本上直接 OOM。
 
     等价性口径（**必须成立，否则分批会悄悄改掉门禁判据**）：
 
-    - 本函数依赖损失是**按样本求和**的（`full_poisson_loss` / `masked_poisson_loss`
-      的默认 `reduction="sum"`）。此时逐段 `loss.backward()` 累加得到的梯度与一次性
-      反传**数值等价**（只差 float32 的求和顺序：实测 loss 相对差 2.3e-8、梯度最大绝对差
-      1.5e-5 ≈ 尺度的 1e-7），返回的标量 loss 是全批 loss（**不是**段均值）。
-    - 对 `reduction="mean"` 的损失（或任何在批内重算统计量的损失，例如
-      `masked_poisson_loss` 的遮盖比例 `r`）分批**不等价**——那种臂必须自己
-      保证批内统计口径，本函数不替它决定。
+    - 训练/门禁损失是 `reduction="per_event"`（RFC-0037 R2）：整式除以**批级**除子
+      `D = max(E_total, 1)`。分段前向时各段只见到自己的 `D_part`，直接累加会按
+      `1/D_part` 加权 ≠ `1/D_full` ⇒ 本函数对每段 loss 乘**修正因子** `D_part/D_full`
+      （恒等式：`part_sum/D_part × D_part/D_full = part_sum/D_full`）。修正后逐段
+      `loss.backward()` 累加的梯度与标量与不分段**一致**（只差 float 求和顺序；
+      旧 sum 口径时代实测 loss 相对差 2.3e-8、梯度最大绝对差 1.5e-5），返回的标量
+      是全批 per_event loss（**不是**段均值）。
+    - 对 `reduction="mean"` 的损失（或任何在批内重算统计量的损失）分批**不等价**——
+      那种臂必须自己保证批内统计口径，本函数不替它决定。
 
     Args:
         model: 前向模块（`output.loss` 必须是标量）。
@@ -397,16 +403,21 @@ def make_step_fn(
     """
     parts = batch.split_samples(chunks)
     amp = autocast_context(precision, batch.line_mask.device)
+    # per_event 的分段修正（见 docstring）：loss_part × D_part/D_full == part_sum/D_full。
+    full_norm = event_normalizer(batch)
+    part_norms = [event_normalizer(part) for part in parts]
 
     def step() -> float:
         optimizer.zero_grad(set_to_none=True)
         total = 0.0
-        for part in parts:
+        for part, part_norm in zip(parts, part_norms, strict=True):
             with amp:
                 output = model(part)
             loss = output.loss
             if loss is None:  # pragma: no cover - forward(compute_loss=True) 保证非 None
                 raise RuntimeError("前向没有返回 loss：门禁需要 compute_loss=True")
+            if part_norm != full_norm:
+                loss = loss * (part_norm / full_norm)
             loss.backward()
             total += float(loss.detach())
         if grad_clip_norm is not None:
@@ -428,20 +439,17 @@ def _release_cuda() -> None:
         torch.cuda.empty_cache()
 
 
-def _hidden_event_total(batch: FieldBatch) -> float:
-    """被遮盖格子内的事件数（G2 的监督质量诊断量）。"""
-    if batch.counts is None or batch.occlusion is None:
-        return 0.0
-    hidden = batch.occlusion_bool()
-    return float(batch.counts.to(dtype=torch.float32).masked_select(hidden).sum())
-
-
 def constant_baseline_for(batch: FieldBatch) -> float:
-    """G3 的常数基线：`λ = N/|Ω|` 的闭式泊松 NLL（**不是** λ ≡ 0）。"""
+    """G3 的常数基线：`λ = N/|Ω|` 的闭式泊松 NLL（**不是** λ ≡ 0）。
+
+    RFC-0037 §2.3：模型臂经 forward 的 per_event 归一化，基线**同除一个除子**
+    `D = max(E_total, 1)` ⇒ 判据不等式 `model <= (1-x)·baseline` 与归一化前逐位等价。
+    """
     if batch.counts is None:
         raise ValueError("常数基线需要 batch.counts")
     n_events = float(batch.counts.to(dtype=torch.float32).sum())
-    return float(constant_baseline_nll(n_events, omega(batch.grid, n_lines=batch.n_lines())))
+    baseline = float(constant_baseline_nll(n_events, omega(batch.grid, n_lines=batch.n_lines())))
+    return baseline / event_normalizer(batch)
 
 
 #: 条件干预臂的名字（落进 `cond_*_delta`；§9-46 ③ 的三元组，逐字对应）
@@ -510,6 +518,8 @@ def stratified_step_loss(output: FieldOutput, batch: FieldBatch) -> dict[str, fl
         out["loss_empty"] = float(per_window[empty].mean().item())
     if bool((~empty).any()):
         out["loss_nonempty"] = float(per_window[~empty].mean().item())
+        # RFC-0037 R3：非空窗的**每事件**归一损失（跨步直接可比，主趋势曲线）。
+        out["loss_nonempty_per_event"] = float((per_window[~empty] / events[~empty]).mean().item())
     return out
 
 
@@ -551,7 +561,8 @@ def evaluate_val(
                 readout = masked_readout(batch, output.lam, reweight=reweight)
                 shuffled_nll: float | None = None
                 if batch.counts is not None and batch.occlusion is not None:
-                    shuffled = shuffle_hidden_counts(
+                    # RFC-0037 R5：线内置换（每线事件数不变；旧全局置换的 nuisance 见 RFC-0036 §2.5）。
+                    shuffled = shuffle_counts_within_line(
                         batch, seed=int(seed) + VAL_SHUFFLE_SEED_OFFSET
                     )
                     with autocast_context(precision, device):
@@ -604,31 +615,26 @@ def build_gate_inputs(
     def to_device(batch: FieldBatch) -> FieldBatch:
         return batch if target_device is None else batch.to(target_device)
 
-    # 门禁批必须**非空**：空批上的 G1/G2/G3 都是空过（见 `BatchSource.batch` 的说明）。
+    # 门禁批必须**非空**：空批上的 G1/G3 都是空过（见 `BatchSource.batch` 的说明）。
     min_events = max(0, int(gates.batch_min_events))
     g1_batch = to_device(source.batch(masked=True, min_events=min_events))
-    # G2 的样本数显式给足：样本太少时打乱臂可以直接背下样本，对照会退化成空转
-    g2_samples = max(1, int(gates.shuffle_samples))
-    # G2/G3 的前向按样本维分段（plan 07 §9-15）：真实窗口上 samples=16 一次性前向会 OOM，
-    # 分段后内存回到「一段样本」的量级，而梯度与 loss 与不分段一致（按样本求和的损失）。
-    g2_chunks = max(1, int(gates.shuffle_chunks))
-    # G2 的两臂：**同一批、同一损失、同一起点**，只有「待补全的标签」不同
-    # （plan 07 §4.3 字面口径「同模型同输入，真标签 / 打乱标签」）。
-    #
-    # 为什么走遮盖路径而不是无遮盖：无遮盖时 observed_counts() 把 counts 原样喂回去，
-    # **输入就是目标**——此时打乱目标会连输入一起打乱，对照退化成「拟合真场 vs 拟合乱场」，
-    # 测不出「输入对目标有没有信息」（那个命题只有把输入钉住才成立）。
-    # 遮盖路径下两臂的可见场逐位相同（shuffle_hidden_counts 只在遮盖集合内置换），
-    # 于是差异恰好是「上下文能否预测被遮盖事件」——帧率/对齐类 bug 会在此当场现形。
-    real_batch = to_device(source.batch(masked=True, samples=g2_samples, min_events=min_events))
-    shuffled_batch = to_device(shuffle_hidden_counts(real_batch, seed=seed + 991))
+    # G3 的样本数显式给足：样本太少时模型可以在预算内背下小批，基线对照失效
+    g3_samples = max(1, int(gates.baseline_samples))
+    # G3 的前向按样本维分段（plan 07 §9-15）：真实窗口上 samples=16 一次性前向会 OOM，
+    # 分段后内存回到「一段样本」的量级，而梯度与 loss 与不分段一致（per_event 的
+    # 分段修正见 `make_step_fn`）。
+    g3_chunks = max(1, int(gates.baseline_chunks))
     # G3 的基线是**全事件**口径的闭式常数基线（`N·(1+log(|Ω|/N))`，plan 03 的 `constant_baseline_nll`），
     # 因此 G3 必须在**无遮盖**批上比：遮盖路径的 loss 是「只监督被遮盖事件 + 重标定 1/r」，
-    # 与全事件基线不在同一测度上（同 §4.3 的配对纪律，别再犯 G2 那个错）。
-    g3_batch = to_device(source.batch(masked=False, samples=g2_samples, min_events=min_events))
+    # 与全事件基线不在同一测度上（§4.3 的配对纪律）。
+    g3_batch = to_device(source.batch(masked=False, samples=g3_samples, min_events=min_events))
+    # RFC-0037 R4（原 P0）：门禁臂**固定 fp32**——bf16 下同臂重复运行噪声 2.8×
+    # （RFC-0036 §2.3 实测），任何阈值化读数都不可解释；fp32 同进程逐位一致。
+    # 训练本身仍用 cfg.optim.precision，不受影响。
+    gate_precision = "fp32"
 
     # 门禁优化器的学习率**独立于训练 lr**：门禁的预算只有 steps 步，必须让模型
-    # 真的收敛（否则 G2/G3 两臂都停在初始点附近，对照与基线判据都失去意义）。
+    # 真的收敛（否则 G3 停在初始点附近，基线判据失去意义）。
     gate_lr = cfg.optim.lr if gates.gate_optimizer_lr is None else float(gates.gate_optimizer_lr)
 
     def optimizer_for(model: nn.Module) -> torch.optim.Optimizer:
@@ -648,23 +654,20 @@ def build_gate_inputs(
     # （`nvidia-smi` 实测 7.88 / 8.15 GB、功耗从 94 W 掉到 88 W），同一个 G3 步从
     # **0.57 s 放大到 8.8 s（15×）**，整轮门禁从分钟级变成小时级且迟迟不结束。
     # G3 是独立臂（它只要 `model_loss` / 基线 / 帧数 / 时长这四个标量），因此没有理由
-    # 和其余三个模型共处；释放后 G1/G2 的显存回到「三个模型 + 三个批」的量级。
+    # 和 G1 的模型共处；释放后 G1 的显存回到「一个模型 + 一个批」的量级。
     # 门禁是**分钟级静默**的（此前整轮跑完才写第一行日志）⇒ 外部无法区分「慢」与「卡死」。
-    # 这三个批的形状（尤其是 K）**就是**门禁耗时的决定量：步时 ∝ (K·T)²，G2/G3 还要 ×16 段。
+    # 批的形状（尤其是 K）**就是**门禁耗时的决定量：步时 ∝ (K·T)²，G3 还要 ×16 段。
     logger.info(
-        "门禁批：G1 K=%d samples=%d events=%.0f｜G2 K=%d samples=%d events=%.0f（遮盖内 %.0f）"
-        "｜G3 K=%d samples=%d events=%.0f；chunks=%d precision=%s",
+        "门禁批：G1 K=%d samples=%d events=%.0f｜G3 K=%d samples=%d events=%.0f；"
+        "chunks=%d gate_precision=%s（训练=%s）",
         g1_batch.n_lines(),
         g1_batch.batch_size(),
         event_total(g1_batch),
-        real_batch.n_lines(),
-        real_batch.batch_size(),
-        event_total(real_batch),
-        event_total(shuffled_batch),
         g3_batch.n_lines(),
         g3_batch.batch_size(),
         event_total(g3_batch),
-        g2_chunks,
+        g3_chunks,
+        gate_precision,
         cfg.optim.precision,
     )
     g3_model = build_model(
@@ -675,17 +678,17 @@ def build_gate_inputs(
         g3_batch,
         optimizer_for(g3_model),
         grad_clip_norm=cfg.optim.grad_clip_norm,
-        chunks=g2_chunks,
-        precision=cfg.optim.precision,
+        chunks=g3_chunks,
+        precision=gate_precision,
     )
     logger.info(
         "门禁 G3 预计算开始：%d 步 x %d 段（K=%d）——这一项在正常 K 下就要十几分钟",
-        max(1, gates.shuffle_steps),
-        g2_chunks,
+        max(1, gates.baseline_steps),
+        g3_chunks,
         g3_batch.n_lines(),
     )
     model_loss = g3_step()
-    for _ in range(max(1, gates.shuffle_steps) - 1):
+    for _ in range(max(1, gates.baseline_steps) - 1):
         model_loss = g3_step()
     logger.info("门禁 G3 预计算完成：model_loss=%.4f", model_loss)
     g3_events = event_total(g3_batch)
@@ -697,18 +700,10 @@ def build_gate_inputs(
     del g3_step, g3_model, g3_batch
     _release_cuda()
 
-    # ⚠️ 抬高初值只服务 G1 的**相对**判据；G2/G3 是对照/基线口径，必须从模型的自然初始化
-    # 出发（否则它们在预算内先花掉一半步数去压一个人为抬高的、与任务无关的积分项）。
+    # ⚠️ 抬高初值只服务 G1 的**相对**判据；G3 是基线口径，必须从模型的自然初始化
+    # 出发（否则它在预算内先花掉一半步数去压一个人为抬高的、与任务无关的积分项）。
     # 见 `GatesConfig.contrast_initial_head_bias` 的实测依据。
     g1_model = build_model(g1_batch.grid, model_seed=seed, head_bias=gates.initial_head_bias)
-    # G2 的两臂必须**同批、同损失、同起点**（plan 07 §4.3）：目标只在「真 / 打乱」上不同。
-    # 二者都用同一 seed 建模型，因此初始权重逐位相同。
-    g2_real_model = build_model(
-        real_batch.grid, model_seed=seed, head_bias=gates.contrast_initial_head_bias
-    )
-    shuffled_model = build_model(
-        shuffled_batch.grid, model_seed=seed, head_bias=gates.contrast_initial_head_bias
-    )
 
     inputs = GateInputs(
         step_fn_real=make_step_fn(
@@ -716,53 +711,31 @@ def build_gate_inputs(
             g1_batch,
             optimizer_for(g1_model),
             grad_clip_norm=cfg.optim.grad_clip_norm,
-            precision=cfg.optim.precision,
-        ),
-        step_fn_g2_real=make_step_fn(
-            g2_real_model,
-            real_batch,
-            optimizer_for(g2_real_model),
-            grad_clip_norm=cfg.optim.grad_clip_norm,
-            chunks=g2_chunks,
-            precision=cfg.optim.precision,
-        ),
-        step_fn_g2_shuffled=make_step_fn(
-            shuffled_model,
-            shuffled_batch,
-            optimizer_for(shuffled_model),
-            grad_clip_norm=cfg.optim.grad_clip_norm,
-            chunks=g2_chunks,
-            precision=cfg.optim.precision,
+            precision=gate_precision,
         ),
         model_loss=float(model_loss),
         baseline_loss=float(baseline_loss),
         frames=frames,
         duration_s=duration,
-        frame_rate=float(real_batch.frame_rate),
+        frame_rate=float(g1_batch.frame_rate),
     )
     stats = {
         "g1_events": event_total(g1_batch),
         "g1_lines": float(g1_batch.n_lines()),
         "g1_samples": float(g1_batch.batch_size()),
-        "g2_events": event_total(real_batch),
-        # G2 的监督质量：被遮盖格子里的**事件数**（两臂逐位相同，只有分布不同）。
-        "g2_hidden_events": _hidden_event_total(real_batch),
         "g3_events": g3_events,
         "g3_lines": g3_lines,
         "g3_samples": g3_samples_used,
+        "g3_chunks": float(g3_chunks),
         "gate_min_batch_events": float(min_events),
         # global 层的自注意力长度 L = K * T：成本 ∝ L^2（每样本独立，但 L^2 缓冲区随
         # 分段内样本数线性叠加）。（2026-09-27 第四轮实测：这是真实门禁墙钟的量级来源。）
         "gate_optimizer_lr": float(gate_lr),
         "g1_initial_head_bias": float(gates.initial_head_bias),
         "contrast_initial_head_bias": float(gates.contrast_initial_head_bias),
-        "g2_lines": float(real_batch.n_lines()),
-        "g2_attn_len": float(real_batch.n_lines() * real_batch.grid.t_bins),
-        "field_t_bins": float(real_batch.grid.t_bins),
-        # G2 两臂的同批性落进 gates.txt：样本数一旦不等，比的就是「批大小」而不是「信息」。
-        "g2_real_samples": float(real_batch.batch_size()),
-        "g2_shuffled_samples": float(shuffled_batch.batch_size()),
-        "g2_chunks": float(g2_chunks),
+        # RFC-0037 R4：门禁臂精度固定 fp32（bf16 重复噪声 2.8×，读数不可解释）。
+        "gate_precision": 32.0,
+        "field_t_bins": float(g1_batch.grid.t_bins),
         "g3_baseline_loss": float(inputs.baseline_loss),
         "g3_model_loss": float(inputs.model_loss),
         "audio_frames": float(frames),
@@ -1204,6 +1177,8 @@ def train(  # noqa: PLR0912, PLR0915 - 循环的分支/语句数靠注释说明�
             # loss.detach() 取标量会**强制同步**：到这里 GPU 上的搬运/前向/反向/裁剪/更新
             # 都已落地，因此下面的 compute 才是真计算时间，而不是 kernel 排队时间。
             value = float(loss.detach())
+            # RFC-0037 R3：per_event 的除子 D（E=0 时 D=1）⇒ loss_sum_raw 还原旧 sum 口径。
+            d_norm = event_normalizer(batch)
             computed = time.perf_counter()
             elapsed = computed - started
             data_time = drawn - started
@@ -1222,6 +1197,8 @@ def train(  # noqa: PLR0912, PLR0915 - 循环的分支/语句数靠注释说明�
             row: dict[str, float] = {
                 "step": float(step),
                 "loss": value,
+                # 旧口径（sum）对照：raw = 归一化 loss × D，与历史 run 的曲线可比（RFC-0037 R3）。
+                "loss_sum_raw": value * d_norm,
                 "step_time_s": elapsed,
                 # 步时**拆开**（plan 07 §9-42）：GPU 利用率偏低时，必须能区分
                 # 「数据侧供给不足（GPU 在等）」与「计算侧本身慢」。混成一个数只能
@@ -1229,6 +1206,13 @@ def train(  # noqa: PLR0912, PLR0915 - 循环的分支/语句数靠注释说明�
                 "data_time_s": data_time,
                 "compute_time_s": compute_time,
                 "grad_norm": grad_norm,
+                # 该步是否触发梯度裁剪（grad_norm 是**裁剪前**总范数）：归一化损失落地后
+                # 用它量化「clip=1.0 还在不在每一步生效」（RFC-0037 R3 / §6-1）。
+                "clip_active": float(
+                    cfg.optim.grad_clip_norm is not None
+                    and math.isfinite(grad_norm)
+                    and grad_norm > float(cfg.optim.grad_clip_norm)
+                ),
                 "peak_vram_gib": _peak_vram_gib(),
                 "lr": float(cfg.optim.lr),
                 # 批的 K 与事件数：显存墙与「空批」两个老问题都靠它在线可见
@@ -1417,11 +1401,10 @@ class ManifestBatchSource:
         self,
         *,
         masked: bool,
-        shuffled: bool = False,
         samples: int | None = None,
         min_events: int = 0,
     ) -> FieldBatch:
-        """取若干**同网格身份**的窗口并 collate（`shuffled` 时置换目标）。
+        """取若干**同网格身份**的窗口并 collate。
 
         `min_events > 0`：逐次重抽直到批内事件数达标（最多 :attr:`max_event_draws` 次）。
         **为什么必须**：真实切片上第一个桶的第一个窗口实测 0 事件，门禁因此空过
@@ -1432,7 +1415,7 @@ class ManifestBatchSource:
             GridMismatchError: 分桶逻辑失效（不应发生；由 collate 兜底）。
         """
         return draw_until_min_events(
-            lambda: self._draw(masked=masked, shuffled=shuffled, samples=samples),
+            lambda: self._draw(masked=masked, samples=samples),
             min_events=min_events,
             attempts=self.max_event_draws,
         )
@@ -1623,7 +1606,6 @@ class ManifestBatchSource:
         self,
         *,
         masked: bool,
-        shuffled: bool = False,
         samples: int | None = None,
     ) -> FieldBatch:
         """取一批（`batch` 的重抽循环用它）。
@@ -1648,8 +1630,6 @@ class ManifestBatchSource:
         batch = collate_field_batch(windows)
         if not masked:
             batch = _drop_occlusion(batch)
-        if shuffled:
-            batch = _shuffle_targets(batch, seed=self.seed + 991)
         return batch
 
     def describe(self) -> str:
@@ -1870,17 +1850,7 @@ class ManifestValSource:
 
 
 def _drop_occlusion(batch: FieldBatch) -> FieldBatch:
-    """去掉遮盖（G2/G3 的无遮盖口径）。"""
+    """去掉遮盖（G3 的无遮盖口径）。"""
     from dataclasses import replace
 
     return replace(batch, occlusion=None)
-
-
-def _shuffle_targets(batch: FieldBatch, *, seed: int) -> FieldBatch:
-    """置换目标计数（G2 的对照臂；事件数不变、输入与目标的对应被破坏）。"""
-    from dataclasses import replace
-
-    if batch.counts is None:
-        raise ValueError("打乱对照需要 batch.counts")
-    shuffled = shuffled_counts(batch.counts, seed=seed)
-    return replace(batch, counts=shuffled, occlusion=None)

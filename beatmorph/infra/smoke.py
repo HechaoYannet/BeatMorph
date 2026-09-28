@@ -6,12 +6,13 @@
   走的是与真实数据**同一条**目标构建路径；
 - 音频帧数由 `MERT_FRAME_RATE_HZ` **派生**（`round(时长 x 帧率)`），所以 G4 在这条路径上
   同样有内容；
-- **条件必须携带目标的信息**（plan 04 §9-15）：随机噪声上的事件与条件独立时，G2 的
-  真实臂与打乱臂都会停在同一个边际解上，门禁变成空转。因此这里把合成谱的**事件密度**
-  写进 `audio_emb` 的第 0 维（每个音频帧对应的 τ 区间内的 event 数）——真实臂能据此
-  定位事件，打乱臂拿到的是**与目标不符**的密度信号。
-- 打乱臂只在**被遮盖格子内**置换标签（`shuffle_hidden_counts`），于是可见场逐位不变，
-  满足 plan 07 §4.3 的「同模型、同输入、只换标签」。
+- **条件必须携带目标的信息**（plan 04 §9-15）：随机噪声上的事件与条件独立时，模型无从
+  学起，门禁变成空转。因此这里把合成谱的**事件密度**写进 `audio_emb` 的第 0 维
+  （每个音频帧对应的 τ 区间内的 event 数）——模型能据此定位事件。
+
+（2026-09-28，RFC-0037：门禁 G2 已删除，本模块不再提供打乱臂；`shuffle_counts_within_line`
+是给 **val 的置换对照**（`val/nll_shuffled_delta`）用的线内置换，与被删的全局置换相比
+保持每条线的事件数不变——见 RFC-0036 §2.5 的 nuisance 实证。）
 
 合成参数（BPM / 拍数 / 每拍 note 数）都是**超参**，不是物理常量：它们只影响合成谱本身。
 """
@@ -48,8 +49,7 @@ __all__ = [
     "DEFAULT_SMOKE_BPM",
     "SmokeBatchSource",
     "event_density_signal",
-    "shuffle_hidden_counts",
-    "shuffled_counts",
+    "shuffle_counts_within_line",
     "spec_of",
     "synthetic_chart",
 ]
@@ -132,8 +132,7 @@ def _tap() -> int:
 class SmokeBatchSource:
     """合成批次来源（`BatchSource` 协议的一个实现）。
 
-    `batch(masked=True)`：遮盖补全训练路径（G1 用）；
-    `batch(shuffled=True)`：目标被整体置换（G2 的对照臂用，输入随之失去信息）。
+    `batch(masked=True)`：遮盖补全训练路径（G1 用）；`batch(masked=False)`：全事件口径（G3 用）。
     """
 
     cfg: TrainConfig
@@ -177,7 +176,6 @@ class SmokeBatchSource:
         self,
         *,
         masked: bool,
-        shuffled: bool = False,
         samples: int | None = None,
         min_events: int = 0,
     ) -> FieldBatch:
@@ -185,9 +183,7 @@ class SmokeBatchSource:
 
         Args:
             masked: 是否生成遮盖通道（G1 的遮盖补全路径）。
-            shuffled: 是否置换目标（G2 的对照臂）。
-            samples: 样本数；None 取 {BT}optim.batch_size{BT}。G2 需要较大的样本数
-                （见 {BT}GatesConfig.shuffle_samples{BT} 的说明），否则对照会退化成背样本。
+            samples: 样本数；None 取 {BT}optim.batch_size{BT}。
             min_events: 门禁要求的最小事件数（合成谱本就密集，这里只做**断言**：
                 满足不了说明合成参数被改坏了，必须报错而不是静默空过）。
         """
@@ -215,10 +211,8 @@ class SmokeBatchSource:
         assert grid is not None  # count >= 1
         original = torch.stack(counts, dim=0)
         # 条件必须携带目标的信息（plan 04 §9-15）：把事件密度写进 audio 的第 0 维。
-        # **取自打乱之前**的 counts —— 打乱臂因此拿到「与目标不符」的条件，
-        # 这正是 G2 要检验的差异（若密度跟着目标一起打乱，对照就会退化成空转）。
         density = event_density_signal(original, int(audio[0].shape[0]))
-        stacked = shuffled_counts(original, seed=self.seed + 991) if shuffled else original
+        stacked = original
         n_lines = int(stacked.shape[1])
         line_mask = torch.ones(count, n_lines, dtype=torch.bool)
         occlusion = None
@@ -272,45 +266,42 @@ class SmokeBatchSource:
         }
 
 
-def shuffled_counts(counts: torch.Tensor, *, seed: int) -> torch.Tensor:
-    """把目标按格整体置换（事件数不变；输入与目标的对应关系被破坏）。"""
-    generator = torch.Generator().manual_seed(seed)
-    flat = counts.reshape(int(counts.shape[0]), -1).clone()
-    for row in range(int(flat.shape[0])):
-        order = torch.randperm(int(flat.shape[1]), generator=generator)
-        flat[row] = flat[row][order]
-    return flat.reshape(tuple(counts.shape))
+def shuffle_counts_within_line(batch: FieldBatch, *, seed: int) -> FieldBatch:
+    """把**被遮盖格子**里的计数在「每条 (样本, 判定线) 各自的遮盖集合内」置换。
 
+    RFC-0037 R5（吸收 RFC-0036 的 P1）：val 的置换对照（`val/nll_shuffled_delta`）用它。
+    与被删除的全局置换（`shuffle_hidden_counts`）相比，**线内置换保持每条线的事件数不变**——
+    全局置换会把事件从 1 条线摊到 17 条线，连「每线事件预算」这个 nuisance 一起改掉
+    （RFC-0036 §2.5 实证：同一批 real 166.74 / 线内置换 257.61 / 全局置换 −26.49）。
 
-def shuffle_hidden_counts(batch: FieldBatch, *, seed: int) -> FieldBatch:
-    """把**被遮盖格子**里的计数在遮盖集合内整体置换（G2 的严格口径）。
+    契约（进默认 CI，RFC-0037 §2.4）：
 
-    为什么必须「只在遮盖集合内」置换：模型的输入是可见场
-    `counts * ~occlusion`；只要置换不跨越遮盖边界，可见场就**逐位不变**，
-    于是两臂满足 plan 07 §4.3 的字面要求「同模型、同输入，真标签 / 打乱标签」。
-    若像 `shuffled_counts` 那样整体置换，输入会跟着目标一起变（`masked=False` 时
-    输入**就是**目标），对照退化成「拟合真场 vs 拟合乱场」——那测的不是
-    「输入对目标有没有信息」。
+    1. 可见场 `counts·~occlusion` 逐位不变（模型输入不动）；
+    2. **每线**事件数不变；
+    3. 总事件数不变；
+    4. 同 seed 同进程逐位可复现；
+    5. 用独立 `torch.Generator`，不污染全局 RNG。
 
     Args:
-        batch: 必须带 `counts` 与 `occlusion`（走遮盖训练路径）。
-        seed: 置换种子（两臂同起点，只有标签不同）。
+        batch: 必须带 `counts` 与 `occlusion`（遮盖批次）。
+        seed: 置换种子。
 
     Raises:
-        ValueError: 缺 counts / occlusion（无遮盖就没有「待补全的标签」可打乱）。
+        ValueError: 缺 counts / occlusion（无遮盖就没有「待补全的标签」可置换）。
     """
     if batch.counts is None or batch.occlusion is None:
-        raise ValueError("G2 的严格口径需要遮盖批次（counts + occlusion）：无遮盖时输入就是目标")
+        raise ValueError("线内置换需要遮盖批次（counts + occlusion）：无遮盖时输入就是目标")
     occlusion = batch.occlusion_bool()
     counts = batch.counts.clone()
-    generator = torch.Generator().manual_seed(seed)
+    generator = torch.Generator().manual_seed(int(seed))
     for row in range(int(counts.shape[0])):
-        selector = occlusion[row]
-        values = counts[row][selector]
-        if int(values.numel()) <= 1:
-            continue
-        order = torch.randperm(int(values.numel()), generator=generator)
-        counts[row][selector] = values[order]
+        for line in range(int(counts.shape[1])):
+            selector = occlusion[row, line]
+            values = counts[row, line][selector]
+            if int(values.numel()) <= 1:
+                continue
+            order = torch.randperm(int(values.numel()), generator=generator)
+            counts[row, line][selector] = values[order]
     return replace(batch, counts=counts)
 
 
@@ -318,7 +309,7 @@ def event_density_signal(counts: torch.Tensor, frames: int) -> torch.Tensor:
     """每个音频帧对应的 τ 区间内的事件数 → `(B, frames)` 的密度信号。
 
     这是合成夹具的**条件**（写进 `audio_emb` 的第 0 维）：没有它，噪声上的事件与条件
-    独立，G2 无命题可检验（plan 04 §9-15）。
+    独立，模型无从学起、门禁空转（plan 04 §9-15）。
     """
     batch_size, t_bins = int(counts.shape[0]), int(counts.shape[1])
     per_tau = counts.to(dtype=torch.float32).sum(dim=(1, 3, 4, 5))

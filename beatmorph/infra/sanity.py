@@ -1,15 +1,20 @@
-"""训练健全性门禁（POSTMORTEM-2026-08-05 制度化）。
+"""训练健全性门禁（POSTMORTEM-2026-08-05 制度化；RFC-0037 起为**三道**）。
 
-四道门禁，任何新模型/新范式在**扩大数据规模之前**必须依次通过：
+三道门禁，任何新模型/新范式在**扩大数据规模之前**必须依次通过：
 
 - **G1 单 batch 过拟合**：在 1-4 个样本上必须能把 loss 打到接近 0。
   过不了说明通路是坏的（梯度断、loss 用错、输入没接上），与数据量无关。
-- **G2 打乱标签对照**：把目标打乱后 loss **必须显著变差**。若不变，说明输入
-  对目标零信息——帧率/对齐类 bug 会在这里当场现形。
 - **G3 常数基线**：模型 loss 必须显著优于"直接预测数据集均值"。否则模型
   其实什么都没学到，只是停在了回归到均值的那个地板上。
 - **G4 契约断言**：帧率/形状等物理量必须由模型 config **派生**并断言，
   不得硬编码（25Hz vs 75Hz 之痛）。
+
+⚠️ **G2（打乱标签对照）已删除（RFC-0037，2026-09-28 决策者裁定）**：单批训练损失
+「速度赛」在真实批上判别力未被证明（逐批 verdict 翻转、nuisance 沾染、跨进程漂移，
+证据见 RFC-0036 §1-§2 与 plan 07 §9-54/§9-55）。「输入对目标有没有信息」改由
+**held-out 在线对照**承担：`val/nll_shuffled_delta`（线内置换）+ `val/ratio` +
+`cond_*_delta`（条件干预）。判读红线：任一 val 点 `val/ratio >= 1` 或
+`val/nll_shuffled_delta <= 0` ⇒ 该 run 的扩规模结论作废（docs/TRAINING.md）。
 
 设计原则：**范式中立**。本模块只吃调用方给的 `step_fn`（跑一步优化并返回
 标量 loss），不 import torch、不认识任何具体模型/数据集/tokenizer，因此
@@ -17,7 +22,7 @@
 
 用法::
 
-    from beatmorph.infra.sanity import overfit_single_batch, shuffled_target_control
+    from beatmorph.infra.sanity import overfit_single_batch
 
 
     def step() -> float:
@@ -43,7 +48,7 @@ class GateResult:
     """单道门禁的结果。
 
     Attributes:
-        name: 门禁名（G1..G4）。
+        name: 门禁名（G1/G3/G4；RFC-0037 起 G2 已删除）。
         passed: 是否通过。
         detail: 人类可读的判据与实际值，便于直接贴进训练日志。
     """
@@ -92,41 +97,6 @@ def overfit_single_batch(
         "G1 单batch过拟合",
         passed,
         f"loss {first:.6f} -> {last:.6f}（{steps} 步），需 <= {ceiling:.6f}",
-    )
-
-
-def shuffled_target_control(
-    step_fn_real: StepFn,
-    step_fn_shuffled: StepFn,
-    *,
-    steps: int = 300,
-    min_gap_ratio: float = 0.05,
-) -> GateResult:
-    """G2：打乱标签对照门禁。
-
-    判据：打乱目标的末步 loss 必须 >= 真实目标的末步 loss × (1 + `min_gap_ratio`)。
-    两者持平 => 输入对目标**零信息**（帧率错配、索引错位、特征与标签不同源）。
-
-    Args:
-        step_fn_real: 标签正确的优化回调。
-        step_fn_shuffled: 标签被打乱的优化回调（同模型/同输入）。
-        steps: 优化步数。
-        min_gap_ratio: 要求的最小相对差距。
-    """
-    _, real_last = _run(step_fn_real, steps)
-    _, shuf_last = _run(step_fn_shuffled, steps)
-    # 符号稳健的差距口径（2026-09-27 第四轮）：
-    #   real_last > 0 时与旧式 real_last * (1 + min_gap_ratio) **逐位相同**；
-    #   real_last < 0 时旧式会乘出更负的值（更"好"）⇒ 只要打乱臂稍好一点就 PASS，
-    #   判据方向反了（真实数据实测的真实臂 −326.33 / 打乱臂 −327.25 就是这种假绿）。
-    #   改成 real_last + min_gap_ratio * |real_last|：负 loss 时要求打乱臂**更大**
-    #   （= 更差）才通过。这是**收紧**，不是放宽。
-    need = real_last + min_gap_ratio * abs(real_last)
-    passed = shuf_last >= need
-    return GateResult(
-        "G2 打乱标签对照",
-        passed,
-        f"真实 loss {real_last:.6f} vs 打乱 {shuf_last:.6f}，需打乱 >= {need:.6f}",
     )
 
 
@@ -186,7 +156,7 @@ def frame_rate_gate(
 
 def summarize(results: list[GateResult]) -> str:
     """把门禁结果渲染成可直接贴进训练日志的多行文本。"""
-    lines = ["健全性门禁（G1-G4）："]
+    lines = ["健全性门禁（G1/G3/G4）："]
     lines += [f"  [{'PASS' if r.passed else 'FAIL'}] {r.name}: {r.detail}" for r in results]
     n_fail = sum(1 for r in results if not r.passed)
     lines.append(

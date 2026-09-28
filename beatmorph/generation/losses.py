@@ -86,8 +86,13 @@ def cumulative_lambda_batched(lam: Tensor, grid: FieldGrid) -> Tensor:
     return cumulative_from_lam(folded, grid).reshape(batch_size, n_lines, t_bins)
 
 
-#: 归约方式（"none" 返回逐 (B, K) 张量）
-Reduction = Literal["sum", "mean", "none"]
+#: 归约方式（"none" 返回逐 (B, K) 张量；"per_event" 见下，RFC-0037 R2）
+#:
+#: - "per_event"：**整式**除以 `D = max(批内有效线上的事件总数, 1)`。整式缩放不改变驻点
+#:   （∇L' = ∇L/D）⇒ 泊松语义（λ* = 真强度）逐位保留；改变的只是**步间尺度与相对权重**。
+#:   ⚠️ **只除事件项是静默失效**：那会把最优强度整体缩小 D 倍（RFC-0037 §2.2 的推导），
+#:   而积分项读数看起来仍正常——禁止。
+Reduction = Literal["sum", "mean", "none", "per_event"]
 
 #: 重标定口径（见模块 docstring；默认 hidden 是数学自洽的那一种）
 #:
@@ -128,6 +133,21 @@ def range_masked_lambda(out: FieldOutput, batch: FieldBatch) -> Tensor:
 def line_active(batch: FieldBatch) -> Tensor:
     """(B, K) bool：有效线（padding 线不参与任何求和）。"""
     return batch.line_mask_bool()
+
+
+def event_normalizer(batch: FieldBatch) -> float:
+    """`"per_event"` 归约的除子 `D = max(E_total, 1)`（RFC-0037 §2.1）。
+
+    E_total = 批内**有效线**上的事件总数（counts 按 line_mask 置零后求和）。
+    空批（E_total == 0）时 D = 1 ⇒ 损失退化为积分项本身（与旧行为一致）。
+    """
+    if batch.counts is None:
+        return 1.0
+    counts = batch.counts.to(dtype=torch.float32)
+    mask = batch.line_mask_bool().to(dtype=torch.float32)
+    while mask.dim() < counts.dim():
+        mask = mask.unsqueeze(-1)
+    return max(float((counts * mask).sum()), 1.0)
 
 
 def integral_term(out: FieldOutput, batch: FieldBatch) -> Tensor:
@@ -183,6 +203,8 @@ def full_poisson_loss(
         line_active(batch),
     )
     total = per_line + integral_term(out, batch)
+    if reduction == "per_event":
+        return total.sum() / event_normalizer(batch)
     return _reduced(total, reduction, active=line_active(batch))
 
 
@@ -236,6 +258,8 @@ def masked_poisson_loss(
         line_active(batch),
     )
     total = per_line * scale + integral_term(out, batch)
+    if reduction == "per_event":
+        return total.sum() / event_normalizer(batch)
     return _reduced(total, reduction, active=line_active(batch))
 
 
@@ -431,6 +455,7 @@ __all__ = [
     "ReweightMode",
     "apply_line_mask_batched",
     "cumulative_lambda_batched",
+    "event_normalizer",
     "event_term",
     "full_poisson_loss",
     "gaussian_heatmap_target",

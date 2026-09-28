@@ -1,23 +1,25 @@
-"""M3：生成主干的 G1-G4 门禁（**标 slow，不进默认 CI，但必须实际跑过一次**）。
+"""M3：生成主干的门禁（G1/G3/G4；**标 slow，不进默认 CI，但必须实际跑过一次**）。
 
 判据全部取 `beatmorph/infra/sanity.py` 的默认值（plan 04 §6.1："统一调用，判据取该模块默认值"）；
 训练预算（步数 / 初始强度）由本文件显式给出并**在下方逐条说明理由**，因为泊松 NLL 的
 下界**不是 0**（完美拟合时 loss ≈ 事件数 N），"末步 <= 0.1 x 首步" 只有在首步远离最优时
 才是一个有意义的判据。
 
-## 合成任务必须是**可学**的（否则 G2 会以另一种方式失效）
+（RFC-0037，2026-09-28：G2 打乱标签对照已删除——单批训练损失「速度赛」在真实批上
+判别力未被证明；「输入对目标有没有信息」改由 val 的 held-out 置换对照
+`val/nll_shuffled_delta` + `val/ratio` + 条件干预承担。本文件的 G2 预算常量随之
+更名为 G3 所用，合成任务的「可学性」要求不变——G3 依然要求臂真的收敛。）
 
-G2 抓的是「输入对目标零信息」。若合成任务本身超出当前架构能学到的范围，
-真实臂与打乱臂会**同时停在边际解**上、loss 逐位相同，门禁于是变成空转。
+## 合成任务必须是**可学**的
+
+若合成任务本身超出当前架构能学到的范围，臂会停在边际解上，G1/G3 都变成空转。
 本文件因此在任务设计上做了三轮实测筛选（结论见 plan 04 §9-17 / §9-18）：
 
-- **G1** 用真实训练路径（`token_block + dilute` 遮盖，见 `TestTask.masked_batch`）：
+- **G1** 用真实训练路径（`token_block + dilute` 遮盖，见 `SyntheticTask.batch`）：
   在 4 个样本上必须能被打穿。
-- **G2** 用「把可见场复制到输出」的最小条件任务：真实臂能从输入读出每个 token 的
-  事件格（实测 200 步达到理论最优），打乱臂把目标按格置换后**无法从输入读出**
-  （只能背 16 个样本的映射）。训练预算取 100 步——实测步数加大后打乱臂开始**背样本**，
-  两臂差距会缩到 1.05 门限以下（这是微型合成任务的固有性质，不是判据放宽）。
-- **G3** 常数基线取 plan 03 的闭式 `N * (1 + log(|Omega| / N))`。
+- **G3** 用「每个 token 恰好一个事件、落在随机 x 桶」的最小条件任务：真实臂能从输入
+  读出每个 token 的事件格（实测 100 步达到理论最优），常数基线取 plan 03 的闭式
+  `N * (1 + log(|Omega| / N))`。
 - **G4** 同时校验音频帧轴（MERT config 派生）与 tau 轴（BPM 与基本格派生）。
 
 ⚠️ 门禁的**第二个价值**已在本次落地中兑现：它当场抓出了遮盖通道的信息泄漏
@@ -51,7 +53,6 @@ from beatmorph.infra.sanity import (
     constant_baseline_gate,
     frame_rate_gate,
     overfit_single_batch,
-    shuffled_target_control,
     summarize,
 )
 from tests.unit.generation._builders import (
@@ -70,14 +71,14 @@ X_BINS = 8
 K_LINES = 2
 #: G1 的样本数（plan 04 §6.2 M3：1-4 样本）
 G1_SAMPLES = 4
-#: G2 的样本数（越大越难「背样本」）
-G2_SAMPLES = 16
+#: G3 的样本数（沿用原 G2/G3 共享的 16：样本太少时模型可在预算内背下小批）
+G3_SAMPLES = 16
 #: G1 的优化预算（步数与首步强度都显式声明，理由见模块 docstring）
 G1_STEPS = 300
 G1_INITIAL_SCALE = 40.0
-#: G2 的优化预算：100 步内真实臂已到理论最优，而打乱臂来不及背样本
-G2_STEPS = 100
-G2_INITIAL_SCALE = 10.0
+#: G3 的优化预算：100 步内真实臂已到理论最优
+G3_STEPS = 100
+G3_INITIAL_SCALE = 10.0
 LEARNING_RATE = 0.1
 
 MODEL_CONFIG = ModelConfig(
@@ -112,7 +113,7 @@ class SyntheticTask:
         )
         return audio, tracks, frames
 
-    def counts(self, grid, *, shuffle: bool) -> torch.Tensor:
+    def counts(self, grid) -> torch.Tensor:
         """每个 token 恰好一个事件，落在**随机**的 x 桶上（只能从可见场读出来）。"""
         shape = (self.samples, K_LINES, grid.t_bins, X_BINS, grid.sides, grid.channels)
         generator = torch.Generator().manual_seed(self.seed)
@@ -122,20 +123,12 @@ class SyntheticTask:
                 for tau in range(grid.t_bins):
                     x_index = int(torch.randint(0, X_BINS, (1,), generator=generator).item())
                     counts[batch, line, tau, x_index, 0, CHANNEL_INDEX[NoteType.TAP]] = 1
-        if not shuffle:
-            return counts
-        # 打乱对照：把目标按格整体置换（输入与目标的关系被破坏，且无法从输入恢复）
-        generator = torch.Generator().manual_seed(self.seed + 999)
-        flat = counts.reshape(self.samples, -1)
-        for batch in range(self.samples):
-            order = torch.randperm(int(flat.shape[1]), generator=generator)
-            flat[batch] = flat[batch][order]
-        return flat.reshape(shape)
+        return counts
 
-    def batch(self, grid, *, shuffle: bool = False, masked: bool = False) -> FieldBatch:
+    def batch(self, grid, *, masked: bool = False) -> FieldBatch:
         """组装 batch；`masked=True` 时走真实的遮盖训练路径（G1 用）。"""
         audio, tracks, frames = self._shared_inputs(grid)
-        counts = self.counts(grid, shuffle=shuffle)
+        counts = self.counts(grid)
         line_mask = make_line_mask(batch=self.samples, k=K_LINES)
         occlusion = None
         if masked:
@@ -158,7 +151,7 @@ class SyntheticTask:
 
 
 def _fresh_model(grid, *, seed: int, scale: float) -> MaskedFieldModel:
-    """固定初始化 + 抬高初始强度（G2 的两臂必须**逐位同起点**）。"""
+    """固定初始化 + 抬高初始强度（同一 seed 下逐位同起点）。"""
     torch.manual_seed(seed)
     model = MaskedFieldModel(MODEL_CONFIG, grid)
     with torch.no_grad():
@@ -181,7 +174,7 @@ def _runner(model: MaskedFieldModel, batch: FieldBatch) -> Callable[[], float]:
 
 
 def test_g1_g4_gates_all_pass(capsys: pytest.CaptureFixture[str]) -> None:
-    """M3：四道门禁全绿；`summarize()` 的输出可直接进训练日志。"""
+    """M3：三道门禁全绿（RFC-0037 起没有 G2）；`summarize()` 的输出可直接进训练日志。"""
     grid = make_grid(t_bins=T_BINS, x_bins=X_BINS)
     results: list[GateResult] = []
 
@@ -195,26 +188,18 @@ def test_g1_g4_gates_all_pass(capsys: pytest.CaptureFixture[str]) -> None:
         ),
     )
 
-    # G2 打乱标签对照（同起点、同预算）
-    g2_task = SyntheticTask(samples=G2_SAMPLES, seed=11)
-    real_batch = g2_task.batch(grid)
-    shuffled_batch = g2_task.batch(grid, shuffle=True)
-    results.append(
-        shuffled_target_control(
-            _runner(_fresh_model(grid, seed=2, scale=G2_INITIAL_SCALE), real_batch),
-            _runner(_fresh_model(grid, seed=2, scale=G2_INITIAL_SCALE), shuffled_batch),
-            steps=G2_STEPS,
-        ),
-    )
-
     # G3 常数基线（闭式 N * (1 + log(|Omega| / N))）
-    trained = _fresh_model(grid, seed=3, scale=G2_INITIAL_SCALE)
+    g3_task = SyntheticTask(samples=G3_SAMPLES, seed=11)
+    real_batch = g3_task.batch(grid)
+    trained = _fresh_model(grid, seed=3, scale=G3_INITIAL_SCALE)
     step = _runner(trained, real_batch)
     model_loss = step()
-    for _ in range(G2_STEPS - 1):
+    for _ in range(G3_STEPS - 1):
         model_loss = step()
     n_events = float(real_batch.counts.sum().item())
-    baseline = constant_baseline_nll(n_events, omega(grid, n_lines=K_LINES))
+    # 模型臂经 forward 的 per_event 归一化 ⇒ 基线**同除一个除子**（RFC-0037 §2.3，
+    # 生产路径由 `constant_baseline_for` 做同一件事）。
+    baseline = constant_baseline_nll(n_events, omega(grid, n_lines=K_LINES)) / max(n_events, 1.0)
     results.append(constant_baseline_gate(model_loss, baseline))
 
     # G4 合约：音频帧轴（MERT config 派生）与 tau 轴（BPM 与基本格派生）
@@ -235,11 +220,11 @@ def test_g1_g4_gates_all_pass(capsys: pytest.CaptureFixture[str]) -> None:
 def test_mask_leak_is_low_on_the_contract_path() -> None:
     """遮盖通道不得替模型回答问题：`mask_leak_tokens` 必须远低于字面口径的 1.0。
 
-    这条断言是 G2 之所以有意义的前提（见 `OcclusionStats` 与 plan 04 §9-18）：
-    若 `mask == 1` 几乎等价于「此处有事件」，真实臂与打乱臂会给出**逐位相同**的 loss。
+    若 `mask == 1` 几乎等价于「此处有事件」，遮盖补全任务退化成照抄 mask，
+    模型完全不需要看音频与事件轨（见 `OcclusionStats` 与 plan 04 §9-18）。
     """
     grid = make_grid(t_bins=T_BINS, x_bins=X_BINS)
-    counts = SyntheticTask(samples=G2_SAMPLES, seed=11).counts(grid, shuffle=False)
+    counts = SyntheticTask(samples=G3_SAMPLES, seed=11).counts(grid)
     _, contract = build_occlusion_batch(counts, ratio=0.5, seed=7)
     _, literal = build_occlusion_batch(counts, ratio=0.5, seed=7, token_block=False, dilute=False)
     assert literal.mask_leak == pytest.approx(1.0)
@@ -248,25 +233,10 @@ def test_mask_leak_is_low_on_the_contract_path() -> None:
     assert literal.ratio == pytest.approx(0.5, abs=0.05)
 
 
-def test_shuffled_target_really_destroys_the_pairing() -> None:
-    """G2 的数据侧前提：打乱后事件总数不变、但输入对目标不再有信息。"""
-    grid = make_grid(t_bins=T_BINS, x_bins=X_BINS)
-    task = SyntheticTask(samples=G2_SAMPLES, seed=11)
-    real = task.counts(grid, shuffle=False)
-    shuffled = task.counts(grid, shuffle=True)
-    assert int(real.sum()) == int(shuffled.sum())
-    assert not torch.equal(real, shuffled)
-    # 事件**落点**的重合率：两者都稀疏，直接比 (real == shuffled) 会被空格淹没，
-    # 因此只在「双方都有事件」的格子上统计重合。
-    n_events = int(real.sum().item())
-    overlap = int(((real > 0) & (shuffled > 0)).sum().item())
-    assert overlap / n_events < 0.2
-
-
 def test_poisson_floor_is_below_the_g3_baseline() -> None:
     """G3 立论的数值前提：完美拟合的下界必须显著低于常数基线。"""
     grid = make_grid(t_bins=T_BINS, x_bins=X_BINS)
-    counts = SyntheticTask(samples=G2_SAMPLES, seed=11).counts(grid, shuffle=False)
+    counts = SyntheticTask(samples=G3_SAMPLES, seed=11).counts(grid)
     n_events = float(counts.sum().item())
     cell_volume = float(grid.cell_volumes()[0])
     floor = n_events * (1.0 + math.log(cell_volume))

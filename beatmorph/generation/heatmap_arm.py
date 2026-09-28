@@ -427,8 +427,8 @@ def focal_step_fn(
     """构造可直接交给 `beatmorph.infra.sanity` 的 `StepFn`（B1 臂的一步优化）。
 
     返回的闭包每次调用做一次「前向 -> 反传 -> 一步优化」，返回该步的**标量 loss**
-    （`float(loss.detach())`），因此 `overfit_single_batch` / `shuffled_target_control`
-    可以直接吃它（判据、阈值、日志全部留在 infra，本模块只提供这一步）。
+    （`float(loss.detach())`），因此 `overfit_single_batch` 可以直接吃它（判据、阈值、
+    日志全部留在 infra，本模块只提供这一步）。
 
     Args:
         model: B1 臂。

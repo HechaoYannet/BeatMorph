@@ -10,7 +10,7 @@
 
 BeatMorph 从原始音频（WAV/MP3）+ 难度（+ 可选判定线事件轨）出发，端到端生成高质量、可玩的 **Phigros 谱面（RPEJSON）**。模型从社区海量自制谱自主学习创作规律，无需人工标注（标注成本 ≈ 0）。
 
-> 📌 **状态**：Pre-Alpha。范式（[RFC-0029](docs/decisions/RFC-0029-phigros-continuous-chart-generation.md)）、奠基文档（v3.0）、事实库已就绪；**核心契约 / 数据流水线 / 强度场 / 生成主干 / 解码与导出 / 训练基础设施六层已落地并通过默认 CI**（**1017 项测试**），**真实 Phira 全库已拉到本地（8551 张 RPE 谱面 + 42.8 GB 音频，不入库）**，特征提取 **8551/8551**、训练窗口 **train 634 952 + val 74 889**，**全库窗口预切缓存已建成并终验通过**（train 353.6 GB / val 41.7 GB，逐位一致 500/500 抽查）；**显存墙已解除（[RFC-0032](docs/decisions/RFC-0032-local-layer-own-line-tracks.md)）**；⛔ **全量大规模训练待 [RFC-0036](docs/decisions/RFC-0036-gate-batch-caliber-and-g2-power.md) 裁定**（真实门禁 G2 查出精度 / 控制沾染 / 判据符号三个独立缺陷），消融臂与评估接线待建**。
+> 📌 **状态**：Pre-Alpha。范式（[RFC-0029](docs/decisions/RFC-0029-phigros-continuous-chart-generation.md)）、奠基文档（v3.0）、事实库已就绪；**核心契约 / 数据流水线 / 强度场 / 生成主干 / 解码与导出 / 训练基础设施六层已落地并通过默认 CI**（**1089 项测试**），**真实 Phira 全库已拉到本地（8551 张 RPE 谱面 + 42.8 GB 音频，不入库）**，特征提取 **8551/8551**、训练窗口 **train 634 952 + val 74 889**，**全库窗口预切缓存已建成并终验通过**（train 353.6 GB / val 41.7 GB，逐位一致 500/500 抽查）；**显存墙已解除（[RFC-0032](docs/decisions/RFC-0032-local-layer-own-line-tracks.md)）；[RFC-0037](docs/decisions/RFC-0037-remove-g2-and-per-event-loss.md) 已裁定并落地**（门禁 G2 删除 → **G1/G3/G4** 三道 + val held-out 对照判读红线；训练损失**按事件归一**）；**全量大规模训练待启动**，消融臂与评估接线待建**。
 
 ---
 
@@ -18,11 +18,21 @@ BeatMorph 从原始音频（WAV/MP3）+ 难度（+ 可选判定线事件轨）�
 
 > 本节读者是**下一个 session 的 agent**，不是历史记录。
 > **每次交接必须整节重写，不得追加**（规则见 [AGENTS.md](AGENTS.md) §6）。
-> 上次交接：**2026-09-28（第十三轮）** ｜ 交接人：主会话（**数据处理收官**：全库窗口预切缓存建成并终验通过；全量训练仍被 G2 门禁回归挡住，RFC-0036 待裁定）
+> 上次交接：**2026-09-28（第十三轮收尾）** ｜ 交接人：主会话（**RFC-0037 已裁定并落地**：门禁 G2 删除 + 训练损失按事件归一；全库窗口预切缓存建成并终验；**全量训练即将启动**）
 
 ### 当前状态
 
-自检（默认 CI，无网络 / 无权重 / 无 GPU）：`uv run ruff check . && uv run mypy beatmorph && uv run pytest -m "not slow and not gpu and not e2e"` → **1086 passed**（17 deselected）。
+自检（默认 CI，无网络 / 无权重 / 无 GPU）：`uv run ruff check . && uv run mypy beatmorph && uv run pytest -m "not slow and not gpu and not e2e"` → **1089 passed**（16 deselected）。
+
+**✅ 门禁体系已按 RFC-0037 改造完毕（修宪级，2026-09-28 决策者裁定）**
+
+- **G2（打乱标签对照）整体删除**：「单批 100 步速度赛」在真实批上判别力未被证明（逐批 verdict 翻转、置换 nuisance、跨进程漂移；证据 RFC-0036 §1-§2 + plan 07 §9-54/§9-55）。门禁现为 **G1/G3/G4 三道**。BasePlan §9、CLAUDE 红线 7、AGENTS §4 已同步修宪。
+- **「输入对目标零信息」的命题改由 val 在线对照承担**：`val/nll_shuffled_delta`（**线内置换**、线数归一、128 held-out 窗）+ `val/ratio` + `cond_*_delta`。**判读红线**：任一 val 点 `val/ratio >= 1` 或 `val/nll_shuffled_delta <= 0` ⇒ 该 run 的扩规模结论**作废**。
+- **训练损失改为 per-event 归一**：`L = [Σ_有效线((1/r)Σ_被遮盖 −n·log λ + ∫λdV)] / max(E_total, 1)`，**整式相除**（只除事件项会把最优强度缩小 D 倍——已写进 docstring 与单测）。argmin 逐位不变；改变的只是步间量级。实测旧口径 `loss ≈ 2.24·K^0.055·E^0.93`（R²=0.74）⇒ 锯齿是测度结构，新口径下才可读。
+- **附带指标**：`loss_sum_raw`（旧 sum 口径，跨本次变更对照用）、`loss_nonempty_per_event`（主趋势）、`clip_active`（裁剪触发 0/1；旧 run 实测 56.4% 的步触发、裁剪前中位范数 316）。
+- **门禁臂固定 fp32**（原 P0）；**val 置换改线内**（原 P1，吸收 RFC-0036 结论）。
+- ⚠️ **跨本次变更不可比**：loss 数值、旧 `gates.txt` 的 G2 行、旧 checkpoint 一律不得混用；**不跨此变更 `--resume`**（GatesConfig 字段变化会让续训指纹 fail-closed，属预期）。
+- 护栏：`tests/unit/generation/test_loss_per_event.py`（含**梯度恰差 1/D** 的 argmin 不变量）、`tests/unit/infra/test_shuffle_within_line.py`（五契约）、`tests/unit/infra/test_gate_assembly.py`（装配 + fp32）。
 
 **✅ 数据侧全部就绪**（真实语料 `data/processed/`，不入库）
 
@@ -33,37 +43,36 @@ BeatMorph 从原始音频（WAV/MP3）+ 难度（+ 可选判定线事件轨）�
 | **窗口预切缓存（本轮建成 + 终验通过）** | train **634 952 窗 / 353.6 GB**（`train/aa677031c17e3a3d`，11.4 h）+ val **74 889 窗 / 41.7 GB**（`val/fac0448693925c86`，1.2 h）；指纹与事前计算一致、`.partial` 残留 0；**逐位一致 400/400 + 100/100**；读取 **95.2 / 76.2 窗/s**（原路径 81× / 65×）⇒ plan 07 §9-54⑮ |
 | 重建参数（如需重建照抄） | `beatmorph-build-windows --config-name phigros_masked --jobs 12 --shard-windows 512 --chart-cache-size 2 --feature-cache-size 1`（+`--split val` 再跑一次；**12 进程是拐点**，20 进程更慢且吃内存） |
 
-**⛔ 全量训练的唯一阻塞：G2 门禁回归，RFC-0036 待裁定**（plan 07 §9-54①–⑬，权威记录 `runs/phigros_masked/20260927-180550/gates.txt`）
+**🚀 下一步就是跑全量训练**（门禁已可跑：三道门 + 修宪后的判读红线；数据侧与损失口径都已就绪）
 
-`beatmorph-train --config-name phigros_masked --gates --device cuda` ⇒ G1/G3/G4 绿、**G2 FAIL**（真实 182.856 vs 打乱 −31.199，需 `>= 192.0`），退出码 5。**与模型 / 损失 / 数据无关**（`model.py`/`losses.py`/`masks.py`/`sanity.py` 自 `b96b12f` 未动；唯一改到门禁输入的是 `cc0e166` 的取批计划层，门禁批退化成「一张谱的开场」）。已定位**两个独立缺陷**（fp32 下全部可复现；原报的第三个 P2 经复核**撤回**，见下）：
-
-- **P0 精度**：bf16 下对照臂重复运行噪声 **2.8×** ≫ 判据余量 5% ⇒ **当前所有 G1-G4 读数（含 PASS）不可解释**；fp32 同进程逐位一致（跨进程仍翻转）。修复＝门禁对照臂跑 fp32（不改判据）。
-- **P1 控制沾染**：`shuffle_hidden_counts` 在全部被遮盖格子上置换 ⇒ 连**每线事件预算**（nuisance）一起改。改**线内置换**后门禁批 real 166.74 / lp 257.61 → PASS；但 6 批 **5 PASS / 1 FAIL**，**非万能** ⇒ 多批口径（RFC-0036 §3.B）是必需。
-- ~~**P2 判据符号**~~ **已复核撤回**：生产判据 `sanity.py` 自第四轮（`013f347`）起就是符号安全式 `real + 0.05·|real|`；「符号敏感」只存在于本轮 `local_g2_*` 探针脚本的简式 `real*1.05`。已记录的负 real 批按生产公式复核 **verdict 全部不变** ⇒ 无需裁定、无需改码（RFC-0036 §2.6 更正）。⚠️ 教训：**探针不得重新实现判据**。
-- **投影**（非门禁记录）：P0+P1 修复后四道门实跑**全绿**（G1 27841→5.60、G2 91.21 vs 137.23、G3 −165.69 vs 1559.08、G4 98.9/99）——但 P1 覆盖面 5/6 + 跨进程漂移 ⇒ 单批判据不成立。⚠️ 此前所有 G2 记录均不可复现。改判据 / 抽取口径属方法论变更，**agent 不得自行决定**（AGENTS.md §1、红线 7）。
+`uv run beatmorph-train --config-name phigros_masked --gates --device cuda --skip-env-doctor`
+—— 门禁（G1/G3/G4，fp32 臂）预期 **10-15 min**，随后 20 000 步训练（单步 ≈0.195 s ⇒ ≈65 min + val）。
+要看的三件事：① `clip_active` 率是否从旧的 **56.4%** 明显下降；② `val/ratio` 是否持续 < 1 且下行；
+③ `val/nll_shuffled_delta` 是否 > 0（≤ 0 ⇒ 该 run 作废，RFC-0037 判读红线）。
 
 ### 下一步（按性价比排序，只留仍然有效的）
 
-1. **裁定 [RFC-0036](docs/decisions/RFC-0036-gate-batch-caliber-and-g2-power.md)**——决策者已质疑 G2 有效性本身，§2.8 复核**质疑成立**（单批 100 步「速度赛」比的是未归一化 sum 损失，量级 ∝ E^0.93，真实批判别力未被证明）；选项扩为 A–E，提议者改推荐 **D2（held-out 置换对照）** 或 **E（退役门禁 G2，改用已落地的 `val/nll_shuffled_delta` + `val/ratio` + G3/G4；E 触及红线 7 文字，修宪级）**。P0（fp32）各选项都保留；P1（线内置换）叠加进 D 或移入 val 路径 → 实现 → 门禁/对照全绿。**这是现在唯一挡住全量训练的东西。**
-2. **跑全量大规模训练**：配置已就绪（`max_samples: null`、`data.window_cache_dir: data/processed/window_cache` 已写入 `configs/phigros_masked.yaml` 并过 CI）⇒ `beatmorph-train --config-name phigros_masked --gates --device cuda`（20 000 步，单步 ≈0.195 s ⇒ ≈65 min + 门禁；缓存把数据侧等待压到 ≈10 ms/窗）。
-3. **val 的真实墙钟仍未实跑验证**（33 s 是推导值），需一次 GPU 前向。
+1. **跑全量大规模训练**（配置已就绪：`max_samples: null`、`data.window_cache_dir: data/processed/window_cache`、`data.workers: 8`）——命令与三个观察点见上。
+2. **首 run 的必读三件事**：`clip_active` 率（旧 56.4%）、`val/ratio` 趋势、`val/nll_shuffled_delta > 0`。若红线破 ⇒ 停并开新 RFC，**不得**继续扩规模。
+3. **val 的真实墙钟仍未实跑验证**（33 s 是推导值），首 run 的 `val_time_s` 即为实测。
 4. **评估入口未接线**（形态已定＝独立 `beatmorph-eval`），待训练产出 checkpoint。
 
 ### 未决项（不阻塞 1–4）
 
 | 未决 | 出处 |
 |------|------|
-| **门禁批抽取口径 + G2 统计效力**（最高优先，随 RFC-0036 裁定） | plan 07 §9-54 / RFC-0036 |
-| **val 开销要不要再压**（现状 16.7%，`val_every=4000` ⇒ 4.1%） | plan 07 §9-53 |
-| **`val_windows=128` 的构成未收敛**（空窗占比 51.6%→59.0%），指标差需 GPU 才能测 | plan 07 §9-51 ⑤ |
+| **`grad_clip_norm=1.0` 在 per-event 损失下是否仍合适**（旧 run 56.4% 的步触发、裁剪前中位 316 ⇒ 归一化梯度形态）——先看 `clip_active` 率再议 | RFC-0037 §6-1 / plan 07 §9-55 |
+| **`val/nll_shuffled_delta` 的 margin 未标定**（现阶段只有符号判据 > 0） | RFC-0037 §6-2 |
+| **G1 绝对下限 0.05 的 per-event 语义未标定**（相对判据主导，暂不阻塞） | RFC-0037 §6-3 |
+| **val 开销要不要再压**（现状 ≈16.7%，`val_every=4000` ⇒ 4.1%） | plan 07 §9-53 |
+| **`val_windows=128` 的构成未收敛**（空窗占比 51.6%→59.0%） | plan 07 §9-51 ⑤ |
 | **RFC-0035 §1 的 91.3%/9.9% 未更正**（实测 46%/54%）⇒ M0/M1/M2 优先级需重排 | RFC-0035 / plan 07 §9-52 |
 | **`r == 0` 遮盖退化要不要改遮盖策略**（≈1.0% 的全部步） | plan 07 §9-43 |
 | **训练预算是否从「步数」改成「epoch 数」** | RFC-0033 |
-| **`grad_clip_norm=1.0` ⇒ 每一步都被裁剪**，`raw_grad_norm` 未落盘 | plan 07 §9-46 |
 | **评估 / 可玩性**：NLL 好 ≠ 谱面可玩 | plan 07 §9-47 H |
 | **装饰线是否 / 如何从 λ 线轴去掉** —— 已定「用旁路、后续扩展」 | RFC-0032 |
 
-**一次性探针（⚠️ `scripts/local_*` 与 `runs/_*` 均不入库，清理即丢）**：缓存验收 `local_cache_validate.py`（**终验工具**，`--split/--reuse/--sample/--rows`）、`local_window_cache_check.py`、`local_build_profile.py`、`local_inorder_ab.py`、`local_worker_sweep.py`；**G2 诊断套件** `local_g2_*.py`（batchtest / position / inspect / components / full_control / precision_repro / input_control(_fp32) / fp32_sweep / line_preserving / lp_sweep / lp_only / lp_correctness）、`local_gate_projection_p0p1.py`、`local_bucket_survey.py`、`local_plan_runs.py`、`local_plan_positions.py`、`local_cache_fingerprint_check.py`。⚠️ `scripts/local_chart_mem.py` **坏了**（`deep_bytes` 漏 pydantic `__slots__`，读数偏低 1.85×），用前先修。⚠️ 长跑重定向探针的输出**只用 ASCII `=>`**（`⇒` 在 GBK 重定向下 `UnicodeEncodeError` 崩掉打印、吞掉结果——本轮实测）。
+**一次性探针（⚠️ `scripts/local_*` 与 `runs/_*` 均不入库，清理即丢）**：缓存终验 `local_cache_validate.py`（`--split/--reuse/--sample/--rows`）、损失波动归因 `local_loss_stability.py`（对 `logs/loss_history.jsonl` 做量级标度律 + 尖峰检测）、`local_build_profile.py`、`local_inorder_ab.py`、`local_worker_sweep.py`、`local_bucket_survey.py`、`local_plan_runs.py`、`local_cache_fingerprint_check.py`；**G2 诊断套件 `local_g2_*.py` 已随 RFC-0037 退役**（保留在磁盘仅供追溯，勿再引用其 verdict：其判据是探针简式 `real*1.05`，不是生产判据）。⚠️ `scripts/local_chart_mem.py` **坏了**（`deep_bytes` 漏 pydantic `__slots__`，读数偏低 1.85×）。⚠️ 长跑重定向探针的输出**只用 ASCII `=>`**（`⇒` 在 GBK 重定向下 `UnicodeEncodeError` 崩掉打印、吞掉结果）。
 
 
 ## 为什么是 Phigros

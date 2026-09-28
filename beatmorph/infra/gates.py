@@ -1,6 +1,6 @@
-"""门禁执行器：G1-G4 的组装、落盘与 fail-closed 语义（plan 07 §4.3 / M7.2）。
+"""门禁执行器：G1/G3/G4 的组装、落盘与 fail-closed 语义（plan 07 §4.3 / M7.2；RFC-0037 起 G2 已删除）。
 
-`beatmorph/infra/sanity.py` 提供**范式中立的四道门禁**（只吃 `step_fn`）；
+`beatmorph/infra/sanity.py` 提供**范式中立的门禁判据**（只吃 `step_fn`；RFC-0037 起为三道）；
 本模块负责把它接进训练流程，并保证三件事：
 
 1. **生效阈值必须落盘**：默认值可覆盖但不可忽略（§3.1 / §9-2），因此 `gates.txt` 里既有
@@ -32,7 +32,6 @@ from beatmorph.infra.sanity import (
     constant_baseline_gate,
     frame_rate_gate,
     overfit_single_batch,
-    shuffled_target_control,
     summarize,
 )
 
@@ -63,15 +62,10 @@ class GateFailure(RuntimeError):  # noqa: N818 - 名字表达语义（门禁失�
 
 @dataclass(frozen=True)
 class GateInputs:
-    """四道门禁所需的全部输入（**数据来源无关**：真实数据与冒烟数据都走这里）。
+    """三道门禁所需的全部输入（**数据来源无关**：真实数据与冒烟数据都走这里）。
 
     Attributes:
         step_fn_real: **G1** 的真实臂 = 训练路径（遮盖补全）上跑一步优化。
-        step_fn_g2_real: **G2** 的真实臂：必须与 `step_fn_g2_shuffled` **同批、同损失、
-            同起点**（plan 07 §4.3「同模型同输入」）。它**不是** `step_fn_real`：
-            G1 走的是遮盖路径（重标定 `1/r` + 只监督被遮盖事件），与打乱臂的
-            全事件目标不在同一测度上，两者的绝对 loss 不可比。
-        step_fn_g2_shuffled: **G2** 的打乱臂（目标被置换，输入随之失去信息）。
         model_loss: 模型在训练/验证集上的 loss（G3）。
         baseline_loss: 常数基线 loss（`λ = N/|Ω|`，**不是** λ ≡ 0）。
         frames: 实际音频特征帧数（G4）。
@@ -80,8 +74,6 @@ class GateInputs:
     """
 
     step_fn_real: StepFn
-    step_fn_g2_real: StepFn
-    step_fn_g2_shuffled: StepFn
     model_loss: float
     baseline_loss: float
     frames: int
@@ -95,10 +87,9 @@ def thresholds_of(cfg: GatesConfig) -> dict[str, float | int]:
         "g1_steps": cfg.overfit_steps,
         "g1_target_loss": cfg.overfit_target_loss,
         "g1_target_ratio": cfg.overfit_target_ratio,
-        "g2_steps": cfg.shuffle_steps,
-        "g2_samples": cfg.shuffle_samples,
-        "g2_chunks": cfg.shuffle_chunks,
-        "g2_min_gap_ratio": cfg.shuffle_min_gap_ratio,
+        "g3_steps": cfg.baseline_steps,
+        "g3_samples": cfg.baseline_samples,
+        "g3_chunks": cfg.baseline_chunks,
         "g3_min_improvement": cfg.baseline_min_improvement,
         "g3_normalized": int(cfg.constant_baseline_normalized),
         "g4_tol_frames": cfg.frame_rate_tol_frames,
@@ -111,10 +102,10 @@ def run_gates(
     *,
     progress: Callable[[str], None] | None = None,
 ) -> list[GateResult]:
-    """按 `sanity.py` 的判据跑完 G1-G4（**只组装，不落盘、不抛错**）。
+    """按 `sanity.py` 的判据跑完 G1/G3/G4（**只组装，不落盘、不抛错**）。
 
     `progress` 是逐门禁进度回调（默认 None = 静默）。**为什么必须有它**：
-    正常 K 下门禁的预算是 **~38-45 min**（G2 = 200 步 x 16 段串行前向），而此前
+    正常 K 下门禁的预算是 **~10-15 min**（RFC-0037 起 G2 已删除；G3 = 100 步 x 16 段串行前向），而此前
     `execute_gates` 直到全部跑完才写第一行日志 ⇒ 外部**无法区分「慢」与「卡死」**，
     只能靠功耗 / util 猜。2026-09-27 实测踩坑：据此把一个**正常在跑**的门禁误判为卡死、
     掐掉两次（浪费约 40 min GPU）。逐门禁的耗时日志是那个误判的唯一解药。
@@ -127,15 +118,6 @@ def run_gates(
                 steps=cfg.overfit_steps,
                 target_loss=cfg.overfit_target_loss,
                 target_ratio=cfg.overfit_target_ratio,
-            ),
-        ),
-        (
-            "G2 打乱标签对照",
-            lambda: shuffled_target_control(
-                inputs.step_fn_g2_real,
-                inputs.step_fn_g2_shuffled,
-                steps=cfg.shuffle_steps,
-                min_gap_ratio=cfg.shuffle_min_gap_ratio,
             ),
         ),
         (
@@ -240,7 +222,7 @@ def format_skipped_gates(cfg: TrainConfig, *, reason: str = "未传 --gates") ->
     scale = "全量" if cfg.data.max_samples is None else str(cfg.data.max_samples)
     return "\n".join(
         [
-            "健全性门禁（G1-G4）：**未运行**",
+            "健全性门禁（G1/G3/G4）：**未运行**",
             f"  原因：{reason}",
             f"  数据规模：max_samples={scale}（冒烟上限 {cfg.gates.smoke_max_samples}）",
             "  触发条件提示：新增/修改训练目标或损失、或把数据规模扩到超过冒烟规模时，"
@@ -303,7 +285,7 @@ def enforce_gates(*, run_dir: Path, cfg: TrainConfig) -> None:
     if text is None:
         raise GateFailure(
             f"缺少 {path}：data.max_samples={cfg.data.max_samples} 超过冒烟规模 "
-            f"{cfg.gates.smoke_max_samples}，扩大数据规模前必须先跑通 G1-G4"
+            f"{cfg.gates.smoke_max_samples}，扩大数据规模前必须先跑通门禁（G1/G3/G4）"
             "（beatmorph-train --gates）",
         )
     passed = gates_all_passed(text)

@@ -534,10 +534,12 @@ class MaskedFieldModel(nn.Module):
             diagnostics=diagnostics,
         )
         if compute_loss and batch.counts is not None:
+            # RFC-0037 R2：训练/门禁两臂统一走 per_event 归一化（整式除以 max(E_total,1)，
+            # argmin 不变、步间量级可比）。旧的 sum 口径见 loss_sum_raw 标量（对照用）。
             loss = (
-                masked_poisson_loss(output, batch)
+                masked_poisson_loss(output, batch, reduction="per_event")
                 if batch.occlusion is not None
-                else full_poisson_loss(output, batch)
+                else full_poisson_loss(output, batch, reduction="per_event")
             )
             output = replace(output, loss=loss)
         return output

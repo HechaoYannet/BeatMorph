@@ -1,6 +1,6 @@
 # RFC-0036 — 真实门禁 G2 的判据效力与门禁批的抽取口径
 
-- 状态：**提案**（待决策者裁定）｜ 提出日期：2026-09-28
+- 状态：**废弃**（2026-09-28，被 [RFC-0037](RFC-0037-remove-g2-and-per-event-loss.md) 取代：决策者裁定直接删除 G2，本案 A/B/C/D 选项随之失去意义；P0/P1 由 RFC-0037 R4/R5 吸收，§1–§2 诊断记录保留为证据）｜ 提出日期：2026-09-28
 - 提出者：主会话（训练基础设施 / 健全性门禁）
 - 影响模块：`beatmorph/infra/train_loop.py`（`ManifestBatchSource._consume` / 门禁取批）、
   `beatmorph/infra/gates.py`（`build_gate_inputs`）、`configs/phigros_masked.yaml`（`gates.*`）、

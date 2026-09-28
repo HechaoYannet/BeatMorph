@@ -1,7 +1,7 @@
 > 状态：🔵 实施中（M7.1–M7.8 代码与默认 CI 测试已落地；逐条见 §6 的「实施状态」列，**Lightning 后端尚未在装齐 train extra 的环境实跑**）｜ 阶段：Phase 1（环境自检）/ Phase 2（训练栈与门禁）｜ 负责：基础设施组
 > 对应代码：`beatmorph/infra/`、`configs/`、`beatmorph/cli/train.py` ｜ 对应奠基章节：§5、§9
 
-# Plan 07 — 训练基础设施（Lightning / Hydra / G1-G4 门禁 / 环境自检）
+# Plan 07 — 训练基础设施（Lightning / Hydra / 门禁 G1/G3/G4（G2 已随 RFC-0037 删除）/ 环境自检）
 
 ## 1. 目标与范围
 
@@ -61,7 +61,7 @@ summarize(results: list[GateResult]) -> str      # 可直接贴进训练日志�
 
 ```
 beatmorph-train --config-name <stage> [overrides...]
-  --gates            # 强制先跑 G1-G4，结果落盘并在 FAIL 时以非 0 退出码中止
+  --gates            # 强制先跑门禁（G1/G3/G4），结果落盘并在 FAIL 时以非 0 退出码中止
   --gates-only       # 只跑门禁，不进入正式训练
 ```
 
@@ -117,20 +117,25 @@ FeatureCacheMeta:  # RFC-0029 §7-2 原文要求
 
 ```
 run_gates(*, step_fns: GateStepFns, out_path: Path, cfg) -> list[GateResult]
-  # 1) 组装四个 GateResult（G1-G4）
+  # 1) 组装三个 GateResult（G1/G3/G4；G2 已随 RFC-0037 删除）
   # 2) 写 out_path（summarize() 原文 + 生效阈值 + git rev + data rev）
   # 3) 写 TB 标量（gate/G1_pass 等）供曲线面板对照
   # 4) 任一 FAIL -> 抛出并中止（退出码非 0）
 ```
 
-四道门禁在**新范式**下的具体接法（判据不变，只换 `step_fn`）：
+三道门禁在**新范式**下的具体接法（判据不变，只换 `step_fn`；RFC-0037 起损失一律
+per-event 归一、门禁臂固定 fp32）：
 
 | 门禁 | 判据（BasePlan §9） | 在新范式下的接入 |
 | --- | --- | --- |
 | G1 单 batch 过拟合 | 1-4 个样本上 loss 打到接近 0 | `step_fn` = 对同一 batch 反复 backward/step；**必须能打穿**，打不穿说明通路坏（与数据量无关） |
-| G2 打乱标签对照 | shuffle 目标后 loss **必须显著变差** | 提供**同模型同输入**的两个 `step_fn`（真标签 / 打乱标签）；对本范式，打乱的对象是**强度场目标**而非音频 |
-| G3 常数基线 | 模型 loss 显著优于 `λ = N/abs(Ω)` | **基线不是 `λ ≡ 0`**（后者泊松 NLL = +∞，应写成契约断言）；`abs(Ω) = k * t_bins * x_bins * sides * channels`（Plan 00 §3.7），`k` 随谱变化 → 标度是 per-chart 的（§9-3） |
+| G3 常数基线 | 模型 loss 显著优于 `λ = N/abs(Ω)` | **基线不是 `λ ≡ 0`**（后者泊松 NLL = +∞，应写成契约断言）；`abs(Ω) = k * t_bins * x_bins * sides * channels`（Plan 00 §3.7），`k` 随谱变化 → 标度是 per-chart 的（§9-3）；基线与模型臂**同除** `max(E,1)`（RFC-0037 §2.3） |
 | G4 契约断言 | 帧率/形状由 config 派生并断言 | 直接 `frame_rate_gate(frames, duration_s, frame_rate)`，`frame_rate` **由 config 派生传入**；并含**「场网格 ↔ 秒」往返无损**（多 BPM 段，Plan 03 M12）——该断言进默认 CI、不依赖权重 |
+
+> **原 G2（打乱标签对照）已删除**（RFC-0037，2026-09-28 决策者裁定；证据 RFC-0036 §1-§2、
+> §9-54/§9-55）。「输入对目标零信息」改由 val 的 held-out 在线对照承担：
+> `val/nll_shuffled_delta`（**线内置换**）+ `val/ratio` + `cond_*_delta`；判读红线见
+> docs/TRAINING.md §7.1 与 RFC-0037 R1。
 
 **触发条件（写死，不靠记性）**：① 新增/修改任何训练目标或损失；② 任何一次把数据规模扩到超过冒烟规模。二者任一发生时，`gates.txt` 必须先存在且全绿。
 
@@ -1393,5 +1398,56 @@ vs 摊到 17 条线上各打几个——**后者更容易** ⇒ 打乱臂更优 
 跨进程漂移）；唯一正面证据是合成解耦夹具（45% 差距）。**健全替代已在仓库里**：val 路径的
 `val/nll_shuffled_delta`（固定模型、128 held-out 窗、遮盖内置换、同测度、线数归一）+
 `val/ratio` + 输入干预 contrasts。
+
+### §9-56 第十三轮③：RFC-0037 落地——删除 G2 + 训练损失 per-event 归一化（2026-09-28，已裁定即实施）
+
+决策者裁定（原话要点见 RFC-0037 §0）：**G2 的设计本身是错误，直接删除并贯彻到 BasePlan**；
+**训练损失必须按被监督事件归一**，并配一组可读的附带指标。实施记录：
+
+**① 损失归一化（R2/R3）**
+
+- `losses.py`：`Reduction` 增 `"per_event"`；`event_normalizer(batch)` = 有效线事件总数、下限 1；
+  `masked/full_poisson_loss` 支持；`model.forward(compute_loss=True)` 一律 per_event。
+  **整式相除**——只除事件项会把最优强度缩小 D 倍（RFC-0037 §2.2 推导，已写进 docstring）。
+- `make_step_fn` 分段前向加**除子修正** `D_part/D_full`（否则分段梯度按 1/D_part 加权 ≠ 整批）；
+  门禁分段等价性测试（`test_gate_chunking.py`）在该修正下继续通过。
+- G3 基线**同除一个 D**（`constant_baseline_for`），判据不等式逐位等价（§2.3）。
+- 新标量（jsonl + TB）：`loss_sum_raw`（旧 sum 口径对照）、`loss_nonempty_per_event`
+  （主趋势）、`clip_active`（裁剪触发 0/1）。`grad_norm` 本就是裁剪前值（§9-46 记录已更正）。
+- 护栏：`tests/unit/generation/test_loss_per_event.py`（5 项：尺度恒等式、**梯度恰差 1/D**
+  （argmin 不变的可执行形式）、空批 D=1、r==0 契约、normalizer 只数有效线）。
+
+**② G2 删除（R1）+ P0/P1（R4/R5）**
+
+- 删除面：`sanity.shuffled_target_control`；`gates.GateInputs.step_fn_g2_*` 与 G2 stage、
+  `thresholds_of` 的 `g2_*`（新增 `g3_steps/g3_samples/g3_chunks`）；`build_gate_inputs` 的
+  G2 双臂装配；`smoke.shuffled_counts` / `shuffle_hidden_counts` / `batch(shuffled=)`；
+  `BatchSource.batch(shuffled)` 协议参数与 `_shuffle_targets`；schema `GatesConfig.shuffle_*`
+  四字段（→ `baseline_steps/baseline_samples/baseline_chunks`，语义不变、归 G3 独用）。
+- **门禁臂固定 fp32**（原 P0）：`build_gate_inputs` 内 `gate_precision = "fp32"`，
+  G1/G3 的 `make_step_fn` 都用它；训练仍 `bf16-mixed`。stats 落 `gate_precision` 进 gates.txt。
+- **val 置换改线内**（原 P1）：新增 `smoke.shuffle_counts_within_line`（独立 Generator、
+  每 (样本,线) 的遮盖集合内置换），`evaluate_val` 改用它。护栏
+  `tests/unit/infra/test_shuffle_within_line.py`（RFC-0037 §2.4 五契约 + 无遮盖批报错）。
+- 测试改造：删 `test_g2_pairing.py`（G3 装配/lr/初值三案迁至 `test_gate_assembly.py`，新增
+  fp32 装配断言）；`test_sanity.py`、两个 `test_sanity_gates.py`（slow，实跑全绿：
+  G1 40.21→2.85、G3 1.578 vs 3.173、G4 双轴）、`test_gates.py`、`test_gate_progress.py`、
+  `test_gate_min_events.py`、`test_train_entry.py`（六件套断言 4→3 行且显式断言无 G2）。
+
+**③ 修宪与文档（R1 的文档面）**
+
+BasePlan §9 门禁表（四道→三道 + RFC-0037 修订注记）、§7 Phase2-7、风险表 R-4；
+CLAUDE.md 红线 7（含判读红线全文）、§2 拓扑、§5-8、§6 新条目；AGENTS.md §4；
+docs/TRAINING.md 约束二、§7.1（表 + 预算 ~10-15 min + 手工片段 + val 判读红线）、§7.2、
+§8.1/§8.2、§9；plan 04 §3.3/§4.3；decisions/README：RFC-0036 → **废弃**（证据保留）、
+RFC-0037 → **已裁定（采纳）**、下一编号 0038。
+
+**④ 边界与未做**
+
+- 损失语义变更 ⇒ **不与旧 checkpoint / 旧 gates.txt 可比**，不跨此变更 `--resume`
+  （GatesConfig 字段变化本身会令续训指纹 fail-closed，属预期）。
+- `grad_clip_norm=1.0` 是否随归一化调整：**未动**，先由 `clip_active` 率观察（RFC-0037 §6-1）。
+- 判读红线（`val/ratio >= 1` 或 `val/nll_shuffled_delta <= 0` ⇒ 扩规模结论作废）目前靠
+  人工/巡检盯 val 曲线，**未**做成自动中止（避免误杀首个 val 点前的暖机段）。
 
 [POSTMORTEM-2026-08-05]: ../POSTMORTEM-2026-08-05-frame-rate-misalignment.md

@@ -41,7 +41,7 @@
 
 - 对应 `tests/unit/<module>/` 有可过测试；**契约级测试不得依赖权重或 GPU**。
 - 更新所属 plan 的「里程碑」勾选与「状态」图例。
-- **新增任何训练目标/损失时，先跑通 G1-G4 门禁**（`beatmorph/infra/sanity.py`：单 batch 过拟合 / 打乱标签对照 / 常数基线 / 契约断言），结果写入训练日志。**门禁未绿不得扩大数据规模**。
+- **新增任何训练目标/损失时，先跑通门禁**（`beatmorph/infra/sanity.py`：G1 单 batch 过拟合 / G3 常数基线 / G4 契约断言；原 G2 打乱标签对照已随 [RFC-0037](docs/decisions/RFC-0037-remove-g2-and-per-event-loss.md) 删除，其命题由 val 的 held-out 置换对照 `val/nll_shuffled_delta` + `val/ratio` 承担），结果写入训练日志。**门禁未绿不得扩大数据规模**；任一 val 点 `val/ratio >= 1` 或 `val/nll_shuffled_delta <= 0` ⇒ 该 run 的扩规模结论作废。
 - 若引入偏离 BasePlan 的决策，开 RFC 至 `docs/decisions/`。
 - 运行 `make lint && make test-fast` 自检。
 - **物理常量一律写成派生式**（如 `RPE_STAGE_WIDTH / N`、`MERT_SAMPLE_RATE_HZ / MERT_CONV_STRIDE_PRODUCT`），**禁止硬编码具体数字**（CLAUDE.md 红线 7）。

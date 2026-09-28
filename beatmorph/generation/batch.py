@@ -229,7 +229,7 @@ class FieldBatch:
 
     # ── 分批前向（plan 07 §9-15 的内存墙）─────────────────────────
     def slice_samples(self, start: int, stop: int) -> FieldBatch:
-        """按**样本维**切一段子批次（门禁的 G2/G3 分批前向用）。
+        """按**样本维**切一段子批次（门禁 G3 的分批前向用）。
 
         只切 batch 维（dim 0）。`grid` / `frame_rate` / `range_mask` 是**逐批共享**的量，
         必须原样保留——它们若被切错，测度 `dV_j`、帧率契约或定义域会静默错位。
@@ -300,7 +300,7 @@ class FieldBatch:
         """把批次切成至多 `chunks` 段**非空**子批次（段数不超过 B）。
 
         段长尽量均分（余数分摊到前几段）；`chunks <= 1` 时返回单段 `[self]`。
-        段内样本数之和恒等于 B，且拼接顺序与原批次一致（G2 的置换在切分**之前**完成）。
+        段内样本数之和恒等于 B，且拼接顺序与原批次一致。
         """
         total = self.batch_size()
         count = max(1, min(int(chunks), total))

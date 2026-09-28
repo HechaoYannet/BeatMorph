@@ -3,7 +3,7 @@
 命令行契约：
 
     beatmorph-train --config-name <stage> [overrides...]
-      --gates            # 先跑 G1-G4，结果落盘；FAIL 则以非 0 退出码中止
+      --gates            # 先跑门禁（G1/G3/G4），结果落盘；FAIL 则以非 0 退出码中止
       --gates-only       # 只跑门禁，不进入正式训练
 
 启动顺序（每一步都可能失败，且**失败即停**）：
@@ -12,7 +12,7 @@
 2. 打印派生常量并断言派生式（红线 7）；重新校验 override 之后的配置；
 3. 环境自检 E1-E5（FAIL → 退出码 4；UNKNOWN 只告警，因为可选依赖缺失不等于环境坏了）；
 4. 建实验目录与六件套骨架（不覆盖历史实验）；
-5. 门禁：`--gates` 跑 G1-G4 并落盘；否则走 fail-closed（扩大数据规模却无全绿 gates.txt → 退出码 5）；
+5. 门禁：`--gates` 跑 G1/G3/G4 并落盘（RFC-0037 起 G2 已删除）；否则走 fail-closed（扩大数据规模却无全绿 gates.txt → 退出码 5）；
 6. 训练（`run.backend` 选 torch 参考循环或 Lightning 目标栈）。
 
 退出码：0 成功｜2 参数错误｜3 配置错误｜4 环境自检 FAIL｜5 门禁 FAIL / fail-closed 拒绝启动
@@ -100,7 +100,7 @@ def build_parser() -> argparse.ArgumentParser:
             "配置/数据版本不一致会**拒绝恢复**（fail-closed）"
         ),
     )
-    parser.add_argument("--gates", action="store_true", help="训练前强制跑 G1-G4")
+    parser.add_argument("--gates", action="store_true", help="训练前强制跑门禁（G1/G3/G4）")
     parser.add_argument("--gates-only", action="store_true", help="只跑门禁，不训练")
     parser.add_argument(
         "--no-gates", action="store_true", help="不跑门禁（扩大规模时会被 fail-closed 拒绝）"

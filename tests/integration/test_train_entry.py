@@ -82,9 +82,9 @@ def _config_payload(tmp_path: Path, *, steps: int = 2, **data_overrides: object)
         "gates": {
             "smoke_max_samples": 8,
             "overfit_steps": 5,
-            "shuffle_steps": 3,
+            "baseline_steps": 3,
             "initial_head_bias": 5.0,
-            "shuffle_samples": 2,
+            "baseline_samples": 2,
         },
     }
 
@@ -123,7 +123,8 @@ def test_gates_only_writes_the_six_piece_set(tmp_path: Path) -> None:
 
     text = (run_dir / GATES_FILENAME).read_text(encoding="utf-8")
     parsed = parse_gate_results(text)
-    assert len(parsed) == 4
+    assert len(parsed) == 3  # G1/G3/G4（G2 已删除，RFC-0037）
+    assert not any(result.name.startswith("G2") for result in parsed)
     assert "生效阈值" in text
     assert "git_rev" in text
     all_green = all(result.passed for result in parsed)

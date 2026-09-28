@@ -7,7 +7,7 @@
 
 本文件钉死三件事：
 1. `draw_until_min_events` 会重抽到达标为止，取不到就**抛**（fail-closed）；
-2. 三个门禁批（G1 / G2 真实臂 / G3）都带上 `gates.batch_min_events`；
+2. 两个门禁批（G1 / G3；RFC-0037 起 G2 已删除）都带上 `gates.batch_min_events`；
 3. 合成来源在事件数不足时**报错**而不是静默发出空批。
 """
 
@@ -45,8 +45,8 @@ BASE = {
         "audio_dim": 16,
     },
     "gates": {
-        "shuffle_samples": 4,
-        "shuffle_steps": 5,
+        "baseline_samples": 4,
+        "baseline_steps": 5,
         "overfit_steps": 3,
         "initial_head_bias": 0.0,
     },
@@ -104,7 +104,7 @@ def test_min_events_zero_keeps_old_behaviour() -> None:
 
 
 class _SpySource:
-    """记录每次 `batch()` 的实参（三个门禁批的观测点）。"""
+    """记录每次 `batch()` 的实参（两个门禁批的观测点）。"""
 
     def __init__(self, inner: SmokeBatchSource) -> None:
         self.inner = inner
@@ -114,14 +114,12 @@ class _SpySource:
         self,
         *,
         masked: bool,
-        shuffled: bool = False,
         samples: int | None = None,
         min_events: int = 0,
     ) -> object:
         self.calls.append((bool(masked), samples, int(min_events)))
         return self.inner.batch(
             masked=masked,
-            shuffled=shuffled,
             samples=samples,
             min_events=min_events,
         )
@@ -131,7 +129,7 @@ class _SpySource:
 
 
 def test_all_gate_batches_require_events() -> None:
-    """G1 / G2 真实臂 / G3 三个批都带上 `gates.batch_min_events`（空批不得进判据）。"""
+    """G1 / G3 两个批都带上 `gates.batch_min_events`（空批不得进判据）。"""
     mapping = {key: dict(value) for key, value in BASE.items()}
     mapping["gates"]["batch_min_events"] = 3
     cfg = config_from_mapping(mapping)

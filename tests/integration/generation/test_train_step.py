@@ -111,7 +111,8 @@ def test_full_loss_on_real_targets_is_finite_and_trains() -> None:
     output = model(batch)
     assert output.loss is not None
     assert bool(torch.isfinite(output.loss))
-    assert float(full_poisson_loss(output, batch).detach()) == pytest.approx(
+    # RFC-0037 R2：forward 的训练损失 = per_event 归一化（整式除以 max(E_total,1)）
+    assert float(full_poisson_loss(output, batch, reduction="per_event").detach()) == pytest.approx(
         float(output.loss.detach()),
         rel=1e-5,
     )
@@ -137,7 +138,7 @@ def test_masked_loss_and_ratio_are_consistent_on_real_targets() -> None:
     model = MaskedFieldModel(MODEL_CONFIG, batch.grid)
     output = model(batch)
     assert output.loss is not None
-    manual = masked_poisson_loss(output, batch)
+    manual = masked_poisson_loss(output, batch, reduction="per_event")
     assert float(manual.detach()) == pytest.approx(float(output.loss.detach()), rel=1e-5)
     output.loss.backward()
     finite = [p.grad is not None and bool(torch.isfinite(p.grad).all()) for p in model.parameters()]

@@ -1,12 +1,12 @@
-"""M9：G1-G4 门禁接入（标 slow，不进默认 CI；**必须实际跑过一次**）。
+"""M9：门禁接入（G1/G3/G4；标 slow，不进默认 CI；**必须实际跑过一次**）。
 
 以本模块自带的**最小可微回归任务**（不依赖 plan 04）调用
-beatmorph.infra.sanity 的四道门禁：
+beatmorph.infra.sanity 的三道门禁（RFC-0037 起 G2 已删除）：
 
 - 输入 = 一个二值条件场（哪些格子"被观测到"）；
 - 模型 = 两个标量参数 (a, b) -> lambda = softplus(a * X + b)（**故意极小**，
   只检验通路与门禁，不检验容量）；
-- 目标 = 由条件场生成的桶内计数（真实）或把这些计数随机置换（打乱对照）；
+- 目标 = 由条件场生成的桶内计数；
 - 损失 = 本模块的 poisson_nll（测度含 J(tau)，多 BPM 段另有一档）。
 
 G3 的基线值取自 M4 的闭式 constant_baseline_nll（**不是** 0）；
@@ -38,7 +38,6 @@ from beatmorph.infra.sanity import (
     constant_baseline_gate,
     frame_rate_gate,
     overfit_single_batch,
-    shuffled_target_control,
     summarize,
 )
 from tests.unit.field._builders import make_bpm_points
@@ -77,13 +76,6 @@ def _condition_and_counts(grid: FieldGrid) -> tuple[torch.Tensor, torch.Tensor]:
     return condition.reshape(shape), counts.reshape(shape)
 
 
-def _shuffled(counts: torch.Tensor, *, seed: int) -> torch.Tensor:
-    """把计数在全部格子上随机置换（输入对目标零信息）。"""
-    generator = torch.Generator().manual_seed(seed)
-    flat = counts.reshape(-1)
-    return flat[torch.randperm(flat.numel(), generator=generator)].reshape(counts.shape)
-
-
 def _make_runner(
     grid: FieldGrid,
     condition: torch.Tensor,
@@ -109,22 +101,14 @@ def _make_runner(
 
 
 def test_g1_g4_gates_all_pass() -> None:
-    """M9：四道门禁全绿；summarize() 输出直接进训练日志。"""
+    """M9：三道门禁全绿（RFC-0037 起没有 G2）；summarize() 输出直接进训练日志。"""
     grid = _grid()
     condition, counts = _condition_and_counts(grid)
-    shuffled = _shuffled(counts, seed=7)
     n_events = float(counts.sum().item())
     total_volume = omega(grid, n_lines=1)
 
     results: list[GateResult] = []
     results.append(overfit_single_batch(_make_runner(grid, condition, counts, seed=1), steps=STEPS))
-    results.append(
-        shuffled_target_control(
-            _make_runner(grid, condition, counts, seed=2),
-            _make_runner(grid, condition, shuffled, seed=3),
-            steps=STEPS,
-        ),
-    )
     trained = _make_runner(grid, condition, counts, seed=4)
     model_loss = trained()
     for _ in range(STEPS - 1):

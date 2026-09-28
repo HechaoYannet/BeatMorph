@@ -15,11 +15,14 @@
 > **硬约束**：① **最终不发布模型权重**（裁决成立的前提，项目级承诺）② 数据可本地落盘但**不得入库** ③ 脚本须记录来源与用途 ④ 发布权重前必须重新裁定。
 > 出处：[CLAUDE.md](../CLAUDE.md) 红线 5 附注、[RFC-0029 §8.3 Q11b](decisions/RFC-0029-phigros-continuous-chart-generation.md)、[survey](knowledges/phira-dataset-survey.md) §6。
 >
-> ### 🔴 约束二：**G1-G4 门禁必须在扩数据之前跑通**
+> ### 🔴 约束二：**门禁（G1/G3/G4）必须在扩数据之前跑通 + val 对照判读红线**
 >
 > 任何新模型/新范式，**先在 1–4 个样本上把门禁跑绿，再谈扩数据规模**；
 > 门禁实现在 [`beatmorph/infra/sanity.py`](../beatmorph/infra/sanity.py)，结果必须写入训练日志。
-> 出处：CLAUDE.md 红线 7、BasePlan §9、RFC-0029 §7 硬约束 3。
+> （RFC-0037，2026-09-28 裁定：原 G2 打乱标签对照已删除；「输入对目标零信息」改由
+> **val held-out 对照**承担。**判读红线**：任一 val 点 `val/ratio >= 1` 或
+> `val/nll_shuffled_delta <= 0` ⇒ 该 run 的扩大数据规模结论**作废**。）
+> 出处：CLAUDE.md 红线 7、BasePlan §9、RFC-0029 §7 硬约束 3、RFC-0037。
 
 **执行状态图例**（本文对每一步都标注）：
 
@@ -308,18 +311,23 @@ uv run python scripts/extract_features.py --shard 2/3 --npz-compression store --
 
 ## 7. 训练 🟡
 
-### 7.1 ★ 门禁 G1-G4 —— **扩数据之前必须全绿**
+### 7.1 ★ 门禁 G1/G3/G4 —— **扩数据之前必须全绿**（RFC-0037 起 G2 已删除）
 
 门禁模块 [`beatmorph/infra/sanity.py`](../beatmorph/infra/sanity.py) **范式中立**：只吃调用方给的 `step_fn`（跑一步优化并返回标量 loss），不 import torch、不认识任何模型/数据集，因此在最小环境下也能跑，**也就不会被"依赖缺失"跳过**（这正是 G4 当年失败的方式）。
 
-**四道门禁与判据**：
+**三道门禁与判据**（损失一律是 **per-event 归一化**口径，RFC-0037 R2；门禁臂**固定 fp32**，R4）：
 
 | 门禁 | 函数 | 判据（默认参数） | 抓什么 |
 |:---:|------|-----------------|--------|
 | **G1** 单 batch 过拟合 | `overfit_single_batch(step_fn, steps=300, target_loss=0.05, target_ratio=0.1)` | 末步 loss `<= max(0.05, 0.1 × 首步)` | 通路断、梯度断、loss 用错 |
-| **G2** 打乱标签对照 | `shuffled_target_control(step_fn_real, step_fn_shuffled, steps=300, min_gap_ratio=0.05)` | 打乱后末步 loss `>= 真实 × 1.05` | 输入对目标**零信息**（帧率/对齐类 bug 在此当场现形） |
-| **G3** 常数基线 | `constant_baseline_gate(model_loss, baseline_loss, min_improvement=0.1)` | 模型 loss `<= 基线 × 0.9` | 模型其实什么都没学到（停在均值地板上） |
+| **G3** 常数基线 | `constant_baseline_gate(model_loss, baseline_loss, min_improvement=0.1)` | 模型 loss `<= 基线 × 0.9`（基线与模型臂**同除一个** `max(E,1)`） | 模型其实什么都没学到（停在均值地板上） |
 | **G4** 契约断言 | `frame_rate_gate(frames, duration_s, frame_rate, tol_frames=2)` | `frames ≈ duration_s × frame_rate`（`frame_rate` **必须由 config 派生**） | 单位/帧率/采样率漂移 |
+
+> **原 G2（打乱标签对照）已删除**（RFC-0037，2026-09-28 决策者裁定）：单批 100 步「速度赛」
+> 在真实批上判别力未被证明（证据：RFC-0036 §1-§2、plan 07 §9-54/§9-55）。「输入对目标
+> 零信息」改由 **val held-out 对照**在线承担：`val/nll_shuffled_delta`（线内置换、线数归一、
+> 128 held-out 窗）+ `val/ratio` + 条件干预 `cond_*_delta`。**判读红线**：任一 val 点
+> `val/ratio >= 1` 或 `val/nll_shuffled_delta <= 0` ⇒ 该 run 的扩规模结论作废。
 
 **两种跑法**：① **命令行（推荐，会落盘并强制 fail-closed）**：`uv run beatmorph-train --gates`
 （或 `--gates-only` 只跑门禁）；② 手工片段（下文），用于研究单个门禁的行为。
@@ -327,24 +335,22 @@ uv run python scripts/extract_features.py --shard 2/3 --npz-compression store --
 **真实数据上的门禁预算（2026-09-27 第五轮实测，务必先读）**：
 
 - **数据侧先自证不是退化的**（本轮两次假结论都出在这里）：门禁 FAIL 时先看 `gates.txt` 上下文的
-  `g1_events` / `g2_events` / `g2_hidden_events` / `g1_lines` / `g2_lines` / `g3_events`。
+  `g1_events` / `g1_lines` / `g3_events` / `g3_lines`。
   - `g1_events = 0` ⇒ G1 是**空过**（曾经报到 0.0014 的「过拟合」）；现在由
     `gates.batch_min_events`（默认 1）兜底：取不到非空批就重抽，重抽不到即抛。
-  - `τ 轴终点缺陷`（`chartTime` 虚高，52% 的语料）曾让批里几乎全是空窗，**伪造出**「G2 结构性 FAIL」。
+  - `τ 轴终点缺陷`（`chartTime` 虚高，52% 的语料）曾让批里几乎全是空窗，**伪造出**门禁假结论。
     详见 **RFC-0031** 与 plan 02 §9 第四轮；默认口径 `data.tau_end_policy=audio` 已落地，改回
     `chart` 即回旧行为。
-- **G2 的两臂必须同批同损失**：`build_gate_inputs` 会建一对配对臂（真实目标 / 打乱目标，
-  同批同 seed），**不得**拿 G1 的遮盖补全臂当 G2 的真实臂——两者不同测度，比值由批大小与
-  重标定系数决定，对照会变成恒真。装配处有 fail-closed 断言兜底。
-- **8 GB 卡上不要让它滑进 Windows 共享内存**（本轮实测的坑）：四个批 + 四个模型同时在场时
+- **8 GB 卡上不要让它滑进 Windows 共享内存**（本轮实测的坑）：多个批 + 多个模型同时在场时
   `nvidia-smi` 到 **7.88 / 8.15 GB**、功耗掉到 88 W，**同一个 G3 步从 0.57 s 变成 8.8 s**，
   整轮门禁跑不完（表现为「GPU 100% 但迟迟不结束」）。装配已改为 G3 预计算先跑、跑完立即释放
   （plan 07 §9-27）。判据：`nvidia-smi` 的 `power.draw` 应稳定在 **90 W 上下**；若长期 < 90 W
   且显存贴顶，先怀疑共享内存回退，**不要**盲目加大步数预算。
-- **时间预算（实测）**：整轮 **~38-45 min**（`--device cuda`；其中 G2 两臂 100 步 ≈ 23 min、
-  G3 预计算 100 步 ≈ 十几分钟）。**步时 ∝ (K·T)²**（global 层对 `K·T` 做全自注意力），
-  而 `shuffle_chunks=16` 让 G2/G3 的**一步 = 16 次串行单样本前向** ⇒ 成本**强依赖 K**：
-  `K=6` 是分钟级、`K≈40` 就是上面这个量级。CPU 上是小时级，必须给设备。
+- **时间预算**：旧实测（含 G2）整轮 ~38-45 min；RFC-0037 删 G2 后预期 **~10-15 min**
+  （`--device cuda`；G3 预计算 100 步 × 16 段是大头，门禁臂 fp32 略慢于 bf16）。
+  **步时 ∝ (K·T)²**（global 层对 `K·T` 做全自注意力），而 `baseline_chunks=16` 让 G3 的
+  **一步 = 16 次串行单样本前向** ⇒ 成本**强依赖 K**：`K=6` 是分钟级、`K≈40` 就是上面这个
+  量级。CPU 上是小时级，必须给设备。
 
   ⚠️ **不要用「跑了几分钟」判断卡死**（2026-09-27 实测踩坑：把两个正在跑的门禁误判为卡死
   掐掉，浪费约 40 min GPU）。门禁现在有**逐门禁进度日志**（`门禁 G1 … 开始 / PASS（耗时）`
@@ -364,7 +370,7 @@ uv run python scripts/extract_features.py --shard 2/3 --npz-compression store --
 - **索引有落盘缓存**（plan 02 §9 ④）：全库（6750 行）首次重建 **36.5 min**，命中缓存后是**秒级**
   （日志会写「索引缓存命中」）。缓存指纹覆盖配置与文件 stat，改配置/换谱面会自动重建。
 
-`gates.txt` 里除了 `summarize()` 原文，还会写**本次生效的阈值**（例如 `g1_steps`、`g2_samples`、
+`gates.txt` 里除了 `summarize()` 原文，还会写**本次生效的阈值**（例如 `g1_steps`、`g3_samples`、
 `g3_min_improvement`）与上下文（git rev / 数据来源 / 派生帧率）——因为门禁阈值对量纲敏感，
 「默认值」不等于「本次用的值」（plan 07 §3.1 / §9-2）。
 
@@ -375,7 +381,6 @@ from beatmorph.infra.sanity import (
     constant_baseline_gate,
     frame_rate_gate,
     overfit_single_batch,
-    shuffled_target_control,
     summarize,
 )
 
@@ -384,19 +389,16 @@ def step_real() -> float:
     loss = train_step(model, batch)
     return float(loss)
 
-def step_shuffled() -> float:
-    """同模型/同输入，但目标被 shuffle。"""
-    return float(train_step(model, shuffle_targets(batch)))
-
 results = [
     overfit_single_batch(step_real),                                      # G1
-    shuffled_target_control(step_real, step_shuffled),                    # G2
-    constant_baseline_gate(model_loss, baseline_loss),                    # G3：λ = N/|Ω|
+    constant_baseline_gate(model_loss, baseline_loss),                    # G3：λ = N/|Ω|（同除 max(E,1)）
     frame_rate_gate(emb.shape[1], duration_s, encoder.output_frame_rate()),  # G4
 ]
 
 log = summarize(results)      # 可直接贴进训练日志的多行文本
 assert all(results), results  # 未全绿 → 停止，不要扩数据
+# 扩规模后的持续判读（原 G2 的命题所在）：每个 val 点必须 val/ratio < 1
+# 且 val/nll_shuffled_delta > 0，否则该 run 的扩规模结论作废（RFC-0037 R1）。
 ```
 
 - 门禁本身的单测（✅ 可执行）：`uv run pytest tests/unit/infra/test_sanity.py -q`。
@@ -407,8 +409,8 @@ assert all(results), results  # 未全绿 → 停止，不要扩数据
 
 | 项 | 状态 |
 |----|------|
-| ✅ **门禁冒烟（今天就能跑）** | `uv run beatmorph-train --config-name smoke --gates-only` —— 合成谱、无权重、无网络、无 GPU，**CPU 约 2 分钟**跑完 G1-G4 并把六件套写进 `runs/smoke/<时间戳>/`（G2 改成「同输入、只打乱被遮盖标签」的严格口径后比原先慢，见 §7.1 与 plan 07 §9-19） |
-| ✅ **训练入口** | `uv run beatmorph-train --config-name phigros_masked --gates`（真实清单 + 特征缓存）。`--gates` 先跑 G1-G4，**任一 FAIL 即以退出码 5 中止**；不跑门禁而数据规模超过冒烟上限时 **fail-closed 拒绝启动** |
+| ✅ **门禁冒烟（今天就能跑）** | `uv run beatmorph-train --config-name smoke --gates-only` —— 合成谱、无权重、无网络、无 GPU，**CPU 约 1-2 分钟**跑完 G1/G3/G4 并把六件套写进 `runs/smoke/<时间戳>/`（G2 已删除，RFC-0037） |
+| ✅ **训练入口** | `uv run beatmorph-train --config-name phigros_masked --gates`（真实清单 + 特征缓存）。`--gates` 先跑 G1/G3/G4，**任一 FAIL 即以退出码 5 中止**；不跑门禁而数据规模超过冒烟上限时 **fail-closed 拒绝启动** |
 | ✅ 训练栈 | `beatmorph/infra/train_loop.py`（torch 参考循环，默认 `run.backend=torch`）；`beatmorph/infra/lightning_module.py`（Lightning 目标栈，需 `uv sync --extra train`，缺失时给出安装命令而**不静默回落**） |
 | ✅ 环境自检 | `uv run python -m beatmorph.infra.env_doctor`（退出码 0/1/2 = 全 PASS / 有 FAIL / 有 UNKNOWN）；训练入口默认先跑它，可用 `--skip-env-doctor` 跳过（仅测试/容器） |
 | ⬜ 真实数据的清单与特征 | 仍待 plan 02 的 Phira 获取脚本 + 特征提取（§3–§5）：**没有它们就没有真实训练批次**，`data.source=manifest` 会在清单不存在时直接报错 |
@@ -578,7 +580,7 @@ uv run tensorboard --logdir runs/phigros_masked
 - **`t_window` 192→96** 把上限抬到 `K ≈ 53`（不是 4×，有常数项），单步快 2.04×——但**改的是任务口径**。
 - **bf16 autocast 是现成的杠杆**：`optim.precision: bf16-mixed` 早已声明，但 `train()` 从未启用
   （全仓无 `autocast`）。补测：K=32 峰值 5.05 → **2.92 GiB**、步时 0.550 → **0.269 s** ⇒ 上限抬到 `K ≈ 42-47`。
-  注意 bf16 **首步**要 1.4-3.0 s（内核编译），别把首步当稳态。启用前必须重跑 G1-G4。
+  注意 bf16 **首步**要 1.4-3.0 s（内核编译），别把首步当稳态。启用前必须重跑门禁（G1/G3/G4）。⚠️ RFC-0037 R4：门禁臂**固定 fp32**（bf16 重复噪声 2.8× 会让读数不可解释），训练精度不受影响。
 
 **降速怎么判（贴顶是静默的）**
 
@@ -610,7 +612,7 @@ malformed`，删掉 `.mypy_cache` 重跑即可——那是缓存损坏，不是�
 | **后果** | 120 s 的曲子落盘 9000 帧，代码以为时长 360 s：段落 [8,16] s 取到的帧真实时间是 [2.67,5.33] s，最后一段取到 [37.3,40.0] s → **模型在每个段落上看到的是歌曲前 1/3 的音频**，且错位随段落漂移 |
 | **为什么没暴露** | ① 唯一能证伪的测试带 `@pytest.mark.gpu` + 权重守卫 → `make test-fast` **永远不跑它**；② mock/fixture 里 4 处**断言 25 Hz 是正确的**（`round(dur*25)`）→ **测试套件在断言这个 bug 是不变量**；③ 没有单 batch / 打乱标签 / 常数基线门禁 |
 | **修复** | 契约改为派生式（`MERT_SAMPLE_RATE_HZ / MERT_CONV_STRIDE_PRODUCT`），`MERTAdapter.output_frame_rate()` 从 config 推导，删除复制的第三份常量；**唯一能证伪的断言进默认 CI** |
-| **制度化** | 新增 **G1-G4 门禁**（`infra/sanity.py`）与 **红线 7**（物理常量必须派生 + 断言；新范式必须过门禁）；**mock 不得固化物理常量** |
+| **制度化** | 新增 **G1-G4 门禁**（`infra/sanity.py`；G2 后于 2026-09-28 随 RFC-0037 删除，现为 G1/G3/G4）与 **红线 7**（物理常量必须派生 + 断言；新范式必须过门禁）；**mock 不得固化物理常量** |
 | **一句话** | **一个被 mock 覆盖了的物理常量，等价于一个被伪装成事实的假设。** |
 
 出处：[POSTMORTEM-2026-08-05](POSTMORTEM-2026-08-05-frame-rate-misalignment.md)。
@@ -622,7 +624,7 @@ malformed`，删掉 `.mypy_cache` 重跑即可——那是缓存损坏，不是�
 | `verify_mert_frame_rate.py` 报 `MISMATCH` | `--model-dir` 指向的 `config.json` 不是 MERT-v1-330M（`conv_stride` 累乘必须为 320）；核对权重目录 |
 | 特征张量帧数 ≠ `时长 × 75` | 音频未重采样到 24 kHz、或滑窗拼接用了错误的帧率换算 → 跑 §1.5 自检 + 检查 `output_frame_rate()` 是否被绕过 |
 | 缓存特征加载时报元数据不匹配 | 设计如此（RFC-0029 §7 硬约束 2）：缓存必须带 `{rate, sample_rate, layer, model_rev, duration_s}`，元数据不符即**拒绝加载**并重抽 |
-| 训练 loss 完全不动（万级数据） | 先跑 **G2 打乱标签对照**：若打乱后 loss 不变 → 输入对目标零信息（对齐/帧率类 bug），**不要**先调学习率或换模型 |
+| 训练 loss 完全不动（万级数据） | 先看 **val 对照**（RFC-0037 起）：`val/nll_shuffled_delta ≈ 0` 或 `cond_*_delta ≈ 0` → 输入对目标零信息（对齐/帧率类 bug），**不要**先调学习率或换模型；再核 `val/ratio` 是否 < 1 |
 | 训练 loss 迅速塌到"全 0" | 稀疏目标的经典塌陷 → 确认用的是**泊松 NLL**（积分项惩罚全 0），而不是朴素 BCE/MSE 热图；对照 **G3 常数基线** `λ = N/\|Ω\|` |
 | 解析后 `type` 分布明显偏离实测（Tap 52–63%） | 大概率是**官谱/RPE 的 type 数字混用**（§3.4 陷阱 3）→ 检查是否按格式分派映射表 |
 | `side` 全为正面 | `above` 被当布尔解析（`!= 0`）/ 或背面样本被过滤 → 必须写 `above == 1 ? FRONT : BACK`，并在评估中单独报背面 recall |
@@ -631,7 +633,7 @@ malformed`，删掉 `.mypy_cache` 重跑即可——那是缓存损坏，不是�
 | 谱面文件读不出来 / JSON 解析失败 | 文件后缀不可信（`.json` 可能是 PEC）→ 改为按**内容**判型 + 读 `info.yml.chart` 定位 |
 | `PreprocessPipeline` 报大量 "no audio" | 现状实现按 `.osu` 父目录找音频（v2.x 逻辑）；迁移后应按 `info.yml.music` 定位并做 sha1 去重 |
 | `pytest` 里 MERT 相关用例全 skip | 需要权重 + CUDA（`@pytest.mark.gpu`）；但**契约级测试不得依赖权重或 GPU**，帧率断言应在默认 CI 内跑（§1.5） |
-| 想跳过门禁直接扩数据 | **不允许**：CLAUDE.md 红线 7 —— 新范式必须先过 G1-G4，结果写入训练日志 |
+| 想跳过门禁直接扩数据 | **不允许**：CLAUDE.md 红线 7 —— 新范式必须先过门禁（G1/G3/G4），结果写入训练日志；扩规模后还须守住 val 对照判读红线（RFC-0037） |
 
 ---
 
@@ -653,7 +655,7 @@ uv run pytest tests/unit/audio/test_frame_rate_contract.py tests/unit/infra/test
 # 3. 环境自检（E1-E5；退出码 2 = 有 UNKNOWN，例如没装 train extra）
 uv run python -m beatmorph.infra.env_doctor
 
-# 4. 门禁冒烟：跑通 G1-G4 并落盘六件套（合成数据，数秒）
+# 4. 门禁冒烟：跑通 G1/G3/G4 并落盘六件套（合成数据，数秒）
 uv run beatmorph-train --config-name smoke --gates-only
 
 # 5. 全仓快测试 + lint + 类型
@@ -674,7 +676,7 @@ uv run ruff check . ; uv run mypy beatmorph
    ↓
 [强度场构建]  field/：网格 + 两条 ∫λ 路径互校                          (⬜ 待建)
    ↓
-[门禁 G1-G4 全绿]  ← 🔴 门禁未绿不得扩数据        (✅ beatmorph-train --gates 已接线，fail-closed)
+[门禁 G1/G3/G4 全绿] ← 🔴 门禁未绿不得扩数据      (✅ beatmorph-train --gates 已接线，fail-closed)
    ↓
 [训练]  掩码补全 Enc-Dec + 泊松 NLL → B1-B6 对照 → 评估                (🟡 训练栈与数据通路已通；
         B1-B6 对照臂与评估仍待建；真实批次待 §3–§5 的脚本)

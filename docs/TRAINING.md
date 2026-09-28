@@ -460,7 +460,19 @@ git/data rev）/ `data_provenance.json`（来源与用途）/ `checkpoints/` / `
 - `run.save_every=2000`（= 每 4 轮，1 轮 = `optim.val_every`）+ `run.keep_last=3` + `run.keep_best=1`：
   崩溃最多丢一个间隔，磁盘只留最新 3 个步级 checkpoint 加一个 `best.pt`（**先写后删**）。
 - 目录：`runs/<experiment>/<timestamp>/checkpoints/step-NNNNNNN.pt`（**文件名就是步号**，恢复靠它）。
-  `best.pt` 是「存盘时刻训练损失最低」的那一个；**val 路径尚未实现，它不作为模型选择依据**。
+- **`best.pt` 现在按 `val/ratio` 选**（2026-09-27 §9-51；此前按训练损失选，而实测那等于
+  「按谁抽到最空的窗选」——最小 loss 落在 step 6234 的 `events=0, K=1` 空窗上）。
+  新口径在**测出更优 `val/ratio` 的那一步**立即写盘，不随 `save_every`。无 val 时回落旧口径，
+  且在日志里明说「不作为模型选择依据」。
+
+> ⚠️ **开 val 之前必须读这一段（实测开销，不是估算）**：§9-47 E 原先算的一次 val ≈ `val_every`
+> 预算的 **5.8%**，**实测是 0.7–1.5×**（即一次 val 的开销与它之间那 1000 步的训练**同量级**）。
+> 三个原因，缺一不可地都被低估了：① 对照臂是 **5 次前向**（E 只算了 1 次）；② 数据侧实测
+> **0.276 s/窗**（workers=8），不是 E 的 0.038 s；③ val 前缀抽到的 **K 比训练流重**
+> （p90 **106** vs 训练流 53–67），而前向成本 ∝ K²。
+> ⇒ 当前 `optim.val_every=1000 / val_windows=128` 会让训练**慢一倍以上**。要压回 5% 需在三者里
+> 裁定：`val_windows≈32` / `val_every≈4000` / **对照臂降频**（条件干预三元组不必每次 val 都跑）。
+> 详见 plan 07 §9-51 ③。
 
 **② 断点续训**
 

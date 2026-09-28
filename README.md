@@ -57,7 +57,15 @@ BeatMorph 从原始音频（WAV/MP3）+ 难度（+ 可选判定线事件轨）�
 `not supported on this platform`）⇒ 先前「它让峰值更低」的判断**已更正**（那只是步构成不同）；**看门狗已按决策者要求撤下**（他人工盯并主动通知，
 不要自动杀进程——v1 曾因跨 run 的步号基准误杀一次健康运行，见 plan 07 §9-57 事故 2）。
 
-**当前正在跑**：`runs/_full_train3.log`（无看门狗）。它先跑门禁（~3.5 min），再 20 000 步。
+**当前正在跑且已脱离险区**：`runs/_full_train3.log` / run 目录 `runs/phigros_masked/20260928-144342`
+（无看门狗）。门禁 3.5 min 绿；**已跨过上次卡死的 step 951，跑到 step 1500 健康**（驱动侧峰值
+7480 MiB，功耗 78-92 W 未塌陷；`vram_reserved_gib` 最大 1.53 GiB ⇒ 卫生回收生效）。
+
+**首个 val（step 1000）实测——两条判读红线双双满足**（`plan 07 §9-58`）：
+`val/ratio = 0.7521 < 1`、`val/nll_shuffled_delta = +0.7351`（shuffled 1.690 vs model 0.955）
+⇒ **「输入对目标有信息」首次拿到 held-out 统计有效证据**（G2 从未测成过）。附带：`val_time_s =
+100.52 s`（此前推导 33 s，**miss 3×** ⇒ `val_every=1000` 让运行时长≈翻倍）；`clip_active` = **100%**
+（per-event 归一化未降低裁剪触发）；`data_time_s` 中位 **2.7 ms**（窗口缓存 85×）。
 
 **监控指引（人工）**：
 

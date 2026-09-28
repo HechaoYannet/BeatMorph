@@ -1494,4 +1494,27 @@ CUDA 上下文 / cuBLAS·cuDNN workspace / **分配器碎片**，也未计长期
 (c) 换更大显存的卡。首跑的三条观察点见 README 交接件（`clip_active` 率 / `val/ratio` /
 `val/nll_shuffled_delta`）。
 
+### §9-58 第十三轮⑤：全量训练前 1500 步实测（事故修复生效 + 首个 val 的双红线）
+
+run `runs/phigros_masked/20260928-144342`（`vram_hygiene_gib=1.0`、`val_batch=4`，无看门狗）：
+
+- **事故修复生效**：跨过 §9-57 的 step 951，跑到 **step 1500** 健康（驱动侧峰值 7480 MiB，
+  但功耗 **78-92 W 未塌陷**）；`vram_reserved_gib` 最大 **1.53 GiB** 而 torch 峰值 **6.79 GiB**
+  ⇒ **卫生回收在起作用**（保留量不随历史峰值累积）——这是本机唯一真正生效的显存杠杆。
+- **首个 val（step 1000）两条判读红线双双满足**（RFC-0037 R1 首次实测）：
+  `val/ratio = 0.7521 < 1`；`val/nll_shuffled_delta = +0.7351`（shuffled 1.690 vs model 0.955）
+  ⇒ **「输入对目标有信息」这一命题首次拿到 held-out 上的统计有效证据**——这正是 G2 想测而
+  从未测成的命题（G2 时代的所有 verdict 都不可复现，见 §9-54/§9-55）。
+- 条件干预（探索性）：`audio_perm_delta = −0.0015`（≈0）、`audio_zero_delta = +0.0111`、
+  `track_zero_delta = +0.2484` ⇒ 该 val 批上**判定线轨被用得比音频多**，音频时间对齐几乎没被用
+  （一个值得后续追的线索，不是本轮结论）。
+- **val 真实墙钟 = 100.52 s**：此前推导值 **33 s**（§9-53）**miss 3×**；步时中位 0.097 s ⇒ 1000 步
+  训练 ≈97 s ⇒ `val_every=1000` 让**运行时长大致翻倍（≈50% 开销，不是 16.7%）**。
+  建议（下一个长跑）：`val_every` 1000 → **4000**（≈12.5%）或压 `val_windows`；本 run 保持 1000
+  以便在线看趋势（val/ratio 是主判据）。
+- **`clip_active` = 100%**（797/797 非空步）⇒ **per-event 归一化没有降低裁剪触发率**：
+  Adam 对损失整体缩放不变，梯度范数依旧远超 `grad_clip_norm=1.0`；有效更新 ≈ 归一化梯度形式。
+  这是 RFC-0037 §6-1 的首个答案（阈值是否该调，待专门裁定）。
+- `data_time_s` 中位 **2.7 ms**（窗口缓存生效；原路径 0.230 s ⇒ **85×**）。
+
 [POSTMORTEM-2026-08-05]: ../POSTMORTEM-2026-08-05-frame-rate-misalignment.md

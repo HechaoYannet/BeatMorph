@@ -826,6 +826,37 @@ def _peak_vram_gib() -> float:
     return float(torch.cuda.max_memory_allocated()) / 2**30
 
 
+def vram_reserved_gib() -> float:
+    """分配器当前**保留**量（GiB）；CPU 上恒为 0。
+
+    与 `_peak_vram_gib`（峰值已分配）一起读才看得出事故机制（plan 07 §9-57）：
+    保留量 ≫ 已分配量 = 一堆**空闲但仍占着驱动显存**的块。
+    """
+    if not torch.cuda.is_available():
+        return 0.0
+    return float(torch.cuda.memory_reserved()) / 2**30
+
+
+def maintain_vram_hygiene(threshold_gib: float) -> bool:
+    """保留量 − 已分配量超过阈值时把缓存还给驱动（plan 07 §9-57）。
+
+    动机：一次 K≈128 的大批把分配器峰值保留量顶到 ~5.2 GiB 且**长期不释放**，驱动侧总量
+    因此停在 ~7.86/8.15 GiB；下一次大分配无处可放 ⇒ Windows 静默回退共享显存，功耗从
+    ~102 W 塌到 ~31 W、步时放大一个量级以上（2026-09-28 实测 step 951 卡死）。
+    只回收「远超真实需求」的那部分（默认 1 GiB 阈值），正常步不付重分配代价。
+
+    Returns:
+        是否真的调用了 `torch.cuda.empty_cache()`。
+    """
+    if threshold_gib <= 0.0 or not torch.cuda.is_available():
+        return False
+    gap = float(torch.cuda.memory_reserved()) - float(torch.cuda.memory_allocated())
+    if gap > threshold_gib * 2**30:
+        torch.cuda.empty_cache()
+        return True
+    return False
+
+
 def _append_history(path: Path, rows: Sequence[Mapping[str, float]]) -> None:
     """把标量行追加进 logs/loss_history.jsonl（追加，因此续训后仍是同一条曲线）。"""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -887,6 +918,9 @@ def _flush_scalars(
             if math.isfinite(value):
                 writer.add_scalar(tag, value, step)
         writer.add_scalar("sys/peak_vram_gib", float(row["peak_vram_gib"]), step)
+        # 分配器保留量（§9-57）：峰值与保留量之间的差就是「空闲占位」——事故的直接机制。
+        if "vram_reserved_gib" in row:
+            writer.add_scalar("sys/vram_reserved_gib", float(row["vram_reserved_gib"]), step)
         # 数据覆盖（plan 07 §9-38）：没有这三条曲线，「采样器饱和」这类静默失效看不见。
         if "windows_total" in row and float(row["windows_total"]) > 0.0:
             writer.add_scalar("coverage/epoch", float(row["epoch"]), step)
@@ -1174,6 +1208,9 @@ def train(  # noqa: PLR0912, PLR0915 - 循环的分支/语句数靠注释说明�
                     torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.optim.grad_clip_norm)
                 )
             optimizer.step()
+            # 显存卫生（plan 07 §9-57）：backward 之后本步激活已释放回缓存，若保留量远超
+            # 真实需求就还给驱动，避免「峰值保留量长期占位 ⇒ 下一次大分配滑进共享显存」。
+            maintain_vram_hygiene(cfg.optim.vram_hygiene_gib)
             # loss.detach() 取标量会**强制同步**：到这里 GPU 上的搬运/前向/反向/裁剪/更新
             # 都已落地，因此下面的 compute 才是真计算时间，而不是 kernel 排队时间。
             value = float(loss.detach())
@@ -1214,6 +1251,8 @@ def train(  # noqa: PLR0912, PLR0915 - 循环的分支/语句数靠注释说明�
                     and grad_norm > float(cfg.optim.grad_clip_norm)
                 ),
                 "peak_vram_gib": _peak_vram_gib(),
+                # 分配器保留量（GiB）：与 peak 一起看才分得清「真需求」与「空闲占位」（§9-57）。
+                "vram_reserved_gib": vram_reserved_gib(),
                 "lr": float(cfg.optim.lr),
                 # 批的 K 与事件数：显存墙与「空批」两个老问题都靠它在线可见
                 # （plan 07 §9-23 / §9-35；步时 ∝ K²，K 必须和 loss 一起看）。

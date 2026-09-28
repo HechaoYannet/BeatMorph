@@ -1450,4 +1450,45 @@ RFC-0037 → **已裁定（采纳）**、下一编号 0038。
 - 判读红线（`val/ratio >= 1` 或 `val/nll_shuffled_delta <= 0` ⇒ 扩规模结论作废）目前靠
   人工/巡检盯 val 曲线，**未**做成自动中止（避免误杀首个 val 点前的暖机段）。
 
+### §9-57 第十三轮④：首次全量训练的**显存事故**与处置（2026-09-28，RFC-0037 落地后首跑）
+
+**事故 1（真实故障）：驱动侧滑进 Windows 共享显存，step 951 卡死。**
+run `runs/phigros_masked/20260928-142108`：门禁 G1/G3/G4 全绿（3.5 min），训练跑到
+**step 950** 正常（`data_time_s` 0.001-0.007 s ⇒ 窗口缓存生效），**step 951 起 60 s 零新行**。
+实测：驱动侧 VRAM 峰值 **7874 / 8151 MiB（96.6%）**，功耗 **102 W → 31 W** 而 util 100%
+（决策者同时观测到**共享 GPU 内存 13.2 GB**）——即文档记录的「滑进共享内存」特征。
+本 run 的 K：中位 26 / p90 63 / **max 128（0.11% 的步）**；torch 分配器峰值 **5.227 GiB**。
+
+⇒ **更正第七轮的口径**：「bf16 K=128 → 5.10 GiB 亦可训」是 **torch 分配器口径**，未计
+CUDA 上下文 / cuBLAS·cuDNN workspace / **分配器碎片**，也未计长期运行；在 Windows/WDDM 上
+驱动装不下就**静默回退共享内存**（系统内存），8 GB 卡上「接近上限」= 灾难。**该结论不适用于
+全量长跑**，以本节实测为准。
+
+**事故 2（工具误伤）：看门狗 v1 误杀了一次健康运行。** 重试（`20260928-143418`）带了
+`expandable_segments:True`：门禁期 mem 1942 MiB / 功耗 ~100 W，训练到 step 50 时驱动侧
+**5828 MiB**、torch 峰值 **4.598 GiB**（比事故 1 同期更低，说明 `expandable_segments` 在起作用），
+却被我自写的看门狗判成「停滞 241 s」掐掉——**根因**：它拿**上一个 run 的 950 行 jsonl**
+当步号基准，新 run 只有 50 行 ⇒ 行数「不前进」。**教训：跨 run 的进度基准必须绑定本次运行的
+文件（mtime 晚于启动时刻）**；这条已写进脚本 v2（但该脚本随后按决策者要求撤下，见下）。
+
+**已落地的处置（都不改训练语义）**
+
+1. `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`（消碎片，驱动侧见效；实测重试同期峰值更低）；
+2. **显存卫生** `optim.vram_hygiene_gib`（默认 1.0）：每步 backward+step 后，若
+   `memory_reserved() − memory_allocated() > 阈值` 就 `torch.cuda.empty_cache()`，把「保留但
+   空闲」的块还给驱动——这正是事故的直接机制（峰值保留量长期占位）。护栏
+   `tests/unit/infra/test_vram_hygiene.py`（4 项，monkeypatch，无需 CUDA）；
+3. 遥测：新增 `vram_reserved_gib`（jsonl + TB `sys/vram_reserved_gib`），与 `peak_vram_gib` 并列；
+4. `optim.val_batch: 8 → 4`（留显存余量；val 指标语义不变，仅组批数增多）；
+5. **看门狗撤下**（决策者 2026-09-28 指示：由他人工盯并**主动通知**故障，不要自动杀进程）。
+   脚本 v2 已删除；本节保留 v1 的误杀教训。
+
+**仍存的风险与下一层杠杆（未决）**：K≈128 的批在 8 GB 卡上本身就贴着驱动上限；卫生回收
+把「空闲占位」去掉后**预计**有 ~1 GiB 余量，但**未证**。若再次回退：
+(a) **给批 K 设上限**（跳过 K > 预算的窗口）——**改变数据分布**，须决策者裁定/开 RFC；
+(b) 检查 gap 判断的显存开销（为后续可能的
+    梯度检查点/分块全局注意力留位置）；
+(c) 换更大显存的卡。首跑的三条观察点见 README 交接件（`clip_active` 率 / `val/ratio` /
+`val/nll_shuffled_delta`）。
+
 [POSTMORTEM-2026-08-05]: ../POSTMORTEM-2026-08-05-frame-rate-misalignment.md

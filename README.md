@@ -18,7 +18,7 @@ BeatMorph 从原始音频（WAV/MP3）+ 难度（+ 可选判定线事件轨）�
 
 > 本节读者是**下一个 session 的 agent**，不是历史记录。
 > **每次交接必须整节重写，不得追加**（规则见 [AGENTS.md](AGENTS.md) §6）。
-> 上次交接：**2026-09-28（第十三轮收尾）** ｜ 交接人：主会话（**RFC-0037 已裁定并落地**：门禁 G2 删除 + 训练损失按事件归一；全库窗口预切缓存建成并终验；**全量训练即将启动**）
+> 上次交接：**2026-09-28（第十三轮收尾）** ｜ 交接人：主会话（**RFC-0037 已裁定并落地**：门禁 G2 删除 + 训练损失按事件归一；全库窗口预切缓存建成并终验；**首次全量训练遇到显存事故，已修复并重启，等待人工盯**）
 
 ### 当前状态
 
@@ -43,12 +43,40 @@ BeatMorph 从原始音频（WAV/MP3）+ 难度（+ 可选判定线事件轨）�
 | **窗口预切缓存（本轮建成 + 终验通过）** | train **634 952 窗 / 353.6 GB**（`train/aa677031c17e3a3d`，11.4 h）+ val **74 889 窗 / 41.7 GB**（`val/fac0448693925c86`，1.2 h）；指纹与事前计算一致、`.partial` 残留 0；**逐位一致 400/400 + 100/100**；读取 **95.2 / 76.2 窗/s**（原路径 81× / 65×）⇒ plan 07 §9-54⑮ |
 | 重建参数（如需重建照抄） | `beatmorph-build-windows --config-name phigros_masked --jobs 12 --shard-windows 512 --chart-cache-size 2 --feature-cache-size 1`（+`--split val` 再跑一次；**12 进程是拐点**，20 进程更慢且吃内存） |
 
-**🚀 下一步就是跑全量训练**（门禁已可跑：三道门 + 修宪后的判读红线；数据侧与损失口径都已就绪）
+**⚠️ 首次全量训练遇到显存事故 → 已修复并重启（★ 需要人工盯）**（plan 07 §9-57）
 
-`uv run beatmorph-train --config-name phigros_masked --gates --device cuda --skip-env-doctor`
-—— 门禁（G1/G3/G4，fp32 臂）预期 **10-15 min**，随后 20 000 步训练（单步 ≈0.195 s ⇒ ≈65 min + val）。
-要看的三件事：① `clip_active` 率是否从旧的 **56.4%** 明显下降；② `val/ratio` 是否持续 < 1 且下行；
-③ `val/nll_shuffled_delta` 是否 > 0（≤ 0 ⇒ 该 run 作废，RFC-0037 判读红线）。
+事故（`runs/phigros_masked/20260928-142108`）：门禁绿、训练到 **step 950** 正常，**step 951 卡死**；
+驱动侧显存 **7874/8151 MiB**、功耗 **102→31 W**、util 仍 100% = **滑进 Windows 共享显存**
+（决策者观测到共享内存 **13.2 GB**）。**根因**：K≈128 的批把 torch 峰值顶到 5.23 GiB，
+加 CUDA 上下文/workspace/**分配器碎片**后驱动侧贴顶；第七轮「K=128 亦可训」是**分配器口径**，
+**不适用于全量长跑**（该结论已更正）。
+
+**已落地（不改训练语义）**：`PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`；
+`optim.vram_hygiene_gib=1.0`（每步把「保留但空闲」的缓存还给驱动，新增遥测
+`vram_reserved_gib`）；`val_batch: 8→4`；**看门狗已按决策者要求撤下**（他人工盯并主动通知，
+不要自动杀进程——v1 曾因跨 run 的步号基准误杀一次健康运行，见 plan 07 §9-57 事故 2）。
+
+**当前正在跑**：`runs/_full_train3.log`（无看门狗）。它先跑门禁（~3.5 min），再 20 000 步。
+
+**监控指引（人工）**：
+
+```powershell
+Get-Content runs\_full_train3.log -Tail 20                      # 门禁 → 训练启动
+Get-Content runs\_full_train3_gpu.csv                           # 无；用下一行代替
+nvidia-smi --query-gpu=memory.used,power.draw,utilization.gpu --format=csv,noheader
+```
+
+- **停机判据（驱动侧，务必用 `nvidia-smi`）**：`memory.used > ~7.4 GiB` 或 `power.draw < 45 W`
+  而显存 > 5 GiB ⇒ **立刻停**（`Get-Process python | Stop-Process -Force`），不要「再跑一会儿」。
+- 曲线看 `runs/phigros_masked/<新时间戳>/logs/loss_history.jsonl`：`loss` 现为 **per-event 口径**，
+  与历史 run 不可比（用 `loss_sum_raw` 对照）；盯 `clip_active`、`vram_reserved_gib`、`step_time_s`、`data_time_s`。
+- **val 红线（RFC-0037 R1）**：step 1000 起每个 val 点必须 `val/ratio < 1` 且 `val/nll_shuffled_delta > 0`，
+  否则该 run 的扩规模结论**作废**（`val_time_s` 同时给出 val 真实墙钟——此前是推导值）。
+- **若再次回退共享显存**：下一层杠杆是**给批 K 设上限**（跳过 K > 预算的窗口）——**改变数据分布，
+  须决策者裁定**；或换更大显存的卡。**不要**再自建自动杀进程的看门狗。
+
+**首跑的三个科学观察点**：① `clip_active` 率（旧口径 56.4%，归一化后是否下降——实测仍 100%（非空步），
+说明归一化**没有**解决裁剪常触发，见 RFC-0037 §6-1）；② `val/ratio` 趋势；③ `val/nll_shuffled_delta` 符号。
 
 ### 下一步（按性价比排序，只留仍然有效的）
 
@@ -61,6 +89,7 @@ BeatMorph 从原始音频（WAV/MP3）+ 难度（+ 可选判定线事件轨）�
 
 | 未决 | 出处 |
 |------|------|
+| **批 K 上限**（只在显存再次回退共享内存时启用：跳过 K > 预算的窗口；**改变数据分布，须裁定**） | plan 07 §9-57 |
 | **`grad_clip_norm=1.0` 在 per-event 损失下是否仍合适**（旧 run 56.4% 的步触发、裁剪前中位 316 ⇒ 归一化梯度形态）——先看 `clip_active` 率再议 | RFC-0037 §6-1 / plan 07 §9-55 |
 | **`val/nll_shuffled_delta` 的 margin 未标定**（现阶段只有符号判据 > 0） | RFC-0037 §6-2 |
 | **G1 绝对下限 0.05 的 per-event 语义未标定**（相对判据主导，暂不阻塞） | RFC-0037 §6-3 |

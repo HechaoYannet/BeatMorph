@@ -250,6 +250,15 @@ class OptimConfig:
     weight_decay: float = 0.01
     betas: tuple[float, float] = (0.9, 0.95)
     grad_clip_norm: float = 1.0
+    #: **显存卫生阈值（GiB，plan 07 §9-57 事故后新增）**：当 PyTorch 缓存分配器的
+    #: `reserved − allocated` 超过该值时调用 `torch.cuda.empty_cache()`，把**保留但未使用**
+    #: 的块还给驱动。0 = 关闭。
+    #: 为什么需要：一次 K≈128 的大批会把分配器的峰值保留量顶到 ~5.2 GiB 并**长期不释放**，
+    #: 驱动侧总量因此停在 ~7.86 / 8.15 GiB，下一次大分配无处可放 ⇒ Windows **静默回退共享
+    #: 显存**（系统内存），功耗从 ~102 W 塌到 ~31 W、步时放大一个数量级以上（2026-09-28 实测：
+    #: step 951 直接卡死；用户观测到共享显存 13.2 GB）。默认 1.0 GiB 只在「保留量远超真实
+    #: 需求」时触发，正常步不付出 `empty_cache` 的重分配代价。
+    vram_hygiene_gib: float = 1.0
     batch_size: int = 1
     max_steps: int = 1000
     #: val 的周期（步）；0 = 不跑 val（此前的默认状态：`val_every` 存在但**空转**）。

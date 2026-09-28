@@ -582,12 +582,22 @@ uv run tensorboard --logdir runs/phigros_masked
   （全仓无 `autocast`）。补测：K=32 峰值 5.05 → **2.92 GiB**、步时 0.550 → **0.269 s** ⇒ 上限抬到 `K ≈ 42-47`。
   注意 bf16 **首步**要 1.4-3.0 s（内核编译），别把首步当稳态。启用前必须重跑门禁（G1/G3/G4）。⚠️ RFC-0037 R4：门禁臂**固定 fp32**（bf16 重复噪声 2.8× 会让读数不可解释），训练精度不受影响。
 
+> ⚠️ **2026-09-28 实测更正（plan 07 §9-57）**：上表的「峰值显存」是 **torch 分配器口径
+> （`max_memory_allocated`）**，**不含** CUDA 上下文 / cuBLAS·cuDNN workspace / **分配器碎片**。
+> 首次全量训练实测：K=128 的批把 torch 峰值顶到 **5.23 GiB**，但**驱动侧总量**到
+> **7874 / 8151 MiB**，下一步就滑进共享显存（决策者观测 **13.2 GB** 共享内存），step 951 卡死。
+> ⇒ **判据必须是驱动侧**（`nvidia-smi memory.used`），不是 `sys/peak_vram_gib`。已落地的三个杠杆：
+> `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`、`optim.vram_hygiene_gib`（保留量远超实际
+> 分配时回收缓存，见 `sys/vram_reserved_gib`）、`optim.val_batch: 8 → 4`。
+
 **降速怎么判（贴顶是静默的）**
 
-- 显存到 ~7.9/8.15 GB 时驱动滑进 Windows 共享内存：利用率仍显示 100%，但 `power.draw` 从 ~94 W 掉到 ~88 W，
-  **步时放大一个量级**（实测 0.57 s → 8.8 s）。
-- 判据：`power.draw` 长期明显低于 90 W **且** `sys/peak_vram_gib` 贴顶 ⇒ 立刻停，**不要**「再跑一会儿」。
+- 显存到 ~7.9/8.15 GB 时驱动滑进 Windows 共享内存：利用率仍显示 100%，但 `power.draw` 从 ~100 W 掉到 **~31 W**
+  （2026-09-28 实测），**步时放大一个量级**（实测 0.57 s → 8.8 s，最坏是**直接卡死**）。
+- 判据：**`nvidia-smi memory.used` > ~7.4 GiB** 或 `power.draw` 长期 < 45 W 且显存 > 5 GiB ⇒ 立刻停。
   巡检脚本已把这个判据做成告警（`scripts/training_health.py`，峰值 ≥ 7.5 GiB / 步时后半窗慢 1.3×）。
+  ⚠️ **不要靠自建看门狗自动杀**：2026-09-28 的 v1 版本因「跨 run 的步号基准」误杀过一次健康运行
+  （plan 07 §9-57 事故 2）——决策者已指示**由人工盯**并主动通知。
 - **改 `t_window` / 放开 `data.k_max` / 启用 bf16 之前**：先按上表外推，超过 5 GiB 就先停下来开 RFC 或调配置。
 
 **⚠️ 硬件安全（2026-09-27 的事故，写给下一个 session）**

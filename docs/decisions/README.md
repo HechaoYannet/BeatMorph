@@ -91,4 +91,6 @@
 
 | RFC-0037 | **删除门禁 G2 + 训练损失按事件归一化（per-event）与附带指标**（决策者裁定：「BasePlan 中对 G2 的设计是一个错误，直接贯彻」；损失不对 mask/事件平均「从自然理解上就不对路」）。R1 删 G2 全链路并**修宪**（BasePlan §9 / CLAUDE 红线 7 / AGENTS §4 → G1/G3/G4 三道 + val held-out 置换对照判读红线：`val/ratio >= 1` 或 `val/nll_shuffled_delta <= 0` ⇒ 扩规模结论作废）；R2 训练损失**整式**除以 `max(E_total,1)`（argmin 逐位不变，§2.2 记录「只除事件项」陷阱）；R3 新增 `loss_sum_raw` / `loss_nonempty_per_event` / `clip_active`；R4 门禁臂固定 fp32（吸收 0036-P0）；R5 val 置换改**线内**（吸收 0036-P1，`shuffle_counts_within_line` 五契约进 CI） | 04/07 | [**已裁定（采纳）**](RFC-0037-remove-g2-and-per-event-loss.md) |
 
-> 下一个可用编号：**RFC-0038**。
+| RFC-0038 | **全量大训练首跑「零进展」的处置**（实测：20000 步 exit 0、无卡死，但**非空窗 per-event 训练损失按 2000 步分块中位 9.52→10.24 无趋势**，`val/ratio` 最优停在 **step 2000**，后 18000 步无一超过；`val/ratio` 单点破 1（step 3000）⇒ 依 RFC-0037 R1 该 run 扩规模结论作废，`shuffled_delta` 20/20 > 0；**音频条件边际价值 ≤0.6%（帧轴置换）/≤6%（置零）** vs 事件轨 4.6–30%；**val 占墙钟 38.3% 且只有 498 事件、57.8% 空窗**、残差 sd 0.067 ≈ 漂移 0.13）。提案 **R1** 预算收敛（max_steps 20000→4000 / val_every 1000→500，两字段均不参与续训指纹）、**R2** 对照臂降频（新增 `val_contrast_every`，红线指标每次都跑）、**R3** val 检验力二选一（512 窗 ／ 红线改趋势判据＝**修宪**）、**R4** 只测量不改语义的 3 个有界探针（可学性上界／lr 扫描／音频通路梯度）、**R5** 停机规则（连续 4 个 val 点不优于最优即停）。**不改损失、不改门禁** | 07/06/04 | [**提案**](RFC-0038-training-saturation-and-budget.md)（待裁定：Q1–Q6） |
+
+> 下一个可用编号：**RFC-0039**。

@@ -10,7 +10,7 @@
 
 BeatMorph 从原始音频（WAV/MP3）+ 难度（+ 可选判定线事件轨）出发，端到端生成高质量、可玩的 **Phigros 谱面（RPEJSON）**。模型从社区海量自制谱自主学习创作规律，无需人工标注（标注成本 ≈ 0）。
 
-> 📌 **状态**：Pre-Alpha。范式（[RFC-0029](docs/decisions/RFC-0029-phigros-continuous-chart-generation.md)）、奠基文档（v3.0）、事实库已就绪；**核心契约 / 数据流水线 / 强度场 / 生成主干 / 解码与导出 / 训练基础设施六层已落地并通过默认 CI**（**1089 项测试**），**真实 Phira 全库已拉到本地（8551 张 RPE 谱面 + 42.8 GB 音频，不入库）**，特征提取 **8551/8551**、训练窗口 **train 634 952 + val 74 889**，**全库窗口预切缓存已建成并终验通过**（train 353.6 GB / val 41.7 GB，逐位一致 500/500 抽查）；**显存墙已解除（[RFC-0032](docs/decisions/RFC-0032-local-layer-own-line-tracks.md)）；[RFC-0037](docs/decisions/RFC-0037-remove-g2-and-per-event-loss.md) 已裁定并落地**（门禁 G2 删除 → **G1/G3/G4** 三道 + val held-out 对照判读红线；训练损失**按事件归一**）；**全量大规模训练进行中**（step 3350+；⚠️ **val@3000 判读红线被破 ⇒ 该 run 扩规模结论作废**，处置待裁定，见 plan 07 §9-60），消融臂与评估接线待建**。
+> 📌 **状态**：Pre-Alpha。范式（[RFC-0029](docs/decisions/RFC-0029-phigros-continuous-chart-generation.md)）、奠基文档（v3.0）、事实库已就绪；**核心契约 / 数据流水线 / 强度场 / 生成主干 / 解码与导出 / 训练基础设施六层已落地并通过默认 CI**（**1089 项测试**），**真实 Phira 全库已拉到本地（8551 张 RPE 谱面 + 42.8 GB 音频，不入库）**，特征提取 **8551/8551**、训练窗口 **train 634 952 + val 74 889**，**全库窗口预切缓存已建成并终验通过**（train 353.6 GB / val 41.7 GB，逐位一致 500/500 抽查）；**显存墙已解除（[RFC-0032](docs/decisions/RFC-0032-local-layer-own-line-tracks.md)）；[RFC-0037](docs/decisions/RFC-0037-remove-g2-and-per-event-loss.md) 已裁定并落地**（门禁 G2 删除 → **G1/G3/G4** 三道 + val held-out 对照判读红线；训练损失**按事件归一**）；**首跑全量训练已跑完（20 000 步 / exit 0 / 零卡死），但这是一次「零进展」的 run** —— 训练 per-event 损失在 step ~1000 即饱和、`val/ratio` 最优停在 step 2000，且 `val@3000` 单点破线 ⇒ **依 RFC-0037 R1 该 run 的扩规模结论作废**；处置见 [RFC-0038](docs/decisions/RFC-0038-training-saturation-and-budget.md)（**提案，待裁定**）与 plan 07 §9-61；消融臂与评估接线待建**。
 
 ---
 
@@ -18,111 +18,69 @@ BeatMorph 从原始音频（WAV/MP3）+ 难度（+ 可选判定线事件轨）�
 
 > 本节读者是**下一个 session 的 agent**，不是历史记录。
 > **每次交接必须整节重写，不得追加**（规则见 [AGENTS.md](AGENTS.md) §6）。
-> 上次交接：**2026-09-28（第十三轮收尾）** ｜ 交接人：主会话（**RFC-0037 已裁定并落地**：门禁 G2 删除 + 训练损失按事件归一；全库窗口预切缓存建成并终验；**首次全量训练遇到显存事故，已修复并重启**；**val 确实跨墙 + val@3000 判读红线被破 ⇒ 该 run 扩规模结论作废，处置待裁定**，见 plan 07 §9-59 / §9-60）
+> 上次交接：**2026-09-29** ｜ 交接人：主会话（**首跑全量训练已跑完 20 000 步 / exit 0**：管线可用性证实，
+> 但这一版**目标/优化器零进展** ⇒ 扩规模结论作废；处置待裁定 —— 提案见
+> [RFC-0038](docs/decisions/RFC-0038-training-saturation-and-budget.md)，实测见 plan 07 §9-61）
 
 ### 当前状态
 
 自检（默认 CI，无网络 / 无权重 / 无 GPU）：`uv run ruff check . && uv run mypy beatmorph && uv run pytest -m "not slow and not gpu and not e2e"` → **1089 passed**（16 deselected）。
 
-**✅ 门禁体系已按 RFC-0037 改造完毕（修宪级，2026-09-28 决策者裁定）**
+**✅ 首跑全量训练已跑完：管线可用性已证实**（plan 07 §9-61）
 
-- **G2（打乱标签对照）整体删除**：「单批 100 步速度赛」在真实批上判别力未被证明（逐批 verdict 翻转、置换 nuisance、跨进程漂移；证据 RFC-0036 §1-§2 + plan 07 §9-54/§9-55）。门禁现为 **G1/G3/G4 三道**。BasePlan §9、CLAUDE 红线 7、AGENTS §4 已同步修宪。
-- **「输入对目标零信息」的命题改由 val 在线对照承担**：`val/nll_shuffled_delta`（**线内置换**、线数归一、128 held-out 窗）+ `val/ratio` + `cond_*_delta`。**判读红线**：任一 val 点 `val/ratio >= 1` 或 `val/nll_shuffled_delta <= 0` ⇒ 该 run 的扩规模结论**作废**。
-- **训练损失改为 per-event 归一**：`L = [Σ_有效线((1/r)Σ_被遮盖 −n·log λ + ∫λdV)] / max(E_total, 1)`，**整式相除**（只除事件项会把最优强度缩小 D 倍——已写进 docstring 与单测）。argmin 逐位不变；改变的只是步间量级。实测旧口径 `loss ≈ 2.24·K^0.055·E^0.93`（R²=0.74）⇒ 锯齿是测度结构，新口径下才可读。
-- **附带指标**：`loss_sum_raw`（旧 sum 口径，跨本次变更对照用）、`loss_nonempty_per_event`（主趋势）、`clip_active`（裁剪触发 0/1；旧 run 实测 56.4% 的步触发、裁剪前中位范数 316）。
-- **门禁臂固定 fp32**（原 P0）；**val 置换改线内**（原 P1，吸收 RFC-0036 结论）。
-- ⚠️ **跨本次变更不可比**：loss 数值、旧 `gates.txt` 的 G2 行、旧 checkpoint 一律不得混用；**不跨此变更 `--resume`**（GatesConfig 字段变化会让续训指纹 fail-closed，属预期）。
-- 护栏：`tests/unit/generation/test_loss_per_event.py`（含**梯度恰差 1/D** 的 argmin 不变量）、`tests/unit/infra/test_shuffle_within_line.py`（五契约）、`tests/unit/infra/test_gate_assembly.py`（装配 + fp32）。
+- `runs/phigros_masked/20260928-144342`：**20 000 步、exit 0、零卡死**，墙钟 **97.3 min**。
+- 门禁 **G1/G3/G4 全绿**（3.5 min）；谱面覆盖 **6614/6614 = 100%**（RFC-0034 的全局发牌在长跑里成立）。
+- `data_share` 中位 **2.9%**（窗口缓存把数据侧移出关键路径；原路径 46%）；`vram_reserved_gib` 中位 1.23 GiB / max 1.53 GiB（显存卫生生效）。
+- 权重：`best.pt` = **step 2000**（按 `val/ratio` 选），另有 step-16000/18000/20000。
 
-**✅ 数据侧全部就绪**（真实语料 `data/processed/`，不入库）
+**⚠️ 但它是一次「零进展」的 run ⇒ 依 RFC-0037 R1 该 run 的扩规模结论作废（处置待裁定）**
 
-| 项 | 实测值 |
-|----|--------|
-| 谱面 / 音频 / note | 8551 张 RPE；42.8 GB / 8084 唯一音频；note 1107 万 |
-| MERT 特征 | 8551 行全量、`frame_rate = 75.0 Hz`（契约派生）；索引缓存 train / val 均已落盘命中 |
-| **窗口预切缓存（本轮建成 + 终验通过）** | train **634 952 窗 / 353.6 GB**（`train/aa677031c17e3a3d`，11.4 h）+ val **74 889 窗 / 41.7 GB**（`val/fac0448693925c86`，1.2 h）；指纹与事前计算一致、`.partial` 残留 0；**逐位一致 400/400 + 100/100**；读取 **95.2 / 76.2 窗/s**（原路径 81× / 65×）⇒ plan 07 §9-54⑮ |
-| 重建参数（如需重建照抄） | `beatmorph-build-windows --config-name phigros_masked --jobs 12 --shard-windows 512 --chart-cache-size 2 --feature-cache-size 1`（+`--split val` 再跑一次；**12 进程是拐点**，20 进程更慢且吃内存） |
+| 事实 | 实测 |
+|------|------|
+| 训练饱和 | 非空窗 per-event 损失按 2000 步分块的**中位 9.52 → 10.24（10 块无趋势）**；`val/ratio` 最优停在 **step 2000（0.7292）**，之后 18 000 步**无一超过** |
+| 红线 | 20 个 val 点里 **`val/ratio >= 1` 只有 1 个**（step 3000 = 1.0033，其余 0.73–0.97）⇒ **作废**；`val/nll_shuffled_delta` **20/20 > 0**（+0.688）⇒「输入有信息」未破 |
+| **量具限度** | `val_ratio` 残差 sd **0.067** ≈ 全程漂移 0.13（t = 1.73 不显著）；val 只有 **498 事件 / 57.8% 空窗**，空窗对 `val_nll` 恰好贡献 0 ⇒ **红线判据检验力不足** |
+| **音频条件** | 帧轴置换 Δ **≤ 0.6%**、置零 Δ ≤ 6%，而事件轨置零 Δ 4.6–30%（占 `val_nll` ≈ 1.06）⇒ **当前目标没有奖励模型使用音频**（未消融，勿读作「音频没用」） |
+| val 成本 | Σ val = **2234.9 s = 墙钟 38.3%**（单次 73–190 s，跨墙）；val 后第一步稳定慢 **6–70×** |
 
-**⚠️ 首次全量训练遇到显存事故 → 已修复并重启（★ 需要人工盯）**（plan 07 §9-57）
+**✅ RFC-0037 已裁定并落地（G1/G3/G4 + per-event 损失）**：门禁 G2 整体删除（BasePlan §9 / CLAUDE 红线 7 / AGENTS §4 已修宪）；训练损失**整式除以 `max(E_total,1)`**（argmin 逐位不变）；新增 `loss_sum_raw` / `loss_nonempty_per_event` / `clip_active`；门禁臂固定 fp32；val 置换改**线内**。⚠️ **跨此变更不可比**：损失数值、旧 `gates.txt` 的 G2 行、旧 checkpoint 一律不混用，**不跨此变更 `--resume`**。
 
-事故（`runs/phigros_masked/20260928-142108`）：门禁绿、训练到 **step 950** 正常，**step 951 卡死**；
-驱动侧显存 **7874/8151 MiB**、功耗 **102→31 W**、util 仍 100% = **滑进 Windows 共享显存**
-（决策者观测到共享内存 **13.2 GB**）。**根因**：K≈128 的批把 torch 峰值顶到 5.23 GiB，
-加 CUDA 上下文/workspace/**分配器碎片**后驱动侧贴顶；第七轮「K=128 亦可训」是**分配器口径**，
-**不适用于全量长跑**（该结论已更正）。
+**✅ 数据侧就绪**：8551 张 RPE / 8084 唯一音频 / 1107 万 note；MERT 8551/8551 @ 75.0 Hz；窗口 **train 634 952 + val 74 889**；**窗口预切缓存已建成并终验通过**（353.6 + 41.7 GB、逐位一致 400/400 + 100/100、读取 95.2 / 76.2 窗/s）。重建照抄：`beatmorph-build-windows --config-name phigros_masked --jobs 12 --shard-windows 512 --chart-cache-size 2 --feature-cache-size 1`（`--split val` 再跑一次；12 进程是拐点）。
 
-**已落地（不改训练语义）**：`optim.vram_hygiene_gib=1.0`（每步把「保留但空闲」的缓存还给驱动，
-新增遥测 `vram_reserved_gib`——**这是本机唯一真正生效的杠杆**）；`val_batch: 8→4`；
-⚠️ `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` 在 **Windows 上是 no-op**（torch 启动即警告
-`not supported on this platform`）⇒ 先前「它让峰值更低」的判断**已更正**（那只是步构成不同）；**看门狗已按决策者要求撤下**（他人工盯并主动通知，
-不要自动杀进程——v1 曾因跨 run 的步号基准误杀一次健康运行，见 plan 07 §9-57 事故 2）。
+**⚠️ 长跑运维的三条实测结论（不要推翻）**
 
-**当前正在跑**：`runs/_full_train3.log` / run 目录 `runs/phigros_masked/20260928-144342`
-（无看门狗）。门禁 3.5 min 绿；**已跨过上次卡死的 step 951，跑到 step 3350+ 未再卡死**
-（`vram_reserved_gib` 最大 1.53 GiB ⇒ 卫生回收生效）。⚠️ **但驱动侧常态贴顶**（大 K 步与
-**val 全程** 7824/8151 MiB、功耗 30-65 W 摆动）——见下。
+1. `optim.vram_hygiene_gib=1.0` 是**本机唯一真正生效的显存杠杆**；`PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` 在 **Windows 上是 no-op**（torch 启动即警告），不要指望它。
+2. **跨墙 ≠ 卡死**：step 951 那次（共享 13.2 GB、功耗 31 W 不回来）是卡死；**val 每轮都跨墙**（共享 5.6 GB、功耗 30–65 W 摆动）但**会在 100–190 s 内自己恢复**。⇒ 停机判据（`nvidia-smi` 的 `memory.used > ~7.4 GiB` 或 `power.draw < 45 W` 且显存 > 5 GiB）**只适用于训练步**，动手前先看日志尾部确认不在 val 段。
+3. **不要自建自动杀进程的看门狗**：v1 因跨 run 的步号基准误杀过健康运行（plan 07 §9-57 事故 2）；决策者要求**人工盯 + 主动通知**。
 
-**⚠️ val 三点：前两点过、step 3000 判读红线被破**（`plan 07 §9-58`/`§9-59`/`§9-60`）：
-`val/ratio = 0.7521 → 0.7292 → **1.0033**`（≥1 = 破线）、`nll_shuffled_delta = +0.7351 → +0.7686
-→ +0.6228`（>0 未破）、`pred/true = 0.345 → 0.539 → **0.0816**`。⇒ 按 RFC-0037 R1 **该 run 的扩规模
-结论作废**（「输入有信息」未推翻，被推翻的是「优于常数场」）；训练侧同向变坏（非空窗 per-event 7-8 →
-15.69 @2800）⇒ **真实退化**、签名是**强度场塌缩**。**处置待裁定**（既定规则：停并开新 RFC）。
-`best.pt` 仍停在 step 2000。
-
-**⚠️ val 确实跨墙（更正上一轮）**：决策者观测共享显存 **5.6 GB**，训练**未崩、只是变慢**；三次 val
-输入**逐字段相同**（128 窗 / 5081 线 / 498 事件）而墙钟在 **100.52 / 167.58 / 120.81 s** 摆动 ⇒ 增量
-只能来自内存路径。**「跨墙 = 卡死」不成立**（step 951 是卡死；val 是变慢且会回来）。附带：
-`clip_active` = **100%**；`data_time_s` 中位 **2.7 ms**（窗口缓存 85×）。
-
-**监控指引（人工）**：
-
-```powershell
-Get-Content runs\_full_train3.log -Tail 20                      # 门禁 → 训练启动
-Get-Content runs\_full_train3_gpu.csv                           # 无；用下一行代替
-nvidia-smi --query-gpu=memory.used,power.draw,utilization.gpu --format=csv,noheader
-```
-
-- **停机判据（驱动侧，务必用 `nvidia-smi`）**：`memory.used > ~7.4 GiB` 或 `power.draw < 45 W`
-  而显存 > 5 GiB ⇒ **立刻停**（`Get-Process python | Stop-Process -Force`），不要「再跑一会儿」。
-  ⚠️ **先排除「正在跑 val」**：val 段**常态**跨墙（实测 7824 MiB / 30.6 W，§9-59）且会在 100-170 s
-  内自己恢复；val 期间不写 jsonl。**停之前先 `Get-Content runs\_full_train3.log -Tail 3`，
-  看到刚出现 `val @step` 行就不要按停机判据动手。**
-- 曲线看 `runs/phigros_masked/<新时间戳>/logs/loss_history.jsonl`：`loss` 现为 **per-event 口径**，
-  与历史 run 不可比（用 `loss_sum_raw` 对照）；盯 `clip_active`、`vram_reserved_gib`、`step_time_s`、`data_time_s`。
-- **val 红线（RFC-0037 R1）**：step 1000 起每个 val 点必须 `val/ratio < 1` 且 `val/nll_shuffled_delta > 0`，
-  否则该 run 的扩规模结论**作废**（`val_time_s` 同时给出 val 真实墙钟——此前是推导值）。
-- **共享显存回退的下一层杠杆**：**训练侧**给批 K 设上限（跳过 K > 预算的窗口，**改变数据分布，须裁定**）；
-  **val 侧**则按显存预算**拆桶**（不改集合与指标语义，§9-59）——**两者别混**。**不要**再自建自动杀进程的看门狗。
-
-**首跑三观察点均已作答**：① `clip_active` 实测仍 **100%**（归一化**没有**解决裁剪常触发，RFC-0037 §6-1）；
-② `val/ratio` 前两点降、第三点**破 1**；③ `val/nll_shuffled_delta` **始终 > 0**。
+**若继续长跑（在 RFC-0038 裁定之前不要改任何训练语义）**：盯 `runs/_full_trainN.log` 与 `runs/phigros_masked/<时间戳>/logs/loss_history.jsonl` —— `loss` 是 **per-event 口径**（与历史 run 不可比，用 `loss_sum_raw` 对照），要看 `clip_active`（当前非空步 **100%** 触发）、`vram_reserved_gib`、`step_time_s` / `data_time_s`。⚠️ `metrics.json` 的 `best_loss` 与摘要里的 "best 0.000009" 是**误导性统计**（单步最小值落在空窗步上），**不要用它选权重**。
 
 ### 下一步（按性价比排序，只留仍然有效的）
 
-1. **裁定 val@3000 破线后的处置**（§9-60）：按既定规则停并开新 RFC，还是观察到 step 4000 再判——
-   **须决策者裁定**；同时确认 `best.pt`（step 2000）作为当前最好权重保留。
-2. **压 val 成本 + 补 val 遥测**（§9-59）：① 按显存预算拆大 K 桶（**须裁定**，不改 val 集合与指标语义）；
-   ② 补 `val_peak_vram_gib` 与 val 起止日志行（跨墙现在不可见）。`val_every` 只压频率，不能替代 ①。
-3. **评估入口未接线**（形态已定＝独立 `beatmorph-eval`），待训练产出 checkpoint。
+1. **裁定 [RFC-0038](docs/decisions/RFC-0038-training-saturation-and-budget.md) 的 Q1–Q6**（预算收敛 / 对照臂降频 / val 检验力 / 探针是否批准 / 停机规则 / 权重确认）——**唯一阻塞项**。
+2. 按裁定执行：**R1** `max_steps` 20000→4000、`val_every` 1000→500（两者都**不进续训指纹**）；**R2** 新增 `optim.val_contrast_every`（红线指标每次都跑，3 个条件臂降频）；**R3** val 检验力二选一（512 窗 ／ 红线改趋势判据＝**修宪**）。
+3. **探针（若 Q4 批准）**：可学性上界（固定 16 个真实窗跑 2000 步）／`lr` 3 臂（3e-4 / 1e-4 / 3e-5，各 1500 步）／音频通路梯度占比。**不改生产代码、不改损失**；这是分清「学完了」与「学不动」的唯一路径。
+4. **评估入口接线**：形态已定＝独立 `beatmorph-eval`（仍未实现），待后续 checkpoint。
 
 ### 未决项（不阻塞 1–4）
 
 | 未决 | 出处 |
 |------|------|
-| **批 K 上限**（**val 已实际回退共享内存** ⇒ 该杠杆已到启用条件；val 侧建议「按预算拆桶」而非跳窗，**须裁定**） | plan 07 §9-57 / §9-59 |
-| **`grad_clip_norm=1.0` 在 per-event 损失下是否仍合适**（旧 run 56.4% 的步触发、裁剪前中位 316 ⇒ 归一化梯度形态）——先看 `clip_active` 率再议 | RFC-0037 §6-1 / plan 07 §9-55 |
-| **`val/nll_shuffled_delta` 的 margin 未标定**（现阶段只有符号判据 > 0） | RFC-0037 §6-2 |
-| **G1 绝对下限 0.05 的 per-event 语义未标定**（相对判据主导，暂不阻塞） | RFC-0037 §6-3 |
-| **val 开销要不要再压**（单次实测 100-168 s、**跨墙**；`val_every=4000` 只压频率） | plan 07 §9-59 |
-| **`val_windows=128` 的构成未收敛**（空窗占比 51.6%→59.0%） | plan 07 §9-51 ⑤ |
+| **平台是「学完了」还是「学不动」**（不可约熵 vs 优化器/目标）——**现有数据分不开**，只能靠探针 | plan 07 §9-61 |
+| **音频为何不被用**（LoRA 没更新 / 注入路径弱 / 目标不需要）——未分离 | plan 07 §9-61 ③ |
+| **val 检验力与红线判据口径**（498 事件、57.8% 空窗、sd 0.067） | RFC-0038 Q3 |
+| **`val/nll_shuffled_delta` 的 margin 未标定**（只有符号判据 > 0） | RFC-0037 §6-2 |
+| **`grad_clip_norm=1.0` 在 per-event 损失下是否仍合适**（非空步 **100%** 触发，有效更新 ≈ `lr·g/‖g‖`） | RFC-0037 §6-1 |
+| **G1 绝对下限 0.05 的 per-event 语义未标定** | RFC-0037 §6-3 |
+| **val 预算模型偏 3–5×**（schema 写 0.09 s/窗/臂 ⇒ 37 s，实测 0.157–0.26 ⇒ 100–190 s） | plan 07 §9-59 / §9-61 |
+| **批 K 上限**（val 已实际跨墙；val 侧建议按预算拆桶而非跳窗，**须裁定**） | plan 07 §9-59 |
 | **RFC-0035 §1 的 91.3%/9.9% 未更正**（实测 46%/54%）⇒ M0/M1/M2 优先级需重排 | RFC-0035 / plan 07 §9-52 |
 | **`r == 0` 遮盖退化要不要改遮盖策略**（≈1.0% 的全部步） | plan 07 §9-43 |
 | **训练预算是否从「步数」改成「epoch 数」** | RFC-0033 |
 | **评估 / 可玩性**：NLL 好 ≠ 谱面可玩 | plan 07 §9-47 H |
 | **装饰线是否 / 如何从 λ 线轴去掉** —— 已定「用旁路、后续扩展」 | RFC-0032 |
 
-**一次性探针（⚠️ `scripts/local_*` 与 `runs/_*` 均不入库，清理即丢）**：缓存终验 `local_cache_validate.py`（`--split/--reuse/--sample/--rows`）、损失波动归因 `local_loss_stability.py`（对 `logs/loss_history.jsonl` 做量级标度律 + 尖峰检测）、`local_build_profile.py`、`local_inorder_ab.py`、`local_worker_sweep.py`、`local_bucket_survey.py`、`local_plan_runs.py`、`local_cache_fingerprint_check.py`；**G2 诊断套件 `local_g2_*.py` 已随 RFC-0037 退役**（保留在磁盘仅供追溯，勿再引用其 verdict：其判据是探针简式 `real*1.05`，不是生产判据）。⚠️ `scripts/local_chart_mem.py` **坏了**（`deep_bytes` 漏 pydantic `__slots__`，读数偏低 1.85×）。⚠️ 长跑重定向探针的输出**只用 ASCII `=>`**（`⇒` 在 GBK 重定向下 `UnicodeEncodeError` 崩掉打印、吞掉结果）。
-
+**一次性探针（⚠️ `scripts/local_*` 与 `runs/_*` 均不入库，清理即丢）**：`local_cache_validate.py`（`--split/--reuse/--sample/--rows`）、`local_loss_stability.py`（量级标度律 + 尖峰检测）、`local_build_profile.py`、`local_inorder_ab.py`、`local_worker_sweep.py`、`local_bucket_survey.py`、`local_cache_fingerprint_check.py`；本轮读数脚本 `runs/_analyze_*.py`。**G2 诊断套件 `local_g2_*.py` 已随 RFC-0037 退役**（判据是探针简式 `real*1.05`，勿引用其 verdict）。⚠️ `scripts/local_chart_mem.py` **坏了**（`deep_bytes` 漏 pydantic `__slots__`，偏低 1.85×）。⚠️ 长跑重定向探针的输出**只用 ASCII `=>`**（`⇒` 在 GBK 重定向下崩溃、吞掉结果）。
 
 ## 为什么是 Phigros
 

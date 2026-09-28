@@ -120,10 +120,6 @@ def repo_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
-def _default_venv_root() -> Path:
-    return Path(sys.prefix)
-
-
 # ══════════════════════════════════════════════════════════════
 # E1 解释器归属
 # ══════════════════════════════════════════════════════════════

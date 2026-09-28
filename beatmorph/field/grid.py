@@ -97,16 +97,6 @@ class BpmSegment:
         """J = dt/dtau = SECONDS_PER_MINUTE / bpm（秒/拍），段内常量。"""
         return SECONDS_PER_MINUTE / self.bpm
 
-    @property
-    def beat_span(self) -> float:
-        """段内拍数（最后一段为 +inf）。"""
-        return self.tau_end - self.tau_start
-
-    @property
-    def seconds_span(self) -> float:
-        """段内秒数（最后一段为 +inf）。"""
-        return self.beat_span * self.seconds_per_beat
-
 
 def bpm_segments(bpm_points: Sequence[BpmPoint]) -> tuple[BpmSegment, ...]:
     """把 BPMList 解析成**补全到整个 tau 轴**的分段常量 J。

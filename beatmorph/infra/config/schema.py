@@ -200,6 +200,12 @@ class DataConfig:
     tau_end_policy: str = "audio"
     chart_cache_size: int = 8
     feature_cache_size: int = 2
+    #: 窗口预切缓存的根目录（`beatmorph-build-windows` 的产物）。None = 关闭（走原解析路径）。
+    #:
+    #: 开启后每窗口从 **0.85 s → 9.6 ms**（实测，见 plan 07 §9-52），且**样本逐位不变**；
+    #: 指纹不符 / 目录缺失一律回退到原路径，绝不静默降级。
+    #: **语义无关字段**：它只改「窗口怎么被读出来」，不改顺序、不改覆盖率、不改任何数值。
+    window_cache_dir: str | None = None
     #: 取样本的 DataLoader worker 进程数（0 = 主进程同步取批）。
     #: **语义无关字段**（RFC-0034 §5）：顺序与覆盖率都是「计划层」的纯函数，与 workers
     #: 取值无关 ⇒ 它不参与续训指纹（见 `checkpoint.RESUME_IGNORED_KEYS`），
@@ -213,7 +219,32 @@ class DataConfig:
 
 @dataclass(slots=True)
 class OptimConfig:
-    """优化器与训练步数。"""
+    """优化器与训练步数（含 val 的节奏与规模）。
+
+    **val 的成本算式（plan 07 §9-47 E；实测算式见 §9-51）**
+
+    单窗口 ≈ 数据 0.038 s（worker 路径；workers=0 时 0.85 s，贵 20 倍）
+    + 纯前向 ~0.05 s ≈ **0.09 s**。约束：
+
+        val_windows × 0.09 × 前向臂数 ≤ 5% × val_every × 0.199
+
+    其中 0.199 s 是当前真实训练的步时（§9-45）。**前向臂数**是关键：§9-47 D 要求
+    对照臂（遮盖内置换 1 次 + 条件干预三元组 3 次）在**同一批**上各跑一次前向
+    ⇒ 生产默认是 5 个臂，不是 1 个。
+
+        val_every=1000、val_windows=128：单臂 11.5 s；5 臂 ≈ 37 s / 199 s ≈ **18.6%**
+
+    ⚠️ **上式仍然偏乐观，落地后实测/推导校正见 plan 07 §9-51 ③**：
+
+    - 数据侧单窗口**实测** 0.12-0.28 s（不是 0.038 s）：val 前缀的 128 个槽位落在
+      93 张谱、**128 个不同网格桶**上 ⇒ 每个窗口都是一次冷解析，且各自成桶 ⇒ B=1；
+    - val 前缀的 K 分布比训练流重（p90 **106** vs 53-67），而前向 ∝ K²；
+    - ⇒ 按 K² 律**推导**一次 val ≈ **143-293 s**（5 臂）≈ 训练预算（199 s/1000 步）的
+      **0.7-1.5×**，不是 5.8%。
+
+    ⇒ 本字段只声明**窗口数**，节奏由 val_every 给；要压回 5% 量级需要决策者裁定
+    （`val_windows≈32` / `val_every≈4000` / 对照臂降频，见 §9-51 ③ 与存疑清单）。
+    """
 
     lr: float = 3e-4
     weight_decay: float = 0.01
@@ -221,7 +252,23 @@ class OptimConfig:
     grad_clip_norm: float = 1.0
     batch_size: int = 1
     max_steps: int = 1000
+    #: val 的周期（步）；0 = 不跑 val（此前的默认状态：`val_every` 存在但**空转**）。
+    #: ⚠️ 它**不参与续训指纹**（见 `checkpoint.RESUME_IGNORED_KEYS`）：val 不产生梯度、
+    #: 不参与 LR 与早停（§9-47 G-④）⇒ 改它不改变任何被训练的东西，只改变「多久看一次」。
     val_every: int = 100
+    #: 验证集窗口数：从 `split_val` 的计划（`plan_epoch(..., epoch=0)`）里**按网格桶成组**
+    #: 取 N 个窗口，每 `val_every` 步原样重放（同窗口 + 同遮盖种子 ⇒ 逐位一致，§9-47 A1）。
+    val_windows: int = 128
+    #: 每个验证批最多放几个窗口（**同一网格桶**内的窗口才可同批）。
+    #:
+    #: 为什么需要它（§9-53，实测）：计划是跨桶轮转发牌的，取「前 N 个槽位」会让 N 个窗口落在
+    #: **N 个不同桶** ⇒ 每个窗口各自成 batch（B=1）× N 次前向。而前向成本 ∝ K²
+    #: （global 层对 L=K·T 做全自注意力）⇒ B=1 时是 Σf(K_i)，B=8 时是 Σf(max K_i)。
+    #: 实测 val 前缀 **ΣK² = 422 139**（K 中位 30.5 / p90 106）⇒ 同桶成组后**同样的窗口数**、
+    #: 前向成本约降 `val_batch` 倍，而**指标语义不变**（`reduction="mean"` 按有效线加权，
+    #: 填充线的 `line_mask=False` 被排除；`ValAccumulator` 亦按有效线聚合）。
+    #: 不改梯度、不进续训指纹（同 `val_windows`）。
+    val_batch: int = 8
     precision: str = "bf16-mixed"
     seed: int = 0
 
@@ -419,6 +466,10 @@ def validate_config(cfg: TrainConfig) -> list[str]:  # noqa: PLR0912, PLR0915 - 
         problems.append(f"optim.betas 必须是两个 [0,1) 内的数，得到 {optim.betas}")
     if optim.val_every < 0:
         problems.append(f"optim.val_every 必须 >= 0，得到 {optim.val_every}")
+    if optim.val_windows < 1:
+        problems.append(f"optim.val_windows 必须 >= 1，得到 {optim.val_windows}")
+    if optim.val_batch < 1:
+        problems.append(f"optim.val_batch 必须 >= 1，得到 {optim.val_batch}")
 
     run = cfg.run
     if run.log_every < 1:

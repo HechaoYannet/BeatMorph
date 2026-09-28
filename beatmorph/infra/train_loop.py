@@ -29,17 +29,26 @@ from collections import deque
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, ClassVar, Protocol
 
 import torch
 from torch import nn
 
 from beatmorph.core.logging import get_logger
+from beatmorph.eval.val_metrics import (
+    ReweightMode,
+    ValAccumulator,
+    full_event_nll,
+    masked_nll,
+    masked_readout,
+)
 from beatmorph.field.grid import FieldGrid
 from beatmorph.field.integrate import omega
 from beatmorph.field.loss import constant_baseline_nll
-from beatmorph.generation.batch import FieldBatch
+from beatmorph.generation.batch import FieldBatch, FieldOutput
+from beatmorph.generation.losses import integral_term, masked_poisson_loss
 from beatmorph.generation.model import MaskedFieldModel
 from beatmorph.infra.artifacts import RunArtifacts, git_rev
 from beatmorph.infra.checkpoint import (
@@ -54,19 +63,25 @@ from beatmorph.infra.sanity import StepFn
 from beatmorph.infra.smoke import shuffle_hidden_counts, shuffled_counts
 
 __all__ = [
+    "SCALAR_TAGS",
     "BatchSource",
     "ManifestBatchSource",
+    "ManifestValSource",
     "TrainReport",
+    "ValBatchSource",
     "autocast_context",
     "autocast_dtype",
     "betas_of",
     "build_gate_inputs",
+    "condition_contrasts",
     "constant_baseline_for",
     "draw_until_min_events",
+    "evaluate_val",
     "event_total",
     "make_step_fn",
     "model_from_config",
     "set_initial_head_bias",
+    "stratified_step_loss",
     "train",
     "write_scalars",
 ]
@@ -79,6 +94,105 @@ logger = get_logger("infra.train_loop")
 
 #: 过程标量的落盘文件名（jsonl；健康检查脚本与 TB 都读它）。
 HISTORY_FILENAME: str = "loss_history.jsonl"
+
+#: jsonl 键 -> TB 标签的**唯一**映射（val 指标 / 分层损失 / 条件对照臂 / 积分比）。
+#:
+#: 为什么集中在一处：这两条落盘路径（jsonl 是权威、TB 服务人力监控）一旦各写一份名字，
+#: 就会漂成两套口径——而「看的曲线不是记的数」是本项目已经付过代价的那类失效。
+#: 键的**产出方**是 `ValAccumulator.scalars()`（`val_*` / `cond_*`）与
+#: :func:`stratified_step_loss`（`loss_empty` 等）；`tests/unit/infra/test_val_path.py`
+#: 断言产出方给出的每个键都在本表里（漂移即测试失败）。
+SCALAR_TAGS: Mapping[str, str] = {
+    # ── 训练侧分层（plan 07 §9-46 / §9-47 I：量具修复，不改损失数学）──────────
+    "integral_per_event": "train/integral_per_event",
+    "loss_empty": "train/loss_empty",
+    "loss_nonempty": "train/loss_nonempty",
+    "empty_share": "train/empty_share",
+    "nonempty_share": "train/nonempty_share",
+    # ── val（plan 07 §9-47 C/D）────────────────────────────────────────────
+    "val_time_s": "val/time_s",
+    "val_windows": "val/windows",
+    "val_lines": "val/lines",
+    "val_nll": "val/nll",
+    "val_nll_constant": "val/nll_masked_constant",
+    "val_ratio": "val/ratio",
+    "val_nll_empty": "val/nll_empty",
+    "val_nll_nonempty": "val/nll_nonempty",
+    "val_integral": "val/integral",
+    "val_events": "val/events",
+    "val_pred_over_true": "val/pred_over_true",
+    "val_empty_share": "val/empty_share",
+    "val_r0_share": "val/r0_share",
+    "val_nll_shuffled": "val/nll_shuffled",
+    "val_nll_shuffled_delta": "val/nll_shuffled_delta",
+    "val_nll_full_event": "val/nll_full_event",
+    # ── 条件干预三元组（plan 07 §9-46 ③：唯一能回答「音频条件有没有被用上」的手段）──
+    "cond_audio_zero_delta": "cond/audio_zero_delta",
+    "cond_audio_perm_delta": "cond/audio_perm_delta",
+    "cond_track_zero_delta": "cond/track_zero_delta",
+}
+
+#: val 批内置换标签（G2 同口径）的种子偏移；与 G2 用同一个常量，便于对照。
+VAL_SHUFFLE_SEED_OFFSET: int = 991
+
+
+@dataclass(frozen=True, slots=True)
+class SlotTag:
+    """一个批次的**计划槽位终点**标签（随批穿过 DataLoader 的 worker 边界）。
+
+    为什么需要它：`DataLoader(in_order=False)` 是修掉队头阻塞的唯一开关（见
+    :meth:`ManifestBatchSource._batches_parallel`），但它同时让**交付顺序变成任意排列**
+    ——而 `_cursor` 是「计划前缀长度」这一个标量（覆盖率 / 续训定位 / `data.workers`
+    语义中性全由它保证）。没有标签就只能假设按序交付，而那正是要拆掉的假设。
+    """
+
+    stop: int
+
+
+class _SlotTaggedDataset(torch.utils.data.Dataset[object]):
+    """把 `batch_sampler` 挂在批首的**槽位令牌**翻译出来，其余下标原样转发。
+
+    `_indices()` 产出的每个 index 列表形如 `[-stop-1, 窗口下标...]`：首元素用**负编码**
+    表示本批的槽位终点（`-stop-1` 与合法的非负窗口下标不可能冲突），本类把它翻译成
+    :class:`SlotTag`；其余元素直接落到真正的数据集上。
+
+    为什么要绕这一圈：`DataLoader` 的 worker **只**能把 `dataset[...]` 的返回值带回
+    主进程，`batch_sampler` 本身不随批次返回（torch 的 `_task_info` 私有且不暴露下标）。
+    把槽位挂在样本列表首位，是让「批 ↔ 槽位」穿过进程边界的最短路径。
+
+    Note:
+        内层数据集的 `__getstate__` / `__setstate__`（`ChartPairDataset` 靠它剥掉 worker
+        不该拿的派生状态）由 pickle **递归**调用，本类不需要转发。
+    """
+
+    def __init__(self, inner: torch.utils.data.Dataset[Any]) -> None:
+        self._inner = inner
+
+    def __len__(self) -> int:
+        return len(self._inner)  # type: ignore[arg-type]
+
+    def __getitem__(self, token: int) -> object:
+        if token < 0:
+            return SlotTag(stop=-token - 1)
+        return self._inner[token]
+
+
+def _collate_with_slot(
+    base_collate: Callable[[Sequence[Any]], Any], items: Sequence[Any]
+) -> tuple[int, Any]:
+    """摘下批首的 :class:`SlotTag`，把其余样本交给真正的 collate。
+
+    为什么用 `functools.partial` 而不是闭包：`collate_fn` 要被子进程按「模块 + 限定名」
+    **重新导入**（Windows 上 `DataLoader` 走 spawn），闭包不可 pickle；`partial` 会把
+    `base_collate` 也按引用 pickle，因此测试里 monkeypatch 的 stub collate 同样能在
+    worker 进程里被正确还原（`tests/unit/infra/test_plan_batches.py`）。
+    """
+    if not items or not isinstance(items[0], SlotTag):
+        raise TypeError(
+            "取批路径缺少 SlotTag：batch_sampler 与 _SlotTaggedDataset 不配套"
+            f"（首个元素是 {type(items[0]).__name__ if items else '空序列'}）"
+        )
+    return int(items[0].stop), base_collate(items[1:])
 
 
 class BatchSource(Protocol):
@@ -127,6 +241,27 @@ class BatchSource(Protocol):
         后台**预取**下一批（RFC-0034），而冒烟来源照旧逐批合成。`start_step` / `first`
         的口径见 `ManifestBatchSource.batches`。
         """
+        ...
+
+
+class ValBatchSource(Protocol):
+    """验证集来源协议：**固定的一批窗口**，每次调用重放出逐位一致的内容。
+
+    与 :class:`BatchSource` 分开的理由：训练来源是**无限流**、带覆盖率记账、每步不同；
+    验证集是**有限的、固定的、可重放**的一批（plan 07 §9-47 A）。把两者混在一个协议里，
+    「val 不得变成训练信号」（§9-47 G-④）就会退化成一句口号——val 来源**没有**任何写入口。
+    """
+
+    def batches(self) -> Iterator[FieldBatch]:
+        """按计划顺序产出验证批（每次调用**重放同一批**：同窗口、同遮盖、逐位一致）。"""
+        ...
+
+    def describe(self) -> str:
+        """一行来源说明（落进训练日志，交代 val 集是什么）。"""
+        ...
+
+    def windows(self) -> int:
+        """验证集的窗口数（成本算式里的 N；见 `OptimConfig.val_windows`）。"""
         ...
 
 
@@ -307,6 +442,139 @@ def constant_baseline_for(batch: FieldBatch) -> float:
         raise ValueError("常数基线需要 batch.counts")
     n_events = float(batch.counts.to(dtype=torch.float32).sum())
     return float(constant_baseline_nll(n_events, omega(batch.grid, n_lines=batch.n_lines())))
+
+
+#: 条件干预臂的名字（落进 `cond_*_delta`；§9-46 ③ 的三元组，逐字对应）
+CONDITION_ARMS: tuple[str, ...] = ("audio_zero", "audio_perm", "track_zero")
+
+
+def condition_contrasts(batch: FieldBatch, *, seed: int) -> list[tuple[str, FieldBatch]]:
+    """条件干预三元组：**同批、同权重**的前向差分（plan 07 §9-46 ③）。
+
+    为什么必须有它：TB 里此前的**全部**比较都是「条件在场 vs 条件在场」，因此
+    「音频条件有没有被用上」在这个项目里从来没有过证据（§9-46 的结论）。三个臂分别是：
+
+    - `audio_zero`：把音频特征置零（模型只能靠事件轨与遮盖几何）；
+    - `audio_perm`：把音频**时间轴**置换（保留边缘分布、破坏时间对齐）——
+      它比置零更狠：置零可以被「没有音频」这一分布外输入掩盖，置换则始终在分布内；
+    - `track_zero`：把判定线事件轨置零（模型只能靠音频）。
+
+    三者都是**同一批窗口**上的 `no_grad` 前向，Δ = NLL(干预) - NLL(基线)：
+    Δ > 0 表示该条件**降低了**损失（被用上了）；Δ ≈ 0 表示模型没在看它。
+
+    Note:
+        置换只动**帧轴**（`dim=1`），τ 轴与目标一格不动 ⇒ 差分只反映条件的作用
+        （秒/τ 换算不在此处实现，红线 7）。
+    """
+    from dataclasses import replace
+
+    zero_audio = replace(batch, audio_emb=torch.zeros_like(batch.audio_emb))
+    generator = torch.Generator().manual_seed(int(seed))
+    order = torch.randperm(int(batch.audio_emb.shape[1]), generator=generator)
+    permuted = replace(batch, audio_emb=batch.audio_emb[:, order, :].contiguous())
+    extended = None if batch.extended_tracks is None else torch.zeros_like(batch.extended_tracks)
+    zero_tracks = replace(
+        batch,
+        line_tracks=torch.zeros_like(batch.line_tracks),
+        extended_tracks=extended,
+    )
+    return list(zip(CONDITION_ARMS, (zero_audio, permuted, zero_tracks), strict=True))
+
+
+def stratified_step_loss(output: FieldOutput, batch: FieldBatch) -> dict[str, float]:
+    """把**一步的损失**分到「空窗 / 非空窗」两个总体（plan 07 §9-47 B2）。
+
+    为什么这是**量具修复**而不是目标函数修改：loss 是双峰而不是一条曲线——
+    43.8% 的空窗中位 **6.5e-4**、56.2% 的非空窗中位 **96**，差五个数量级，而空窗的
+    loss **恒等于积分项** ∫λdV（§9-46 实测）。一个把两个总体混在一起的单步数字
+    不携带趋势信息，`best.pt` 因此选中过 step 6234 那个 `events=0, K=1` 的空窗。
+
+    本函数**只读**：它调用的是训练损失**本身**（`reduction="none"`，逐窗口求和后按桶取均值），
+    不改变任何梯度路径（CLAUDE.md §3.1：`masked_poisson_loss` 的语义一个字都不许动）。
+    空桶的键**不出现**（缺失 != 0）：`batch_size=1` 时每一步只有一支有值。
+
+    Returns:
+        形如 `{"loss_empty": ..., "empty_share": ...}` 的标量（键见 :data:`SCALAR_TAGS`）。
+    """
+    if batch.counts is None:
+        return {}
+    per_window = masked_poisson_loss(output, batch, reduction="none").sum(dim=1)
+    events = batch.counts.to(dtype=torch.float32).sum(dim=(1, 2, 3, 4, 5))
+    empty = events <= 0.0
+    windows = max(int(batch.batch_size()), 1)
+    out: dict[str, float] = {
+        "empty_share": float(empty.sum().item()) / windows,
+        "nonempty_share": float((~empty).sum().item()) / windows,
+    }
+    if bool(empty.any()):
+        out["loss_empty"] = float(per_window[empty].mean().item())
+    if bool((~empty).any()):
+        out["loss_nonempty"] = float(per_window[~empty].mean().item())
+    return out
+
+
+def evaluate_val(
+    model: nn.Module,
+    val_source: ValBatchSource,
+    *,
+    device: torch.device,
+    precision: str = "fp32",
+    reweight: ReweightMode = "hidden",
+    seed: int = 0,
+    contrast: bool = True,
+) -> tuple[dict[str, float], float | None]:
+    """跑一遍固定验证集，返回 (落盘标量, `val/ratio`)。
+
+    设计要求（每一条都对应 §9-47 的一条）：
+
+    - **`model.eval()` + `torch.no_grad()`**（A/②）：`dropout=0.1` 必须关掉，否则同一批
+      两次读数不同，「跨步可比」当场失效；结束后**无条件**恢复原来的 train/eval 状态。
+    - **同一批、同一权重**（D）：模型臂与全部对照臂都在**同一批**上跑；对照臂只改
+      **输入**（条件干预）或**标签**（遮盖内置换），不碰权重、不碰优化器。
+    - **不在训练图上**：`no_grad` + `compute_loss=False` ⇒ 没有梯度、没有优化器状态改动，
+      val 因此**不可能**变成训练信号（G-④）。
+    - **不缓存张量**：批由 `val_source` 每次重放（同窗口、同遮盖种子 ⇒ 逐位一致），
+      内存占用与训练同量级，不需要把 128 个窗口的场常驻在内存里。
+
+    Returns:
+        (标量字典, ratio)。ratio 为 None 表示本批没有可比的常数基线（例如全空窗）。
+    """
+    accumulator = ValAccumulator()
+    was_training = bool(getattr(model, "training", False))
+    model.eval()
+    try:
+        with torch.no_grad():
+            for raw in val_source.batches():
+                batch = raw.to(device)
+                with autocast_context(precision, device):
+                    output = model(batch, compute_loss=False)
+                readout = masked_readout(batch, output.lam, reweight=reweight)
+                shuffled_nll: float | None = None
+                if batch.counts is not None and batch.occlusion is not None:
+                    shuffled = shuffle_hidden_counts(
+                        batch, seed=int(seed) + VAL_SHUFFLE_SEED_OFFSET
+                    )
+                    with autocast_context(precision, device):
+                        shuffled_output = model(shuffled, compute_loss=False)
+                    shuffled_nll = masked_nll(shuffled, shuffled_output.lam, reweight=reweight)
+                contrasts: dict[str, float] | None = None
+                if contrast:
+                    contrasts = {}
+                    for name, perturbed in condition_contrasts(batch, seed=int(seed)):
+                        with autocast_context(precision, device):
+                            perturbed_output = model(perturbed, compute_loss=False)
+                        contrasts[name] = masked_nll(
+                            perturbed, perturbed_output.lam, reweight=reweight
+                        )
+                accumulator.add(
+                    readout,
+                    nll_shuffled=shuffled_nll,
+                    nll_full_event=full_event_nll(batch, output.lam),
+                    contrasts=contrasts,
+                )
+    finally:
+        model.train(was_training)
+    return accumulator.scalars(), accumulator.ratio
 
 
 def build_gate_inputs(
@@ -636,6 +904,15 @@ def _flush_scalars(
         grad = float(row["grad_norm"])
         if math.isfinite(grad):
             writer.add_scalar("train/grad_norm", grad, step)
+        # val / 分层 / 条件对照（plan 07 §9-47 A–D、§9-46）：名字只在 SCALAR_TAGS 里写一次。
+        # 非有限的读数（例如 λ ≡ 0 处的全事件 NLL = +∞，那是契约行为）只留在 jsonl 里，
+        # 不进 TB——图上的 ±inf 会把整条曲线压平，而 jsonl 才是权威记录。
+        for key, tag in SCALAR_TAGS.items():
+            if key not in row:
+                continue
+            value = float(row[key])
+            if math.isfinite(value):
+                writer.add_scalar(tag, value, step)
         writer.add_scalar("sys/peak_vram_gib", float(row["peak_vram_gib"]), step)
         # 数据覆盖（plan 07 §9-38）：没有这三条曲线，「采样器饱和」这类静默失效看不见。
         if "windows_total" in row and float(row["windows_total"]) > 0.0:
@@ -693,6 +970,42 @@ def _apply_resume(
     return start_step
 
 
+def _save_best(
+    artifacts: RunArtifacts,
+    cfg: TrainConfig,
+    model: nn.Module,
+    *,
+    step: int,
+    data_rev: str,
+    gates_green: bool,
+    reason: str,
+) -> Path:
+    """刷新最优快照 `best.pt`（**判据由调用方给出**，本函数只负责写盘与留痕）。
+
+    判据的两种口径（plan 07 §9-47 A8，这是本轮的**核心修复**）：
+
+    - **有 val**：按 `val/ratio` 选（`reason="val_ratio=..."`）。旧的「按训练损失选」
+      在本项目里等于「按谁抽到最空的窗来选模型」——实测选中的是 step 6234 那个
+      `events=0, K=1` 的空窗（§9-46）。
+    - **无 val**（val_every=0 / 合成来源）：沿用训练损失口径（向后兼容的旧行为，
+      并在日志里**明说**它不作为模型选择依据）。
+
+    `best.pt` 的写盘时刻是**测出更优判据的那一步**（不随 `run.save_every`）：
+    否则「最优」会落在两个存盘点的中间，而权重只存在于其中一个点上。
+    """
+    path = save_checkpoint(
+        artifacts.checkpoints / BEST_CHECKPOINT_NAME,
+        model=model,
+        cfg=cfg,
+        step=step,
+        data_rev=data_rev,
+        git_rev=git_rev(artifacts.root),
+        gates_green=gates_green,
+    )
+    logger.info("最优快照 best.pt @step %d（%s）", step, reason)
+    return path
+
+
 def _save_step(
     artifacts: RunArtifacts,
     cfg: TrainConfig,
@@ -700,13 +1013,16 @@ def _save_step(
     optimizer: torch.optim.Optimizer,
     *,
     step: int,
-    value: float,
-    best: float,
     data_rev: str,
     gates_green: bool,
     report: TrainReport,
 ) -> Path:
-    """存一个步级 checkpoint（先写后删），必要时刷新最优快照，然后旋转旧文件。"""
+    """存一个步级 checkpoint（**先写后删**），然后旋转旧文件。
+
+    最优快照 `best.pt` 不在这里写：它的判据是 `val/ratio`（`_save_best`），
+    而 val 的周期与 `run.save_every` 无关 ⇒ 把它挂在存盘步上会让「最优」落到
+    两个 val 点之间。旋转仍然把它列为 `keep_paths`（**永不删**）。
+    """
     path = save_checkpoint(
         artifacts.checkpoints / f"step-{step:07d}.pt",
         model=model,
@@ -719,22 +1035,43 @@ def _save_step(
     )
     report.checkpoints.append(path.name)
     best_path = artifacts.checkpoints / BEST_CHECKPOINT_NAME
-    if value <= best:
-        save_checkpoint(
-            best_path,
-            model=model,
-            cfg=cfg,
-            step=step,
-            data_rev=data_rev,
-            git_rev=git_rev(artifacts.root),
-            gates_green=gates_green,
-        )
     rotate_checkpoints(artifacts.root, keep_last=cfg.run.keep_last, keep_paths=[best_path])
     logger.info("checkpoint @step %d -> %s", step, path.name)
     return path
 
 
-def train(  # noqa: PLR0915 - 训练循环的语句数靠注释说明更清楚，拆函数会把状态切碎
+def _resolve_val_source(
+    cfg: TrainConfig,
+    source: BatchSource,
+    val_source: ValBatchSource | None,
+) -> ValBatchSource | None:
+    """决定这次训练用哪个验证集（None = 不跑 val）。
+
+    三种情形，且**没有静默降级**：
+
+    1. 显式给了 `val_source`（测试与将来的消融臂）：直接用；
+    2. 没给、且训练来源是真实清单：按 `data.split_val` 与 `optim.seed` 构造
+       :class:`ManifestValSource`——**留出集**必须是另一份 split（§9-47 A1）；
+    3. 没给、且来源是合成（`SmokeBatchSource`）：**打警告并跳过**，因为合成来源没有
+       「留出集」这回事（拿合成批当 val 只会把「同一批被反复评估」伪装成验证）。
+       `val_every=0` 是显式关闭，不打警告。
+    """
+    if val_source is not None:
+        return val_source
+    if int(cfg.optim.val_every) <= 0:
+        return None
+    if isinstance(source, ManifestBatchSource):
+        return ManifestValSource(cfg, seed=int(cfg.optim.seed))
+    logger.warning(
+        "optim.val_every=%d 但训练来源不是真实清单（%s）：跳过 val。"
+        "合成批没有留出集，把它当 val 只是把同一批数据反复评估了一遍",
+        cfg.optim.val_every,
+        type(source).__name__,
+    )
+    return None
+
+
+def train(  # noqa: PLR0912, PLR0915 - 循环的分支/语句数靠注释说明更清楚，拆函数会把状态切碎
     cfg: TrainConfig,
     *,
     source: BatchSource,
@@ -743,8 +1080,17 @@ def train(  # noqa: PLR0915 - 训练循环的语句数靠注释说明更清楚�
     gates_green: bool,
     device: str = "cpu",
     resume_from: Path | None = None,
+    val_source: ValBatchSource | None = None,
 ) -> TrainReport:
     """参考训练循环（默认 CPU 可跑；极小配置用于 CI 与冒烟）。
+
+    **验证集（plan 07 §9-47，2026-09-27 第十轮）**：`val_source` 给出时，每
+    `optim.val_every` 步在**同一批固定窗口**上跑一次 `evaluate_val`，读数进 TB 与
+    `logs/loss_history.jsonl`（`val_*` / `cond_*`），并且 **`best.pt` 改按 `val/ratio` 选**
+    （A8）——旧的「按训练损失选」实测等价于「按谁抽到最空的窗选」。
+    `val_source=None` 且训练来源是 :class:`ManifestBatchSource` 时自动按 `data.split_val`
+    构造 :class:`ManifestValSource`（§9-47 A1：固定集必须是**留出集**，不能拿训练窗口凑）。
+    val **不产生任何梯度**（`no_grad` + `model.eval()`），也不参与 LR / 早停（G-④）。
 
     长跑的四个运维要点（plan 07 §4.5/§4.6，2026-09-27 第六轮）：
 
@@ -789,11 +1135,48 @@ def train(  # noqa: PLR0915 - 训练循环的语句数靠注释说明更清楚�
             model, optimizer, cfg, data_rev=data_rev, resume_from=resume_from, report=report
         )
     model.train()
+    val = _resolve_val_source(cfg, source, val_source)
+    val_every = max(0, int(cfg.optim.val_every)) if val is not None else 0
+    if val is None:
+        logger.info("验证集：未启用（val_every=0，或来源没有留出集）")
+    else:
+        # 顺序有讲究：**先把「要发生什么」说清楚，再触发索引构建**。val split 的索引是
+        # 另一份缓存，首次要解析该切分的每张谱面（分钟级，§9-47 G-①）——先把话说出来，
+        # 否则那几分钟的静默就是一个看起来像卡死的窗口。
+        logger.info(
+            "验证集：split=%s 的前 %d 个窗口，每 %d 步原样重放一次（首次会构建 val 索引，见下）",
+            cfg.data.split_val,
+            int(cfg.optim.val_windows),
+            val_every,
+        )
+        logger.info(
+            "⚠️ val 的数字与 gates.txt **不可直接比**：initial_head_bias=%g 只在门禁路径生效",
+            cfg.gates.initial_head_bias,
+        )
+        logger.info(
+            "（训练路径 bias=0）；val 精度沿用训练口径 %s（bf16 舍入确定性，不影响跨步比较）",
+            cfg.optim.precision,
+        )
+        windows = val.windows()  # ← 这一行触发 val 索引的构建（上面的日志已经把话说明白了）
+        if windows <= 0:
+            logger.warning(
+                "本轮关闭 val：split=%s 里一个窗口都没有（清单没有留出集，或 max_samples 把它切空了）。"
+                "**不要**在没有留出集的情况下宣称做过模型选择",
+                cfg.data.split_val,
+            )
+            val = None
+            val_every = 0
+        else:
+            logger.info("val 来源：%s（%d 个窗口）", val.describe(), windows)
     # 取批入口：同步或 DataLoader（见 `ManifestBatchSource.batches`）。探测批在 start_step==1
     # 时就是第一步的批（不白抽一个窗口）；续训时它只用来拿 grid，游标由 start_step 定位。
     stream = source.batches(start_step=start_step, first=first_batch if start_step == 1 else None)
     history: list[tuple[int, float]] = []
+    #: 训练损失的最优（`metrics.json` 的 best_loss，**语义不变**）。
     best = float("inf")
+    #: `val/ratio` 的最优（**模型选择判据**，A8）；None = 尚未测过或没有 val。
+    best_ratio: float | None = None
+    best_ratio_step = 0
     log_every = max(1, int(cfg.run.log_every))
     writer = open_scalar_writer(artifacts.logs)
     pending: list[dict[str, float]] = []
@@ -830,33 +1213,82 @@ def train(  # noqa: PLR0915 - 训练循环的语句数靠注释说明更清楚�
             if step == start_step:
                 report.first_loss = value
             coverage = source.coverage()
-            pending.append(
-                {
-                    "step": float(step),
-                    "loss": value,
-                    "step_time_s": elapsed,
-                    # 步时**拆开**（plan 07 §9-42）：GPU 利用率偏低时，必须能区分
-                    # 「数据侧供给不足（GPU 在等）」与「计算侧本身慢」。混成一个数只能
-                    # 靠功率/利用率反推，而这两者都看不出瓶颈在哪一侧。
-                    "data_time_s": data_time,
-                    "compute_time_s": compute_time,
-                    "grad_norm": grad_norm,
-                    "peak_vram_gib": _peak_vram_gib(),
-                    "lr": float(cfg.optim.lr),
-                    # 批的 K 与事件数：显存墙与「空批」两个老问题都靠它在线可见
-                    # （plan 07 §9-23 / §9-35；步时 ∝ K²，K 必须和 loss 一起看）。
-                    "batch_n_lines": float(batch.n_lines()),
-                    "batch_events": event_total(batch),
-                    # 数据覆盖：epoch 内进度与累计「见过多少窗口/谱面」。采样器一旦饱和，
-                    # loss 曲线**看不出来**（它只是反复拟合同一小撮样本）——只有覆盖率能。
-                    "epoch": coverage["epoch"],
-                    "windows_seen": coverage["windows_seen"],
-                    "windows_total": coverage["windows_total"],
-                    "charts_seen": coverage["charts_seen"],
-                    "charts_total": coverage["charts_total"],
-                }
-            )
-            if step % log_every == 0 or step == cfg.optim.max_steps:
+            # 训练侧的**近乎免费**仪表（plan 07 §9-47 I + §9-46 / 任务 B）：
+            # ∫λ 在损失里本来就算过（这里走同一个 integral_term，零额外前向）；
+            # 分层则用损失**本身**（reduction="none"）把一步拆成两个总体——
+            # 43.8% 空窗 / 56.2% 非空窗的中位差五个数量级，混在一起的单步数字没有趋势。
+            integral_value = float(integral_term(output, batch).sum().item())
+            batch_events = event_total(batch)
+            row: dict[str, float] = {
+                "step": float(step),
+                "loss": value,
+                "step_time_s": elapsed,
+                # 步时**拆开**（plan 07 §9-42）：GPU 利用率偏低时，必须能区分
+                # 「数据侧供给不足（GPU 在等）」与「计算侧本身慢」。混成一个数只能
+                # 靠功率/利用率反推，而这两者都看不出瓶颈在哪一侧。
+                "data_time_s": data_time,
+                "compute_time_s": compute_time,
+                "grad_norm": grad_norm,
+                "peak_vram_gib": _peak_vram_gib(),
+                "lr": float(cfg.optim.lr),
+                # 批的 K 与事件数：显存墙与「空批」两个老问题都靠它在线可见
+                # （plan 07 §9-23 / §9-35；步时 ∝ K²，K 必须和 loss 一起看）。
+                "batch_n_lines": float(batch.n_lines()),
+                "batch_events": batch_events,
+                # 数据覆盖：epoch 内进度与累计「见过多少窗口/谱面」。采样器一旦饱和，
+                # loss 曲线**看不出来**（它只是反复拟合同一小撮样本）——只有覆盖率能。
+                "epoch": coverage["epoch"],
+                "windows_seen": coverage["windows_seen"],
+                "windows_total": coverage["windows_total"],
+                "charts_seen": coverage["charts_seen"],
+                "charts_total": coverage["charts_total"],
+            }
+            # Σ∫λdV / Σn（§9-47 I）：无事件时**不报**（缺失 != 0）。空窗本来就只有
+            # 积分项，除一个 0 会造出一个看起来像尖峰的假读数。
+            if batch_events > 0.0:
+                row["integral_per_event"] = integral_value / batch_events
+            row.update(stratified_step_loss(output, batch))
+            val_due = val is not None and val_every > 0 and step % val_every == 0
+            if val_due:
+                assert val is not None  # val_due 蕴含 val 非 None（mypy 收窄）
+                val_started = time.perf_counter()
+                val_scalars, ratio = evaluate_val(
+                    model,
+                    val,
+                    device=target_device,
+                    precision=cfg.optim.precision,
+                    seed=cfg.optim.seed,
+                )
+                # val 的墙钟**单独记账**：它不落在任何 step_time_s 里（计时终点在它之前），
+                # 不报出来就等于「开销看不见」——那正是 §9-47 E 的算式要防的事。
+                row["val_time_s"] = time.perf_counter() - val_started
+                row.update(val_scalars)
+                logger.info(
+                    "val @step %d：nll=%.6g（常数基线 %.6g，ratio=%.4f）空窗占比 %.3f，耗时 %.2f s",
+                    step,
+                    float(val_scalars.get("val_nll", float("nan"))),
+                    float(val_scalars.get("val_nll_constant", float("nan"))),
+                    float(val_scalars.get("val_ratio", float("nan"))),
+                    float(val_scalars.get("val_empty_share", float("nan"))),
+                    row["val_time_s"],
+                )
+                if ratio is not None and (best_ratio is None or ratio < best_ratio):
+                    previous = "首次" if best_ratio is None else f"上一次在 step {best_ratio_step}"
+                    best_ratio = ratio
+                    best_ratio_step = step
+                    _save_best(
+                        artifacts,
+                        cfg,
+                        model,
+                        step=step,
+                        data_rev=data_rev,
+                        gates_green=gates_green,
+                        reason=f"val/ratio={ratio:.6f}（{previous}）",
+                    )
+            pending.append(row)
+            if step % log_every == 0 or step == cfg.optim.max_steps or val_due:
+                # val 步强制刷盘：val 读数必须与它在同一步的训练标量落在同一行里，
+                # 否则「这一步的 val」要跨 log_every 去找（§9-47 A9 的「走 _flush_scalars 那条路」）。
                 _flush_scalars(writer, artifacts.logs / HISTORY_FILENAME, pending)
                 pending.clear()
             if cfg.run.save_every > 0 and step % cfg.run.save_every == 0:
@@ -866,12 +1298,22 @@ def train(  # noqa: PLR0915 - 训练循环的语句数靠注释说明更清楚�
                     model,
                     optimizer,
                     step=step,
-                    value=value,
-                    best=best,
                     data_rev=data_rev,
                     gates_green=gates_green,
                     report=report,
                 )
+                if val is None and value <= best:
+                    # 无 val（val_every=0 / 合成来源）：沿用训练损失口径的旧行为。
+                    # **它不是模型选择依据**（§9-46）；训练开始的日志行已明说这一点。
+                    _save_best(
+                        artifacts,
+                        cfg,
+                        model,
+                        step=step,
+                        data_rev=data_rev,
+                        gates_green=gates_green,
+                        reason=f"训练损失={value:.6f}（无 val：仅兼容口径）",
+                    )
     finally:
         if pending:
             _flush_scalars(writer, artifacts.logs / HISTORY_FILENAME, pending)
@@ -894,6 +1336,13 @@ class ManifestBatchSource:
     该约束由 `collate_field_batch` 强制（不一致即抛）。**因此本模块按网格身份分桶组批**，
     而不是连续取 index——真实语料里连续窗口很容易跨越 BPM 变更点或行边界，那时 J 会静默错掉。
     """
+
+    #: **A/B 诊断开关**（生产恒为 `False`）：`True` = 退回 `torch` 默认的按序交付。
+    #:
+    #: 只给 `scripts/local_inorder_ab.py` 做对照实测用（plan 07 §9-50 的三臂标定）；
+    #: 不配置化、不进续训指纹——它不是语义旋钮：两种取值下**交付顺序逐位一致**
+    #: （`True` 时队头阻塞，`False` 时靠主进程重排），差别只在吞吐。
+    _ab_force_in_order: ClassVar[bool] = False
 
     cfg: TrainConfig
     split: str = "train"
@@ -930,6 +1379,9 @@ class ManifestBatchSource:
                     limit=data.max_samples,
                     chart_cache_size=data.chart_cache_size,
                     feature_cache_size=data.feature_cache_size,
+                    window_cache_dir=(
+                        None if data.window_cache_dir is None else Path(data.window_cache_dir)
+                    ),
                 ),
             )
         return self._dataset
@@ -1078,6 +1530,22 @@ class ManifestBatchSource:
         显存纪律（RFC-0034 §4）：worker **不建 CUDA context**（只在 CPU 上构造样本），
         预取队列只落在**主机内存**（`prefetch_factor=2` ⇒ 在飞样本数有界），
         GPU 上同时只有一个 batch（H2D 与计算仍由主循环串行驱动）。
+
+        **乱序交付 + 主进程按槽位重排**（plan 07 §9-50；这是 RFC-0034 §5 那条不变量的
+        落地——旧代码只是**假设**按序交付，现在改成**证明**）。为什么必须动这里：`torch` 的
+        `DataLoader` 默认 `in_order=True`，而它的 `_try_put_index` **只在按序交付时**
+        被调用一次 ⇒ 队头一条慢窗口（实测每窗 p50 0.57 s / p99 5.9 s）会让全部 worker
+        干完手上的活**集体等索引**：实测 8 worker 只跑出 4.8-5.2 核 / 6.85 窗口/s，
+        worker 侧 `py-spy dump` 全部停在 `index_queue.get()`。
+        `in_order=False` 下每交付一批就补发一个索引 ⇒ 8.05-8.15 核 / 9.85-10.08 窗口/s。
+
+        但**不能**把乱序直接交给训练循环：`self._cursor` 是「计划前缀长度」一个标量，
+        覆盖率在线标量 / 续训 O(1) 定位 / `data.workers` 语义中性（RFC-0034 §5）全由它
+        保证。因此每批自带槽位终点标签（:class:`SlotTag`），主进程用字典缓冲**重排回
+        计划顺序**再产出 —— 并发拿满，而样本序列与 `workers=0` 仍**逐位一致**。
+
+        重排缓冲的上界 = `DataLoader` 的在飞批次上界（`prefetch_factor * workers`），
+        与 `in_order=True` 时 `_task_info` 自己攒的乱序批次**同一量级** ⇒ 不新增内存风险。
         """
         from torch.utils.data import DataLoader
 
@@ -1108,28 +1576,48 @@ class ManifestBatchSource:
         sampler = PlanBatchSampler(plan, batch_size=batch_size, start_step=step)
         # 批次切分在**主进程**完成（只有 dataset 与 collate_fn 进 worker）。槽位终点由
         # batch_sampler 自己上报，**不**从 collate 出来的批次反推——记账不依赖物化。
-        pending: deque[int] = deque()
+        dispatched: deque[int] = deque()
         order = plan.order
 
         def _indices() -> Iterator[list[int]]:
             for start, stop in sampler.spans():
-                pending.append(stop)
-                yield [int(value) for value in order[start:stop]]
+                dispatched.append(stop)
+                # 首元素 = 本批的槽位终点标签（负编码 `-stop-1`，与合法的非负窗口下标
+                # 不可能冲突）；`_SlotTaggedDataset` 在 worker 侧把它翻译成 `SlotTag`，
+                # 于是「批 <-> 槽位」这个对应关系能穿过进程边界回来。
+                yield [-(stop + 1), *(int(value) for value in order[start:stop])]
 
         loader = DataLoader(
-            dataset,
+            _SlotTaggedDataset(dataset),
             batch_sampler=_indices(),
-            collate_fn=collate_field_batch,
+            collate_fn=partial(_collate_with_slot, collate_field_batch),
             num_workers=workers,
             persistent_workers=True,
             prefetch_factor=2,
             pin_memory=torch.cuda.is_available(),
+            in_order=self._ab_force_in_order,
         )
         # 生成器被提前关闭时由 GC 回收 loader（DataLoader.__del__ 会收掉 worker 进程）；
-        # 长跑里 generator 与训练同寿命，不必手动收尾。
-        for batch in loader:
-            self._cursor = pending.popleft()
-            yield batch
+        # 长跑里 generator 与训练同寿命，不必手动收尾。**产出一批才更新一次 `_cursor`**：
+        # 缓冲里多收的批次不改记账，因此 `coverage()` 与 `workers=0` 逐位一致。
+        buffer: dict[int, FieldBatch] = {}
+        iterator = iter(loader)
+        while True:
+            if not (dispatched and dispatched[0] in buffer):
+                try:
+                    stop, batch = next(iterator)
+                except StopIteration:
+                    if dispatched or buffer:
+                        raise RuntimeError(
+                            "取批重排缓冲未排空（待交付 "
+                            f"{len(dispatched)} 批 / 已收 {len(buffer)} 批）——乱序交付丢了批"
+                        ) from None
+                    return
+                buffer[stop] = batch
+                continue
+            stop = dispatched.popleft()
+            self._cursor = stop
+            yield buffer.pop(stop)
 
     def _draw(
         self,
@@ -1170,6 +1658,214 @@ class ManifestBatchSource:
         return (
             f"manifest({self.split})：{self.cfg.data.manifest_path}"
             f"（max_samples={self.cfg.data.max_samples}，t_window={self.cfg.data.t_window}{buckets}）"
+        )
+
+
+@dataclass(slots=True)
+class ManifestValSource:
+    """固定验证集：从 `split_val` 计划里**按网格桶成组**取 N 个窗口，每次重放出逐位一致的一批。
+
+    **为什么要「计划前缀」而不是随机抽 N 个窗口**（plan 07 §9-47 A1）：
+
+    1. 计划层是纯函数（`(seed, epoch)` 决定顺序，RFC-0034 §5）⇒ 续训后前缀**逐位一致**；
+    2. 遮盖种子由 `_window_seed(seed, row_index, window_index)` 派生（`data/dataset.py`）
+       ⇒ 连**遮盖模式**都一样，不只是窗口一样；
+    3. 于是「第 3000 步的 val」与「第 15000 步的 val」只差权重——这才叫跨步可比。
+
+    **不缓存张量**：每次 `batches()` 重放同一批窗口（重新物化）。缓存 128 个真实窗口
+    的场大约 2 GB，而本机 `commit` 已经贴过上限（§9-49）；重放的数据成本由 worker 摊薄
+    （§9-47 E：workers=0 时单窗口 0.85 s，workers>0 时约 0.038 s）。
+
+    **不写回任何状态**：本类没有游标、没有覆盖率记账——val 不是训练信号（§9-47 G-④）。
+    """
+
+    cfg: TrainConfig
+    #: 遮盖种子与计划种子（默认 `optim.seed`）。与训练 seed 相同是**有意**的：val 的窗口
+    #: 与遮盖模式因此与「训练看到的世界」同口径，差异只在「留出集」与「权重」。
+    seed: int = 0
+    #: 覆盖 `optim.val_windows`（测试与小样本用）。
+    n_windows: int | None = None
+    _dataset: ChartPairDataset | None = None
+    _plan: WindowPlan | None = None
+
+    def _ensure(self) -> ChartPairDataset:
+        if self._dataset is None:
+            from beatmorph.data.dataset import ChartPairDataset, DatasetConfig
+
+            data = self.cfg.data
+            split = str(data.split_val)
+            # 坑①（§9-47 G）：val split 的索引是**另一份缓存**，首次要解析该切分的每张谱面
+            # （按 train 的 36.5 min / 6750 张外推约 4-5 min，一次性）。必须提前打日志，
+            # 否则这段静默看起来就是卡死。
+            logger.info(
+                "val 索引：split=%s。首次构建要解析该切分的每张谱面（按 train 的 36.5 min / "
+                "6750 张外推约 4-5 min，一次性；之后走 .dataset_index 落盘缓存）",
+                split,
+            )
+            started = time.perf_counter()
+            self._dataset = ChartPairDataset(
+                DatasetConfig(
+                    manifest_path=Path(data.manifest_path),
+                    chart_dir=Path(data.chart_dir),
+                    feature_dir=Path(data.feature_dir),
+                    split=split,
+                    t_window=data.t_window,
+                    tau_end_s=data.tau_end_s,
+                    tau_end_policy=data.tau_end_policy,
+                    x_bins=data.x_bins,
+                    k_max=data.k_max,
+                    occlusion_ratio=data.occlusion_ratio,
+                    seed=self.seed,
+                    limit=data.max_samples,
+                    chart_cache_size=data.chart_cache_size,
+                    feature_cache_size=data.feature_cache_size,
+                    window_cache_dir=(
+                        None if data.window_cache_dir is None else Path(data.window_cache_dir)
+                    ),
+                ),
+            )
+            logger.info(
+                "val 索引就绪：%d 个窗口，耗时 %.1f s\n%s",
+                len(self._dataset),
+                time.perf_counter() - started,
+                self._dataset.describe(),
+            )
+        return self._dataset
+
+    def plan(self) -> WindowPlan:
+        """epoch 0 的取批计划（**纯函数**：同配置同 seed 逐位一致）。"""
+        if self._plan is None:
+            from beatmorph.data.plan import plan_epoch
+
+            batch_size = max(1, int(self.cfg.optim.batch_size))
+            self._plan = plan_epoch(
+                self._ensure(),
+                seed=self.seed,
+                epoch=0,
+                chunk=batch_size,
+                batch_size=batch_size,
+            )
+        return self._plan
+
+    def windows(self) -> int:
+        """验证集窗口数 = min(optim.val_windows, 本 split 的窗口数)；**空 split 记 0**。
+
+        为什么空 split 要记 0 而不是抛：`plan_epoch` 对空索引直接报错（它的契约是「必须有
+        窗口才能排顺序」），但「这份清单没有留出集」是一个**环境事实**，不是缺陷——
+        训练入口应当**明确关闭 val 并大声告警**，而不是让整轮训练崩在一个本可以降级的
+        观测项上（`train()` 里就是这么处理的）。
+        """
+        requested = int(
+            self.n_windows if self.n_windows is not None else self.cfg.optim.val_windows
+        )
+        if len(self._ensure()) <= 0:
+            return 0
+        return max(1, min(requested, int(self.plan().n_windows)))
+
+    def _slots(self) -> list[list[int]]:
+        """按**网格桶**成组取 `val_windows` 个窗口（不是取计划前缀）。
+
+        为什么不是前缀（§9-53，实测）：计划是**跨桶轮转发牌**的 ⇒ 前 N 个槽位落在 **N 个不同桶**
+        ⇒ 每个窗口各自成 batch（B=1）× N 次前向。而前向成本 ∝ K²（global 层对 `L=K·T` 做全自
+        注意力）⇒ 成本是 `Σf(K_i)` 而不是 `f(平均 K)`。实测 val 前缀 K 中位 30.5 / 均值 46.4 /
+        p90 106 / **ΣK² = 422 139** —— 按桶成组后**同样的窗口数**，前向成本约降 `val_batch` 倍。
+
+        固定性不受影响：选择仍是 `plan` 的**纯函数**（同 `seed` ⇒ 逐位一致，续训亦然），
+        只是「取哪些窗口」从「前缀」变成「按桶首次出现的顺序、每桶取前 `val_batch` 个」。
+        同桶 ⇒ 同 `grid_key` ⇒ `collate_field_batch` 的网格身份约束满足（K 由 collate 补齐，
+        补齐行的 `line_mask=False`，指标按有效线加权 ⇒ **语义不变**）。
+        """
+        total = self.windows()
+        if total <= 0:  # 空 split：没有槽位可取（`batches()` 因此产出空流）
+            return []
+        plan = self.plan()
+        batch = max(1, int(self.cfg.optim.val_batch))
+        per_bucket: dict[int, list[int]] = {}
+        for slot in range(plan.n_windows):
+            per_bucket.setdefault(int(plan.bucket_id[slot]), []).append(int(plan.order[slot]))
+        chunks: list[list[int]] = []
+        taken = 0
+        # `bucket_id` 的编号本身就是「在计划里首次出现的顺序」⇒ 排序即计划序（纯函数）。
+        for bucket in sorted(per_bucket):
+            if taken >= total:
+                break
+            window_ids = per_bucket[bucket]
+            take = min(batch, total - taken, len(window_ids))
+            chunks.append(window_ids[:take])
+            taken += take
+        return chunks
+
+    def batches(self) -> Iterator[FieldBatch]:
+        """按计划顺序重放验证批（data.workers>0 时走 DataLoader，与训练同一套槽位机制）。
+
+        **为什么可以走 worker 路径**（§9-47 A7 / RFC-0034 §5）：worker 数与样本序列无关，
+        而同步路径的单窗口数据成本是 worker 路径的 20 倍（0.85 s vs 0.038 s）——val 若强制
+        workers=0，光数据侧就要 100 s 以上，5% 的开销预算当场失效。
+        """
+        chunks = self._slots()
+        workers = max(0, int(self.cfg.data.workers))
+        if workers == 0:
+            from beatmorph.data.dataset import collate_field_batch
+
+            dataset = self._ensure()
+            for chunk in chunks:
+                yield collate_field_batch([dataset[index] for index in chunk])
+            return
+        yield from self._batches_parallel(chunks, workers=workers)
+
+    def _batches_parallel(
+        self, chunks: Sequence[Sequence[int]], *, workers: int
+    ) -> Iterator[FieldBatch]:
+        """DataLoader 路径：**与训练取批同一套** SlotTag / 主进程重排机制（§9-50）。
+
+        重排是必需的：in_order=False 让交付顺序变成任意排列，而 val 的读数必须与
+        workers=0 **逐位一致**（T1 的验收条件）。聚合量本身对顺序不敏感，但
+        「同一批两次调用逐位一致」这条断言只有在顺序也确定时才可测。
+        """
+        from torch.utils.data import DataLoader
+
+        from beatmorph.data.dataset import collate_field_batch
+
+        dataset = self._ensure()
+        ordered = [list(chunk) for chunk in chunks]
+        dispatched: deque[int] = deque()
+
+        def _indices() -> Iterator[list[int]]:
+            for position, chunk in enumerate(ordered):
+                dispatched.append(position)
+                yield [-(position + 1), *chunk]
+
+        loader = DataLoader(
+            _SlotTaggedDataset(dataset),
+            batch_sampler=_indices(),
+            collate_fn=partial(_collate_with_slot, collate_field_batch),
+            num_workers=workers,
+            prefetch_factor=2,
+            pin_memory=torch.cuda.is_available(),
+            in_order=ManifestBatchSource._ab_force_in_order,
+        )
+        buffer: dict[int, FieldBatch] = {}
+        iterator = iter(loader)
+        while True:
+            if not (dispatched and dispatched[0] in buffer):
+                try:
+                    position, batch = next(iterator)
+                except StopIteration:
+                    if dispatched or buffer:
+                        raise RuntimeError(
+                            "val 取批重排缓冲未排空（待交付 "
+                            f"{len(dispatched)} 批 / 已收 {len(buffer)} 批）：乱序交付丢了批",
+                        ) from None
+                    return
+                buffer[position] = batch
+                continue
+            yield buffer.pop(dispatched.popleft())
+
+    def describe(self) -> str:
+        """一行来源说明（落进训练日志）。"""
+        return (
+            f"manifest({self.cfg.data.split_val})：{self.cfg.data.manifest_path}"
+            f"（按网格桶取 {self.windows()} 个窗口 × ≤{self.cfg.optim.val_batch}/批，seed={self.seed}）"
         )
 
 

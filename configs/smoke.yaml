@@ -46,6 +46,8 @@ optim:
   weight_decay: 0.0
   batch_size: 1
   max_steps: 20
+  # 合成来源**没有留出集**：val_every=0 是显式关闭（`_resolve_val_source` 也会在
+  # data.source=synthetic 时拒绝跑 val —— 把同一批合成数据反复评估一遍不是验证）。
   val_every: 0
   precision: "32"
   seed: 1

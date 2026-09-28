@@ -757,7 +757,16 @@ def _generalization_pairs(train_rows: Sequence[PairRow]) -> list[GeneralizationP
         rows = [row for row in grouped[song_key] if row.difficulty is not None]
         if len(rows) < 2:
             continue
-        ordered = sorted(rows, key=lambda row: (row.difficulty or 0.0, row.chart_id or -1))
+        # `chart_id` 是 `int | None`。`or -1` 把「缺失」与「id == 0」归到同一个键上；
+        # 因为 0 与 -1 都排在所有正 id 之前，**排序结果在实践中不变**（当前语料最小 id = 3），
+        # 所以这不是活缺陷，只是语义含混：改成 `is None` 口径后不再依赖稳定排序的偶然。
+        ordered = sorted(
+            rows,
+            key=lambda row: (
+                row.difficulty or 0.0,
+                row.chart_id if row.chart_id is not None else -1,
+            ),
+        )
         low, high = ordered[0], ordered[-1]
         if low.difficulty == high.difficulty:
             continue

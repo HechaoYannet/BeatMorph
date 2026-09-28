@@ -368,12 +368,6 @@ class FieldOutput:
             if not bool(torch.allclose(totals, torch.ones_like(totals), atol=1e-4)):
                 raise AssertionError("cell_prob 必须在 (X, S, C) 上归一化（sum = 1）")
 
-    def line_masses(self) -> Tensor:
-        """逐线非负性检查用的最小/最大值对（诊断，不做归一化）。"""
-        return torch.stack(
-            [self.lam.amin(dim=(2, 3, 4, 5)), self.lam.amax(dim=(2, 3, 4, 5))], dim=-1
-        )
-
 
 #: 场维度序的断言用（对外暴露，便于测试引用）
 __all__ = [

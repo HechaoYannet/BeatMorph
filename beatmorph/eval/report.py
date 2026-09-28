@@ -201,10 +201,6 @@ class EvalReport(BaseModel):
         """
         return primary_criterion(self.aggregate.per_chart_mean, tolerance_s=self.meta.tolerance_s)
 
-    def primary_score_micro(self) -> float:
-        """micro 栏的主读数（同一判据的另一平均口径，供规模敏感的分析用）。"""
-        return primary_criterion(self.aggregate.micro, tolerance_s=self.meta.tolerance_s)
-
     def assert_isolation(self) -> None:
         """自检：校准 / 探索性分节必须带标注且不得进主判据。"""
         assert_calibration_is_labeled(self.calibration)

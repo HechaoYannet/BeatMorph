@@ -84,7 +84,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from itertools import pairwise
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import numpy as np
 import torch
@@ -136,6 +136,9 @@ from beatmorph.generation.masks import (
     occluded_event_share,
 )
 from beatmorph.generation.model import DEFAULT_K_MAX
+
+if TYPE_CHECKING:
+    from beatmorph.data.window_cache import WindowCacheReader
 
 logger = get_logger(__name__)
 
@@ -499,6 +502,11 @@ class DatasetConfig:
     feature_cache_size: int = 2
     index_cache: bool = True
     index_cache_dir: Path | None = None
+    #: 窗口预切缓存的**根目录**（`beatmorph.data.window_cache`）。None = 关闭（走原路径）。
+    #:
+    #: 开启后 `__getitem__` 只读 mmap 重建，不再解析谱面 / 解压特征（每窗 0.85 s → 毫秒级）。
+    #: 它是**纯派生加速器**：指纹不符 / 目录缺失 / 结构非法都回退到原路径，绝不静默降级。
+    window_cache_dir: Path | None = None
     x_bins: int = RPE_X_GRID_BINS
     k_max: int = DEFAULT_K_MAX
     occlusion_ratio: float = 0.5
@@ -891,6 +899,8 @@ class ChartPairDataset(torch.utils.data.Dataset[PairSample]):
         if config.limit is not None:
             rows = rows[: config.limit]
         self._rows: tuple[PairRow, ...] = tuple(rows)
+        #: 窗口预切缓存的只读视图（None = 未启用 / 不可用 ⇒ 走原路径）。
+        self._window_cache = self._open_window_cache()
         self._plan: _DatasetPlan | None = None
         #: 特征缓存**元数据**（含音频时长）：小的 JSON，索引期就要用（τ 轴终点口径），
         #: 且每行只读一次。不做 LRU —— 全库 8551 条也只占几 MB。
@@ -946,6 +956,31 @@ class ChartPairDataset(torch.utils.data.Dataset[PairSample]):
     def rows(self) -> list[PairRow]:
         """本 split 的行（`limit` 已生效；只读副本）。"""
         return list(self._rows)
+
+    def _open_window_cache(self) -> WindowCacheReader | None:
+        """尝试打开窗口预切缓存；**任何不可用都返回 None**（回退原路径，不抛、不静默降级）。
+
+        指纹覆盖一切语义字段（`window_cache_fingerprint` 直接复用索引缓存的指纹）⇒
+        指纹相同就意味着「同一批窗口、同一批遮盖」，因此这里不需要再去比 `n_windows`
+        ——那会强制构建索引，正是本缓存要绕开的那一步。
+        """
+        root = self.config.window_cache_dir
+        if root is None:
+            return None
+        from beatmorph.data.window_cache import (
+            WindowCacheReader,
+            read_index,
+            window_cache_directory,
+            window_cache_fingerprint,
+        )
+
+        fingerprint = window_cache_fingerprint(self.config, self._rows, seed=self.config.seed)
+        directory = window_cache_directory(Path(root), self.config.split, fingerprint)
+        index = read_index(directory, fingerprint=fingerprint)
+        if index is None:
+            return None
+        logger.info("窗口预切缓存已启用：%s（%d 个窗口）", directory, index.n_windows)
+        return WindowCacheReader(directory, index, list(self._rows), split=self.config.split)
 
     def stats(self) -> DatasetIndexStats:
         """索引记账（会触发索引构建）。"""
@@ -1013,7 +1048,13 @@ class ChartPairDataset(torch.utils.data.Dataset[PairSample]):
         return len(self._ensure_plan().entries)
 
     def __getitem__(self, index: int) -> PairSample:
-        """取第 `index` 个窗口（**确定性**：同一 index 两次取值逐位一致）。"""
+        """取第 `index` 个窗口（**确定性**：同一 index 两次取值逐位一致）。
+
+        启用窗口预切缓存时直接由 mmap 重建
+        （`tests/unit/data/test_window_cache.py` 锁定它与本方法逐位一致）。
+        """
+        if self._window_cache is not None:
+            return self._window_cache.sample(index)
         plan = self._ensure_plan()
         total = len(plan.entries)
         if index < 0:

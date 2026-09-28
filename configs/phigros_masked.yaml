@@ -8,9 +8,11 @@ run:
   backend: torch        # 目标栈见 run.backend=lightning（需要 uv sync --extra train）
   runs_dir: runs
   # ── 长跑运维（plan 07 §4.5/§4.6；事故/教训见 docs/TRAINING.md §7.5）──────────
-  # save_every = 每 4 轮（1 轮 = 一个 val 周期 = optim.val_every=500 步）⇒ 2000 步一次存盘。
+  # save_every = 每 2 轮（1 轮 = 一个 val 周期 = optim.val_every=1000 步）⇒ 2000 步一次存盘。
   # 代价上界：崩溃最多丢一个存盘间隔的工作量。⚠️ 若实测步时明显偏离（纯 GPU 分钟级 vs
   # 分钟以上），按「丢 ≤ 30-40 分钟」重新对齐这个数，别照抄。
+  # ⚠️ best.pt **不再**由存盘步决定：它由 val 触发（见 optim 段的说明），存盘步只管
+  # 步级 checkpoint 与旋转。
   save_every: 2000
   # 过程标量的刷新间隔：每 50 步刷进 TB 与 logs/loss_history.jsonl。
   # **长跑必须能在线看到曲线**——此前只在训练结束时写一次，人力监控整轮什么也看不到。
@@ -24,6 +26,12 @@ data:
   manifest_path: data/processed/pairs.json
   chart_dir: data/processed/charts
   feature_dir: data/processed/features
+  # ★ 窗口预切缓存（第十二轮 §9-52 落地的开关；第十三轮全量建成 + 终验通过，plan 07 §9-54⑮）：
+  #   train 634 952 窗（train/aa677031c17e3a3d，353.6 GB）+ val 74 889 窗（val/fac0448693925c86，41.7 GB），
+  #   逐位一致 400/400 + 100/100、读取 95.2 / 76.2 窗/s（原路径 81× / 65×）。
+  #   指纹不符时自动回落原路径（_open_window_cache 返回 None，无静默降级）；null = 不用缓存。
+  #   进 RESUME_IGNORED_KEYS：改它不影响续训指纹。相对路径按进程 CWD 解析（从仓库根启动）。
+  window_cache_dir: data/processed/window_cache
   split_train: train
   split_val: val
   provenance:
@@ -55,14 +63,23 @@ data:
   #   ⇒ 改它不改变样本序列、不改变覆盖率、不改变续训指纹（进 checkpoint.RESUME_IGNORED_KEYS）。
   #   ⚠️ 必须同时限住每个 worker 的 BLAS 线程，否则 N 个 worker 各自开满 24 核会过度订阅：
   #      启动前设 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1（未设时训练会打 WARNING）。
-  #   ⚠️ **2026-09-27 第十轮定位修正**：下面这段标定是在 **DataLoader 默认 in_order=True** 下测的，
-  #     那个「N≥8 封顶」是 in_order 的产物（队头一条慢窗口会让全部 worker 集体等索引）。
-  #     关掉 in_order 后 W=10/12 分别到 11.55/12.21 窗口/s、仍在上行。详见 plan 07 §9-49。
-  #   ★ 8 是**实测标定**出的拐点（2026-09-27 第十轮，scripts/local_worker_scaling.py；真实
-  #     train split、只改本字段）：供给能力 2.51 / 4.42 / **6.33** / 5.75 / 6.28 窗口/s
-  #     @ N=3/6/8/10/12 ⇒ **N≥8 起不再上涨**（OMP 取 1 或 2、pin_memory 开或关都不改变）。
-  #     训练需求约 11.5 窗口/s（计算段中位 0.087 s）⇒ 加 worker 到 8 为止；再加只吃内存
-  #     （每 worker 约 1 GiB，N=12 时可用物理内存已从 18.8 掉到 7.4 GiB）。
+  #   ★ 8 来自 2026-09-27 第十轮的标定（scripts/local_worker_scaling.py，真实 train split）：
+  #     供给 2.51 / 4.42 / **6.33** / 5.75 / 6.28 窗口/s @ N=3/6/8/10/12。
+  #     ⚠️ 那份标定是在 DataLoader **默认 in_order=True** 下测的 ⇒「N≥8 封顶」是队头阻塞的
+  #     产物，**不是 worker 数的上限**；N 到底该取多少，必须在 §9-50 修完管线之后重标。
+  #
+  #   ★ **2026-09-27 §9-50：管线已修（队头阻塞）**。取批改为 `in_order=False` + 主进程按
+  #     槽位重排（`beatmorph/infra/train_loop.py` 的 SlotTag / _SlotTaggedDataset /
+  #     _collate_with_slot），**样本序列与覆盖率逐位不变**。
+  #     实测（scripts/local_inorder_ab.py，ABBA 交错、真实 train split、60 s×2 臂）：
+  #       旧管线 6.39 窗口/s（交付 p90 561-575 ms）→ 新管线 **8.67 窗口/s（1.36×）**
+  #       （交付 p90 15-139 ms）；不重排的裸 in_order=False = 8.71 ⇒ 重排的代价 **0.5%**。
+  #       windows_seen 轨迹前 389 步**逐位一致** —— 吞吐变了，模型看到的东西一个字节没变。
+  #     训练需求约 11.5 窗口/s（计算段中位 0.087 s）⇒ **8 个 worker 仍然差约 25%**。
+  #     但**不要再靠加 worker 追**：内存账见下，而且端到端剩余空间本来就只有约 1.29×
+  #     （compute mean 0.151 s vs step mean 0.195 s）。真正的下一层是物化侧的整谱重复
+  #     （每窗口 91.3% 的 CPU 花在「一张谱只该做一次」的事上），见 RFC-0035。
+  #     每 worker 约 1 GiB；commit 曾到 38.1/40.1 GiB（95%）⇒ N=8 同时是内存上限。
   workers: 8
   max_samples: null
 
@@ -82,7 +99,44 @@ optim:
   weight_decay: 0.01
   batch_size: 1        # 跨谱 batching 需要同一网格身份，见 beatmorph/data/dataset.py 的说明
   max_steps: 20000
-  val_every: 500
+  # ★ val（plan 07 §9-47，2026-09-27 第十轮）：此前 val_every 只是**空转**的字段，
+  #   TB 里没有任何 val 曲线，而 best.pt 按**训练损失**选 —— 实测那等于「按谁抽到最空的
+  #   窗选模型」（43.8% 的步是空窗，中位 loss 6.5e-4 vs 非空 96，差五个数量级；那个
+  #   被选中的 checkpoint 是 step 6234 的 events=0 / K=1 空窗）。
+  #   现在：split_val（814 张，按曲目切分）→ plan_epoch(epoch=0) 的前 val_windows 个槽位，
+  #   每 val_every 步**原样重放**（同窗口 + 同遮盖种子 ⇒ 逐位一致、跨步可比），
+  #   主判据 = val/ratio = val/nll / val/nll_masked_constant（同一遮盖测度下的常数场最优值）。
+  #   **best.pt 改按 val/ratio 选**。val 走 no_grad + model.eval()，不产生梯度、不参与 LR 与
+  #   早停（§9-47 G-④），因此它与 val_windows 都**不进续训指纹**。
+  #
+  #   成本算式（§9-47 E 的式子**已被实测推翻**，以本节为准）：
+  #     E 的 0.038 s/窗 + 1 次前向 + 训练流的 K ⇒ 算出 5.8%。三项全偏，实测如下：
+  #       ① **数据侧实测 0.230 s/窗**（workers=8，无争用；workers=0 时 0.73 s）
+  #          —— val 窗口全是「新行的第一个窗口」⇒ 整谱解析每窗重来一遍；
+  #       ② **对照臂是 5 次前向**（E 只算 1 次）；
+  #       ③ **val 前缀的 K 更重**：中位 30.5 / 均值 46.4 / p90 106 / max 111，
+  #          **ΣK² = 422 139**（训练流 p90 53-67）。前向 ∝K² ⇒ 必须用 ΣK²，不能用中位。
+  #   ★ **2026-09-27 §9-53 已修**（两处结构性改动，都不改指标语义）：
+  #       ① **按网格桶成组取窗口**：128 个窗口从「128 个桶 → B=1 × 128 次前向」变成
+  #          **17 批（均 7.5 窗/批）⇒ Σ(max K)² 从 422 139 降到 71 165 = 5.93×**
+  #          （前向律取 bf16 时代实测拟合 `步时 ≈ 2.7e-4·K²`、前向 ≈ 步时/3）。
+  #       ② **窗口预切缓存**（`data.window_cache_dir`）：数据侧 0.230 → **0.0096 s/窗**
+  #          （实测 9.6 ms/窗），⇒ val 数据侧 28 s → **约 1.2 s**。
+  #     ⇒ 一次 val ≈ 前向 5 臂 **32 s** + 数据 **1.2 s** ≈ **33 s = 199 s 预算的 16.7%**。
+  #     要压到 5% 量级：再配 `val_every=4000` ⇒ **4.1%**（运行时长 1.04×）。
+  #   ⚠️ 上面 5.93× / 33 s 是「实测 ΣK² + 实测数据侧 + 文献 K² 律」推出来的；
+  #     一次 val 的**真实墙钟仍未经 GPU 实跑验证**（plan 07 §9-51/§9-53 存疑清单）。
+  #   ⚠️ 组批改变了**归约顺序**（B=1 → B≤8）⇒ val 的**数值不再与组批前逐位相同**
+  #     （指标语义不变：`reduction="mean"` 按有效线加权、填充线 line_mask=False 被排除）。
+  #     跨步可比性与「同一配置两次调用逐位一致」都不受影响。
+  val_every: 1000
+  # 验证集窗口数（按桶成组取 N 个窗口）；128 是 §9-47 E 的取值。
+  # ⚠️ 存疑：128 个窗口对 814 张谱的代表性**尚未标定**（固定系统偏差而非噪声，§9-47 G-⑥）。
+  val_windows: 128
+  # 每个 val 批最多几个窗口（**同一网格桶**内才可同批）。8 是实测拐点：
+  # 128 窗在 val_batch=8 下成 17 批、Σ(max K)² = 71 165 ⇒ 前向 5.93× 于逐窗。
+  # 调大收益递减（批内 pad 到 max K），调大还会抬峰值显存；1 = 退回逐窗前向（对照用）。
+  val_batch: 8
   precision: bf16-mixed
   seed: 0
 

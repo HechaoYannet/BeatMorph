@@ -111,10 +111,6 @@ class LegalityReport(BaseModel):
         """取一个统计量（缺失时返回 `default`）。"""
         return float(self.stats.get(name, default))
 
-    def with_edits(self, edits: list[Edit]) -> LegalityReport:
-        """附加留痕（返回新报告；本类型 frozen）。"""
-        return self.model_copy(update={"edits": [*self.edits, *edits]})
-
     def with_stats(self, extra: dict[str, float]) -> LegalityReport:
         """覆盖/追加统计量（返回新报告）。"""
         return self.model_copy(update={"stats": {**self.stats, **extra}})

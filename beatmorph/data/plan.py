@@ -166,6 +166,7 @@ def plan_epoch(
     epoch: int,
     chunk: int = DEFAULT_PLAN_CHUNK,
     batch_size: int = 1,
+    window_shuffle: bool = False,
 ) -> WindowPlan:
     """物化第 `epoch` 个 epoch 的取批顺序（**纯函数**：同参数逐位一致）。
 
@@ -176,6 +177,16 @@ def plan_epoch(
         chunk: 发牌块长；实际生效值为 `max(chunk, batch_size)`（块不短于一个批，
             否则批大小大于 1 时永远凑不满一批）。
         batch_size: 训练批大小（参与块长下界的理由见上）。
+        window_shuffle: **【默认 False = 旧行为】** 每一轮里，每张谱面发哪一块由该谱自己的
+            种子化置换决定，而不是永远从第 0 块开始。
+
+            **为什么需要这个开关**（plan 07 §9-70 的实测）：旧顺序下第 k 轮发的全是各谱的
+            第 k 块 ⇒ 前「谱面数」个槽位**只包含每张谱的第 0 窗**（前奏/空窗）。
+            真实 train split 实测（`chunk=1`、6614 张谱）：前 8000 步里 **61.5% 的窗口零事件**、
+            平均 **4.40 事件/窗**，而全库均匀抽样是 **10.5% / 13.46** ⇒ 训练分布在前一万步里
+            被系统性换成「稀疏 + 空」的切片，模型因此先学会「输出 0」。
+            打开本开关后**轮转结构与覆盖率不变**（仍是每轮每谱一块 ⇒ 约「谱面数」步覆盖全部谱面），
+            只是每一轮每张谱贡献的是**随机**那一块 ⇒ 任何前缀都是全库的无偏切片。
 
     Returns:
         `WindowPlan`（每个窗口恰好出现一次）。
@@ -194,7 +205,7 @@ def plan_epoch(
     keys = sorted(grouped)
 
     seq = np.random.SeedSequence([int(seed), int(epoch)])
-    rng_rows, rng_offset = (np.random.default_rng(child) for child in seq.spawn(2))
+    rng_rows, rng_offset, rng_pieces = (np.random.default_rng(child) for child in seq.spawn(3))
     # 每个桶一个随机偏移：同一轮内桶的顺序因此随机（否则永远是「桶 0 的行全在前」）。
     offsets = rng_offset.random(len(keys))
 
@@ -208,13 +219,17 @@ def plan_epoch(
         for index in grouped[key]:
             by_row.setdefault(source.window_row_index(index), []).append(index)
         row_list = sorted(by_row)
-        per_row = [
-            [
-                by_row[row_list[ri]][k : k + block]
-                for k in range(0, len(by_row[row_list[ri]]), block)
-            ]
-            for ri in rng_rows.permutation(len(row_list))
-        ]
+        # 每行的块列表；`window_shuffle` 时按该行自己的种子化置换重排（**轮转结构不变**：
+        # 第 k 轮仍然是「每行一块」，只是第 k 轮每行发它自己的第 perm[k] 块）。
+        # ⚠️ RNG 消费顺序必须与 row_list 的**排序**绑定，不能用洗牌后的顺序 —— 否则
+        # 开关一开就换了另一个随机流，实验臂与控制臂的差异不再只来自「发哪一块」。
+        per_rows_in_order: list[list[list[int]]] = []
+        for row in row_list:
+            pieces = [by_row[row][k : k + block] for k in range(0, len(by_row[row]), block)]
+            if window_shuffle:
+                pieces = [pieces[int(j)] for j in rng_pieces.permutation(len(pieces))]
+            per_rows_in_order.append(pieces)
+        per_row = [per_rows_in_order[ri] for ri in rng_rows.permutation(len(row_list))]
         for k in range(max(len(item) for item in per_row)):  # 轮次
             for position, piece in enumerate(per_row):  # 行（已按种子洗牌）
                 if k >= len(piece):

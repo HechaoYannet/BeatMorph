@@ -91,6 +91,9 @@ data:
   #     （每窗口 91.3% 的 CPU 花在「一张谱只该做一次」的事上），见 RFC-0035。
   #     每 worker 约 1 GiB；commit 曾到 38.1/40.1 GiB（95%）⇒ N=8 同时是内存上限。
   workers: 8
+  # 取批顺序：False = 旧行为（第 k 轮发各谱第 k 窗 ⇒ 前 6614 步只有前奏窗，实测 61.5% 空窗）；
+  # True = 每轮每谱发它自己的随机一块（轮转/覆盖率不变，前缀成为全库无偏切片）。见 plan 07 §9-70。
+  plan_window_shuffle: false
   max_samples: null
 
 model:

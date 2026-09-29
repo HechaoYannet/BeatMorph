@@ -218,6 +218,13 @@ class DataConfig:
     #: 取值无关 ⇒ 它不参与续训指纹（见 `checkpoint.RESUME_IGNORED_KEYS`），
     #: 改它不会让已有 checkpoint 失效，也不会改变样本序列。
     workers: int = 0
+    #: 取批顺序里「每一轮每张谱发哪一块」是否由该谱自己的种子化置换决定（默认 False = 旧行为）。
+    #:
+    #: **这是取批顺序的语义变更，不是性能旋钮**（因此不进 `RESUME_IGNORED_KEYS`）。
+    #: 旧行为下第 k 轮发的全是各谱的第 k 窗 ⇒ 前「谱面数」个槽位只含每张谱的**前奏窗**；
+    #: 真实 train split 实测前 8000 步 **61.5% 空窗 / 4.40 事件每窗**（全库为 10.5% / 13.46）。
+    #: 打开后轮转结构与覆盖率不变，只是任何前缀都成为全库的无偏切片（plan 07 §9-70）。
+    plan_window_shuffle: bool = False
     x_bins: int = RPE_X_GRID_BINS
     k_max: int = DEFAULT_K_MAX
     occlusion_ratio: float = 0.5

@@ -1539,6 +1539,7 @@ class ManifestBatchSource:
                 epoch=self._epoch,
                 chunk=need,
                 batch_size=self.cfg.optim.batch_size,
+                window_shuffle=bool(self.cfg.data.plan_window_shuffle),
             )
             self._plan_chunk = self._plan.chunk
             # 重建会换一套顺序 ⇒ 游标必须回到 epoch 开头（否则会跳过或重复窗口）。

@@ -2839,5 +2839,20 @@ cum-only 臂只有 `cum_skip` 拿到梯度、`cell_skip` 必须为 0）。
 
 臂：`--experiment probe_skipall model.head_skip=true`、`--experiment probe_cellskip model.head_cell_skip=true`。
 **本轮交付时已排队**。
+#### ⑦ 结果（本轮交付前拿到的部分）
+
+**(a) 预登记判据 1 被否定：重开 skip 没有救回来。** `probe_skipall`（`head_skip=true`，两条都开）@step 4000：
+`val_ratio = 0.9734`、`val_pred_over_true = 0.314` —— **是全部臂在 4000 步最差的一条**（其余 0.7636–0.8787），
+质量也跳出 `[0.5,1.5]`。⇒ **「skip 是逃生通道」的假设被否定**，且 §9-62「skip 有害」的结论在**修复后的代码上复现**。
+`probe_cellskip`（只开空间 skip）本轮未跑完（每步 0.7 s × 8000 ≈ 2 h，排在其后）。
+
+**(b) 可见场基线（`runs/_probe_visible_baseline.py`，与模型**同一批 40 个 val 批**、const = 1.16460）**：
+「把可见计数抄成密度 + 5% 均匀底 + 族最优档位」= **0.7440**；
+同批上模型：修复臂@4000 **0.7767**、长跑 best **0.6724**、cum-skip@4000 **1.1765**。
+⇒ 一条**不需要任何音乐理解**的基线落在模型同一区间（略优于修复臂@4000，略差于长跑 best）。
+⚠️ **仪器存疑（必须如实登记）**：表中 4 个 `sigma_x` 行的读数与 `no_smooth` **逐位相同**（0.86648），
+而 `smooth()` 单独测试是正确的（σ=1 把单位脉冲摊成 0.0044/0.054/0.242/0.399…）⇒ **空间平滑那一轴未生效，
+原因未定**；本轮的结论只用 `no_smooth` 那一行（它不经过平滑）。
+
 
 [POSTMORTEM-2026-08-05]: ../POSTMORTEM-2026-08-05-frame-rate-misalignment.md

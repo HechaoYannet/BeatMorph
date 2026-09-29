@@ -25,7 +25,7 @@ BeatMorph 从原始音频（WAV/MP3）+ 难度（+ 可选判定线事件轨）�
 
 ### 当前状态
 
-自检（默认 CI，无网络 / 无权重 / 无 GPU）：`uv run ruff check . && uv run mypy beatmorph && uv run pytest -m "not slow and not gpu and not e2e"` → **1120 passed**（16 deselected）。⚠️ 提交时 `pre-commit` 的 `ruff-format`（本机 ruff **0.16.0**）会重排若干**旧文件**并使首次 commit 失败——`git add` 后重提交即可，**不要为此做全仓格式化**。
+自检（默认 CI，无网络 / 无权重 / 无 GPU）：`uv run ruff check . && uv run mypy beatmorph && uv run pytest -m "not slow and not gpu and not e2e"` → **1140 passed**（16 deselected）。⚠️ 提交时 `pre-commit` 的 `ruff-format`（本机 ruff **0.16.0**）会重排若干**旧文件**并使首次 commit 失败——`git add` 后重提交即可，**不要为此做全仓格式化**。
 
 **✅ RFC-0039 R1/R2/R3 全部落地**
 
@@ -39,6 +39,8 @@ BeatMorph 从原始音频（WAV/MP3）+ 难度（+ 可选判定线事件轨）�
   `run.e2e_*` 不进续训指纹。产物走 `decoder/` 合法性后处理（违规非空则**拒绝写 `chart.json`**，红线 6）。
   ⚠️ **`method` 默认 `thinning`**：D1（peaks）阈值未标定（α=1 单窗解出 8.7–15.7 万事件 vs 模型期望 0.02–2.96）。
   ⚠️ 有**事件预算闸**（60000，超限中止并写出诊断产物）——第一版没有它，实测 21 GB 常驻 + 单核跑满 + GPU 空转。
+- **✅ 新增导出脚本**：`beatmorph-export-phira`（`--from-e2e-artifact <产物目录>` 一键导出 Phira 可导入的 `.pez`；
+  结构依据官方文档，读侧与抓包共用同一个 `ChartInfo`，导出后自动用读侧重新打开自检；红线 6 与「生成谱面不继承模板署名」都有护栏）。
 
 **★ 根因与解法（已实测验证；全链见 plan 07 §9-62 ①–㉗ + §9-63 ④）**
 

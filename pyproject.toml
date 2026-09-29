@@ -85,6 +85,8 @@ Repository = "https://github.com/BeatMorph/BeatMorph"
 # ── 命令行入口（Plan 09，随模块实现启用）──
 [project.scripts]
 beatmorph-train = "beatmorph.cli.train:main"
+#: Phira 谱面包导出：只吃一张 RPEJSON + 音频（无权重、无 GPU），产出可导入的 .pez
+beatmorph-export-phira = "beatmorph.cli.export_phira:main"
 # beatmorph-generate = "beatmorph.cli.generate:main"  # Plan 07/09 末（Phase 2）
 
 [build-system]

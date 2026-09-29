@@ -510,6 +510,39 @@ uv run beatmorph-train --config-name phigros_masked --device cuda --skip-env-doc
   「不含 `chart.json`」的诊断产物（2026-09-29 实测过：第一版没有这道闸，整首歌的事件全留在
   内存里 ⇒ 21 GB 常驻、单核跑满、GPU 空转）。
 
+**①c 导出成 Phira 谱面包（`beatmorph-export-phira`）**
+
+产物 `.pez` 是 Phira 可导入的压缩包（结构依据 [官方谱面标准](https://teamflos.github.io/phira-docs/chart-standard/chartinfo.html)）。
+最省事的一条路径是**直接从端到端产物导出**（曲名/作者/定数/音频/时长都从产物 `meta.json` 取）：
+
+```bash
+# 一键：从最近一次端到端产物导出（不带 --out 时落在产物同目录、同名换 .pez）
+uv run beatmorph-export-phira --from-e2e-artifact tests/e2e-val/outputs/20260929-214209-step0 \\
+    --charter 你的名字 --level 'IN Lv.15'
+
+# 手动指定（任何一张 RPEJSON + 音频）
+uv run beatmorph-export-phira --chart chart.json --music song.mp3 \\
+    --name 曲名 --composer 音乐作者 --difficulty 15.3 [--illustration cover.png]
+```
+
+- **必需信息**：`name` / `composer` / `difficulty` 缺一即**拒绝导出**（官方默认值 `UK` / `10.0` 是占位符，
+  不是事实）；`charter` / `illustrator` 缺省写 `BeatMorph` 并**告警**。
+- **曲绘**：官方要求 `illustration` 必需（真实谱面包 100% 带图）⇒ 没给就写一张名字自解释的
+  `beatmorph-placeholder.png`（真 PNG，标准库生成）并告警；用 `--illustration` 换真图。
+- **生成谱面的署名**：从端到端产物导出时**不继承**模板谱面的谱师与等级文本
+  （实测踩过：包里写着模板作者 `shabu5553`、等级 `IN Lv.15`，而那 665 个音符不是他写的）。
+  默认写 `BeatMorph` + `UK Lv.<定数>`，并在包简介里写一行溯源（`由 BeatMorph 自动生成（条件来源：…）`）。
+- **`offset` 的单位**：`info.yml.offset` 是**秒**，RPE 的 `META.offset` 是**毫秒**——导出时自动换算
+  （写反了就是整首歌错位）。
+- **预览**：`previewStart` 默认 0；`previewEnd` 留空时 Phira 取 `previewStart + 15s` 并自行截断。
+  给了 `--preview-end` 且已知音频时长时会截断到结尾并告警（时长只有 WAV 能自动读；mp3 走
+  `--feature-meta`（本项目的 MERT 元数据里有精确 `duration_s`），产物导出路径会自动带上）。
+- **导出后自检**：包会被读侧（`ChartPackage`，与抓包/解析同一套 `ChartInfo`）重新打开，
+  逐项核对字段、字节与 note 数——不通过就是导出器的 bug，而不是「也许能用」。
+  同一个输入导出两次 ⇒ **逐字节相同**的包（zip 时间戳固定；`--nondeterministic` 可关）。
+- ⚠️ **合规**：包内含**音频**（红线 5 附注②：不得入库）⇒ 只作本地使用/分享自娱，
+  不要提交到仓库（默认落点在被 `.gitignore` 忽略的产物目录里）。
+
 **② 断点续训**
 
 ```bash

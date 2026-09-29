@@ -107,6 +107,29 @@ class ChartPackage:
 | R3 | **不得**依赖 `info.yml.format` | 实测恒为 `null` → 只能按内容嗅探 |
 | R4 | 落盘**不得**沿用原始文件名（含全角字符） | 实测形如 `1817439042209534.json`、`＃53682.json` → 规范化为 `<chart_id>/<normalized>` |
 
+**导出侧（R5，写方向；2026-09-29 落地）**
+
+`beatmorph/data/phira/export.py` + `beatmorph/cli/export_phira.py`（`beatmorph-export-phira`）：
+把谱面 IR + 音频 (+ 曲绘) 打成 Phira 可导入的 `.pez`。依据 **Phira 官方文档**（A 级）：
+[谱面信息 chartinfo](https://teamflos.github.io/phira-docs/chart-standard/chartinfo.html) 与
+同目录的「谱面基本结构」。
+
+| # | 规则 | 依据 / 反面教材 |
+|---|---|---|
+| R5 | 包是 **zip**，解压后**根级直接是文件**（不是文件夹）⇒ 写出的条目**只允许根级** | 官方「谱面基本结构」 |
+| R6 | `info.yml` 是**权威元数据源**（RPE 自带元数据「不被推荐」）⇒ 导出必须两边一致、且**只允许一处真相**（从 IR 派生） | 官方 FAQ |
+| R7 | `format` / `id` / `uploader` / `created` / `updated` / `chartUpdated` **一律不写** | 官方：`format`「不应当手动填写，由客户端自动识别」 |
+| R8 | **生成谱面不得继承模板的谱师署名与等级文本** | 实测：解码链继承模板 META ⇒ 包里写着模板作者的名字，而那 665 个音符不是他写的 |
+| R9 | 导出前必须 `report.is_legal`（红线 6），拒绝时**不留半成品** | CLAUDE 红线 6 |
+
+写侧与读侧**共用同一个 `ChartInfo`**（`package.py`）：导出后立刻用 `ChartPackage` 重新打开自检
+（字段 / 字节 / 谱面 note 数），因此「写法」与「读法」不可能各自漂移。zip 条目时间戳固定 ⇒
+同样的输入产出**逐字节相同**的包。
+
+护栏：`tests/unit/data/test_phira_export.py`（14 项）、`tests/unit/cli/test_export_phira.py`（6 项）。
+⚠️ **数据合规（红线 5 附注）**：导出的包会含**音频** ⇒ 只在本地使用/自娱，**不得入库**
+（`.pez` 落在 `tests/e2e-val/outputs/` 等被忽略的目录即符合这条纪律）。
+
 ### 3.3 格式嗅探（`beatmorph/data/parsers/sniff.py`）
 
 ```python

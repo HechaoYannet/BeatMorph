@@ -399,7 +399,6 @@ class MaskedFieldModel(nn.Module):
             nn.Linear(2 * config.audio_dim, config.d_model) if config.audio_align else None
         )
         self._band_cache: dict[tuple[int, int, torch.device, torch.dtype], Tensor] = {}
-        self._seconds_cache: dict[tuple[int, str], Tensor] = {}
         #: 空间 softmax 的**熵正则权重**（0 = 关闭）。由训练器从 `optim.cell_entropy_weight` 注入。
         #:
         #: 为什么需要：实测（`runs/_diag_flat.py`）把模型自己的输出**在 token 内摊平**后
@@ -420,17 +419,36 @@ class MaskedFieldModel(nn.Module):
         embedded: Tensor = self.difficulty_proj(encoded)
         return embedded
 
+    def _aligned_frame_index(
+        self,
+        batch: FieldBatch,
+        grid: FieldGrid,
+        device: torch.device,
+    ) -> Tensor:
+        """(T,) 每个 τ 格对应的**本窗音频帧下标**（τ→秒只走 `FieldGrid.tau_seconds`）。
+
+        这是「音频帧轴」与「τ 轴」之间**唯一**的换算处；它的正确性直接决定 `audio_align`
+        注入的是不是「该时刻的音乐」。独立成方法是为了让它可被契约测试直接钉住
+        （`tests/unit/generation/test_audio_alignment.py`）——此前它埋在 `_aligned_audio`
+        里，错到「逐窗口差一个 BPM 因子」也没有任何断言拦得住。
+        """
+        seconds = self._field_seconds(grid, device=device).to(dtype=torch.float32)
+        n_frames = max(1, int(batch.audio_emb.shape[1]))
+        return torch.clamp(
+            (seconds * float(batch.frame_rate)).round().to(dtype=torch.long),
+            0,
+            n_frames - 1,
+        )
+
     def _aligned_audio(self, batch: FieldBatch, grid: FieldGrid, device: torch.device) -> Tensor:
         """(B, 1, T, d)：把**该 τ 切片对应时刻**的音频帧（及其差分）投影进 token 空间。
 
-        帧下标由 `FieldGrid.tau_seconds()`（τ→秒的唯一实现处）乘派生帧率得到——生成侧不重写换算。
+        帧下标由 `_aligned_frame_index` 给出（τ→秒的唯一实现处是 `FieldGrid.tau_seconds`），
+        生成侧不重写换算。
         """
         audio = self.audio_norm(batch.audio_emb)  # (B, Ta, D)
         n_frames = int(audio.shape[1])
-        seconds = self._field_seconds(grid, device=device).to(dtype=torch.float32)
-        frame = torch.clamp(
-            (seconds * float(batch.frame_rate)).round().to(dtype=torch.long), 0, n_frames - 1
-        )
+        frame = self._aligned_frame_index(batch, grid, device)
         previous = torch.clamp(frame - 1, 0, n_frames - 1)
         current = audio[:, frame]  # (B, T, D)
         delta = current - audio[:, previous]
@@ -444,13 +462,21 @@ class MaskedFieldModel(nn.Module):
 
         窗口网格的 `bpm_points` 是单段等效 BPM（`bpm_eff = 60/J(τ_start)`），因此这里的
         秒数正好落在与 `encode_audio` 相同的窗口相对时间基上。
+
+        ⚠️ **这里刻意不做缓存**（plan 07 §9-64 的实测缺陷，代价一条 note 都不能再犯）：
+        `tau_seconds()` 由 `(t_bins, bpm_points)` 完全决定，而窗口网格的 **`bpm_eff` 逐窗口
+        不同**、`t_bins` 却是全库常数（`data.t_window`）。历史实现按 `(t_bins, device)` 缓存，
+        于是这张表在**第一次前向时被冻结**成「第一个窗口的 BPM」：此后每个窗口的 τ→秒 都被
+        同一个**逐窗口变化**的因子缩放（真实 train split 实测：冻结口径 301.5 BPM vs val 的
+        bpm_eff 中位 162 ⇒ 中位 0.54×、100% 的窗口错位，最快的窗口整段 clamp 到末帧），
+        `audio_align` 注入的音频因此**不在该 token 的时刻上**（实测对该通路的任何干预都不
+        改变损失：置零 Δ = +2e-6 nats/line）；同一张表也冻结了 `seconds_position` 的秒轴。
+
+        直接把缓存删掉是**修根因**而不是修键：每次前向只调用 1-2 次（逐批，不是逐 token），
+        `tau_seconds()` 是 192 元素级的 numpy 运算 ⇒ 开销在噪声里；而「时间基」这种东西
+        一旦有缓存，键里就必须重新表达一次 `field/` 已经拥有的换算语义（红线 7 的边界）。
         """
-        key = (int(grid.t_bins), str(device))
-        cached = self._seconds_cache.get(key)
-        if cached is None:
-            cached = torch.as_tensor(grid.tau_seconds(), dtype=torch.float32, device=device)
-            self._seconds_cache[key] = cached
-        return cached
+        return torch.as_tensor(grid.tau_seconds(), dtype=torch.float32, device=device)
 
     def encode_audio(self, batch: FieldBatch) -> Tensor:
         """(B, T_audio, D) -> (B, T_audio, d)；位置编码以**秒**为基准（由 frame_rate 派生）。"""

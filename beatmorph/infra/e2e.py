@@ -404,6 +404,23 @@ class E2EResult:
         )
 
 
+@dataclass(frozen=True)
+class LineFilter:
+    """「哪些线、在哪些时刻可以承载 note」这一条条件（决策者实测 bug 的修法）。
+
+    为什么要有它：模型在 K 条线上出强度场，而 K 条线里**未必**都该有 note —— 实测 e2e 产物
+    665 个 note 里 238 个（35.8%）落在 note 时刻不透明度 = 0 的线上（游戏里根本看不见，
+    等于不可判定；alpha 经 judgeLineList 的 alphaEvents 跨层求和，prpr A 级语义），
+    149 个（22.4%）落在条件谱面里零 note 的装饰 / 表演线上。
+
+    allowed_lines = None 表示「没有这个信息」（无条件生成 / 合成模板）⇒ 不按装饰线过滤、
+    只按 alpha 过滤；两条判据都在 decoder.events.filter_field_events_by_line 里实现。
+    """
+
+    chart: PhigrosChart
+    allowed_lines: frozenset[int] | None = None
+
+
 @dataclass(frozen=True, slots=True)
 class _WindowRun:
     """逐窗生成的中间产物（把长循环从 `generate_chart` 里拆出来；理由见 plan 07 §9-63）。"""
@@ -426,6 +443,7 @@ def _run_windows(
     max_events: int,
     device: torch.device,
     precision: str,
+    line_filter: LineFilter | None = None,
 ) -> _WindowRun:
     """逐窗：迭代并行解码 -> 解码事件 -> 平移回整谱时间基（**流式，不累计原始场**）。
 
@@ -464,6 +482,18 @@ def _run_windows(
                 )
             )
             _accumulate_decode_stats(decode_stats, stats)
+            origin = windows.window_start_seconds(index)
+            if line_filter is not None:
+                from beatmorph.decoder.events import filter_field_events_by_line
+
+                field_events, filter_stats = filter_field_events_by_line(
+                    field_events,
+                    chart=line_filter.chart,
+                    window_grid=window_grid,
+                    origin_s=origin,
+                    allowed_lines=line_filter.allowed_lines,
+                )
+                _accumulate_decode_stats(decode_stats, filter_stats)
             if len(field_events) > max_events - len(events):
                 aborted = _budget_message(
                     index=index,
@@ -479,7 +509,6 @@ def _run_windows(
                 logger.warning("e2e 中止：%s", aborted)
                 break
             decoded, pairing = pair_events(field_events, window_grid, spec=spec)
-            origin = windows.window_start_seconds(index)
             events.extend(replace(event, t_s=event.t_s + origin) for event in decoded)
             pairings.append(pairing)
             windows_done = index + 1
@@ -575,6 +604,13 @@ def generate_chart(
         manifest_path=Path(cfg.data.manifest_path),
         audio_seconds=float(feature_meta.duration_s),
     )
+    # 判定线资格闸门（决策者 2026-09-30 实测报告）：装饰 / 表演线不该有 note，
+    # 且 note 时刻不可见的线判不到——两条判据都在解码事件层（配对之前）拦掉。
+    playable_lines = frozenset(int(note.line_id) for note in template.notes)
+    line_filter = LineFilter(
+        chart=template,
+        allowed_lines=playable_lines if playable_lines else None,
+    )
     tau_end = axis_end_seconds(cfg, template, float(feature_meta.duration_s))
     if tau_end <= 0.0:
         raise E2EInputError(f"τ 轴终点为 {tau_end}s（谱面与音频都没有时长？）")
@@ -613,6 +649,7 @@ def generate_chart(
         max_events=int(max_events),
         device=device,
         precision=precision,
+        line_filter=line_filter,
     )
     events = run.events
     pairings = run.pairings

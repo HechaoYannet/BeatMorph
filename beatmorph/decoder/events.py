@@ -22,11 +22,12 @@ import numpy as np
 from beatmorph.core.contracts.field import ChartFieldSpec
 from beatmorph.core.contracts.phigros import (
     NoteType,
+    PhigrosChart,
     PhigrosNote,
     Side,
     above_from_side,
 )
-from beatmorph.field.grid import FieldGrid, tau_to_seconds
+from beatmorph.field.grid import FieldGrid, seconds_to_tau, tau_bin_index, tau_to_seconds
 from beatmorph.field.target import CHANNEL_INDEX, HOLD_END_CHANNEL
 
 #: 通道索引 -> 音符类型（hold_end 通道**不在**其中：它是标记通道，不是音符）。
@@ -256,14 +257,109 @@ def confidence_array(events: Sequence[DecodedEvent]) -> np.ndarray:
     return np.asarray([event.confidence for event in events], dtype=np.float64)
 
 
+# ══════════════════════════════════════════════════════════════
+# 判定线资格闸门（红线 6 的输入侧：不该被判定的线一个 note 都不该有）
+# ══════════════════════════════════════════════════════════════
+
+#: 闸门记账的稳定键（进 decode_stats / 产物 meta.json，便于事后审计）。
+LINE_FILTER_KEYS: Final[tuple[str, ...]] = (
+    "line_filter_allowed_lines",
+    "line_filter_kept_events",
+    "line_filter_dropped_empty_line",
+    "line_filter_dropped_invisible",
+)
+
+
+def _has_alpha_track(chart: PhigrosChart, line_id: int) -> bool:
+    """该判定线（含父线链）是否**真的有** alpha 事件轨。
+
+    为什么必须先问这一句（不是防御式编程）：RPE 的默认 alpha 语义是「没有 alphaEvents
+    的层求和为 0 ⇒ 不可见」（prpr A 级证据，见 docs/knowledges/phigros-format.md）。
+    但解码器自建的**合成模板**造出来的线本来就**没有** alpha 轨——那是「没给这个信息」，
+    不是「这条线不可见」。把两者混为一谈会把合成路径的全部 note 一次清空，且不报任何错。
+
+    口径必须看**整条父线链**：alpha 是跨层求和（JudgeLine.pose_at），子线自己没有 alpha 轨
+    但父线有时，子线的不透明度就是父线给的那个值——只看本线会把这种情形误判为「未知」。
+    """
+    return any(
+        bool(layer.alpha)
+        for line in chart.lines[line_id].ancestry(chart)
+        for layer in line.event_layers
+    )
+
+
+def filter_field_events_by_line(
+    events: Sequence[FieldEvent],
+    *,
+    chart: PhigrosChart,
+    window_grid: FieldGrid,
+    origin_s: float,
+    allowed_lines: frozenset[int] | None = None,
+    opacity_threshold: float = 0.0,
+) -> tuple[list[FieldEvent], dict[str, float]]:
+    """丢掉「**此刻不该承载 note**」的判定线上的场事件（在配对之前）。
+
+    两条判据（决策者 2026-09-30 实测报告：e2e 产物里 **35.8%** 的 note 落在 alpha=0 的线上、
+    **22.4%** 落在模板里零 note 的装饰线上）：
+
+    1. **不可见**：该线在该事件的**绝对时刻**的不透明度 <= opacity_threshold。不透明度经
+       JudgeLine.pose_at 求出（跨层求和 + 父线递归，契约里的唯一实现）；仅当该线**确实带
+       alpha 轨**时才判定（见 `_has_alpha_track`）。
+    2. **不该有 note 的线**（装饰 / 纯表演线）：allowed_lines 给出「允许承载 note 的线集合」
+       时，不在其中的线一律丢弃。无条件生成时没有这个信息 ⇒ 传 None。
+
+    为什么放在**配对之前**：Hold 的起点与终点落在同一纤维，先配对后过滤会制造孤儿端点；
+    先过滤则两者一起消失，PairingStats 仍然自洽。
+
+    Returns:
+        (保留的事件, 记账)；记账键见 LINE_FILTER_KEYS。
+    """
+    kept: list[FieldEvent] = []
+    dropped_empty = 0
+    dropped_invisible = 0
+    opacity: dict[tuple[int, int], float] = {}
+    for event in events:
+        line_id = int(event.line_id)
+        if allowed_lines is not None and line_id not in allowed_lines:
+            dropped_empty += 1
+            continue
+        if 0 <= line_id < len(chart.lines) and _has_alpha_track(chart, line_id):
+            # 缓存键必须用**权威的 τ 格下标**（tau_bin_index），不能写 int(tau)：
+            # 一个 4 拍窗里 tau < 1 的格占绝大多数，int(tau) 会把它们塌成同一个键，
+            # 于是整窗只按第一个事件判一次可见性（实测复现，test_line_eligibility 钉住）。
+            key = (line_id, int(tau_bin_index(event.tau)))
+            alpha = opacity.get(key)
+            if alpha is None:
+                absolute_s = float(origin_s) + float(
+                    tau_to_seconds(event.tau, window_grid.bpm_points),
+                )
+                beats = float(seconds_to_tau(absolute_s, chart.bpm_points))
+                alpha = float(chart.lines[line_id].pose_at(beats, chart).alpha)
+                opacity[key] = alpha
+            if alpha <= float(opacity_threshold):
+                dropped_invisible += 1
+                continue
+        kept.append(event)
+    allowed = float(len(allowed_lines)) if allowed_lines is not None else -1.0
+    stats = {
+        "line_filter_allowed_lines": allowed,
+        "line_filter_kept_events": float(len(kept)),
+        "line_filter_dropped_empty_line": float(dropped_empty),
+        "line_filter_dropped_invisible": float(dropped_invisible),
+    }
+    return kept, stats
+
+
 __all__ = [
     "CHANNEL_NOTE_TYPE",
+    "LINE_FILTER_KEYS",
     "DecodedEvent",
     "FieldEvent",
     "PairingStats",
     "confidence_array",
     "event_sort_key",
     "events_to_notes",
+    "filter_field_events_by_line",
     "note_type_for_channel",
     "pair_events",
     "x_center",

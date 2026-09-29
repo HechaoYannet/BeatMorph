@@ -19,6 +19,7 @@ Lightning 后端仍然提供，并在缺失时给出可操作的报错（而不�
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
@@ -31,7 +32,9 @@ from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Protocol
 
+import numpy as np
 import torch
+from numpy.typing import NDArray
 from torch import nn
 
 from beatmorph.core.logging import get_logger
@@ -90,12 +93,15 @@ __all__ = [
 
 if TYPE_CHECKING:
     from beatmorph.data.dataset import ChartPairDataset
-    from beatmorph.data.plan import WindowPlan
+    from beatmorph.data.plan import WindowDensitySource, WindowPlan
 
 logger = get_logger("infra.train_loop")
 
 #: 过程标量的落盘文件名（jsonl；健康检查脚本与 TB 都读它）。
 HISTORY_FILENAME: str = "loss_history.jsonl"
+
+#: val 集合构成的落盘文件名（RFC-0039 R2：构成必须落盘）。与 HISTORY_FILENAME 同目录。
+VAL_COMPOSITION_FILENAME: str = "val_composition.json"
 
 #: jsonl 键 -> TB 标签的**唯一**映射（val 指标 / 分层损失 / 条件对照臂 / 积分比）。
 #:
@@ -135,6 +141,12 @@ SCALAR_TAGS: Mapping[str, str] = {
     "cond_audio_zero_delta": "cond/audio_zero_delta",
     "cond_audio_perm_delta": "cond/audio_perm_delta",
     "cond_track_zero_delta": "cond/track_zero_delta",
+    # ── 端到端产物（RFC-0039 R3；**不是门禁**，失败只记 `e2e_failed=1`）──────
+    "e2e_time_s": "e2e/time_s",
+    "e2e_failed": "e2e/failed",
+    "e2e_notes": "e2e/notes",
+    "e2e_legal": "e2e/legal",
+    "e2e_windows": "e2e/windows",
 }
 
 #: val 批内**线内置换**标签的种子偏移（RFC-0037 R5；沿用被删 G2 的常量便于历史对照）。
@@ -883,6 +895,66 @@ def open_scalar_writer(log_dir: Path) -> ScalarWriter | None:
     return writer
 
 
+def run_e2e_step(
+    model: MaskedFieldModel,
+    cfg: TrainConfig,
+    *,
+    step: int,
+    device: torch.device,
+) -> dict[str, float]:
+    """跑一次端到端产物并返回**落盘标量**；失败只告警，绝不打断训练（RFC-0039 R3）。
+
+    为什么异常要在这里收住：R3 明文「不产生 PASS/FAIL、不阻塞训练、不参与选权重」。
+    一个「人工审阅件」把长跑打断，是把观测手段变成了失败源——那正好与它的定位相反。
+    代价是失败必须**可见**：`e2e_failed=1` 进 jsonl/TB，且异常走 `logger.exception`。
+    """
+    from beatmorph.infra.e2e import run_e2e
+
+    started = time.perf_counter()
+    try:
+        result = run_e2e(model, cfg, step=step, device=device, directory=cfg.run.e2e_dir)
+    except Exception:  # 见 docstring：R3 的失败不得影响训练（涵盖缺资产 / OOM / 任何解码错误）
+        logger.exception("e2e 产物失败（step=%d）：R3 不是门禁，训练继续", step)
+        return {"e2e_failed": 1.0, "e2e_time_s": time.perf_counter() - started}
+    return {
+        "e2e_failed": 0.0,
+        "e2e_notes": float(len(result.chart.notes)),
+        "e2e_legal": 1.0 if result.is_legal else 0.0,
+        "e2e_windows": float(result.n_windows),
+        "e2e_time_s": time.perf_counter() - started,
+    }
+
+
+def write_val_composition(
+    artifacts: RunArtifacts,
+    selection: ValSelection,
+    scalars: Mapping[str, float],
+    *,
+    step: int,
+    split: str,
+) -> Path:
+    """把 val 集合的构成落盘（RFC-0039 R2：**构成必须落盘并打进日志**）。
+
+    文件是 `logs/val_composition.json`，每次 val **覆盖同一份**（内容很小）。它分两半：
+
+    - `selection`：看的是哪些窗口、怎么选的、集合指纹（**纯函数产物**，跨步不该变）；
+    - `measured`：这一轮 val 的实测读数（与同一步 jsonl 行的 `val_*` 同源）。
+
+    两半放在一起才有用：只记选择看不出读数，只记读数看不出「换没换总体」——
+    而 R2 生效后历史 `val/ratio` **整体换总体、不再可比**，那件事必须留下痕迹。
+    """
+    payload = {
+        "step": int(step),
+        "split": split,
+        "written_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "selection": selection.as_dict(),
+        "measured": {key: float(value) for key, value in sorted(scalars.items())},
+    }
+    path = artifacts.logs / VAL_COMPOSITION_FILENAME
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return path
+
+
 def _flush_scalars(
     writer: ScalarWriter | None,
     history_path: Path,
@@ -1177,6 +1249,33 @@ def train(  # noqa: PLR0912, PLR0915 - 循环的分支/语句数靠注释说明�
             val_every = 0
         else:
             logger.info("val 来源：%s（%d 个窗口）", val.describe(), windows)
+            if isinstance(val, ManifestValSource):
+                # RFC-0039 R2：**先把「看的是哪些窗口」说出来**（构成落盘的同一份选择记账）。
+                # 这一行会触发一次密度扫描（读 7.5 万个窗口的稀疏计数，秒级），代价在训练
+                # 开始之前、且与索引构建同一段，不会混进步时。
+                logger.info("val 集合构成：%s", val.selection().summary())
+    #: val 集合的选择记账（RFC-0039 R2；只有真实清单来源能回答，合成来源为 None）。
+    selection: ValSelection | None = val.selection() if isinstance(val, ManifestValSource) else None
+    # 端到端产物（RFC-0039 R3）：**启动时**就把资产探一遍——缺资产要现在就说，
+    # 而不是等到 20 000 步才第一次报错（那时人已经在等结果了）。
+    e2e_every = max(0, int(cfg.run.e2e_every))
+    if e2e_every > 0:
+        from beatmorph.infra.e2e import E2EInputError, load_e2e_inputs
+
+        try:
+            e2e_inputs = load_e2e_inputs(Path(cfg.run.e2e_dir))
+        except E2EInputError as exc:
+            logger.warning("端到端产物（RFC-0039 R3）已关闭：%s", exc)
+            e2e_every = 0
+        else:
+            logger.info(
+                "端到端产物：每 %d 步生成一张谱面到 %s/outputs/（**不是门禁**；"
+                "step %d 起）｜输入 %s",
+                e2e_every,
+                cfg.run.e2e_dir,
+                e2e_every,
+                e2e_inputs.audio.name,
+            )
     # 取批入口：同步或 DataLoader（见 `ManifestBatchSource.batches`）。探测批在 start_step==1
     # 时就是第一步的批（不白抽一个窗口）；续训时它只用来拿 grid，游标由 start_step 定位。
     stream = source.batches(start_step=start_step, first=first_batch if start_step == 1 else None)
@@ -1288,6 +1387,14 @@ def train(  # noqa: PLR0912, PLR0915 - 循环的分支/语句数靠注释说明�
                 # 不报出来就等于「开销看不见」——那正是 §9-47 E 的算式要防的事。
                 row["val_time_s"] = time.perf_counter() - val_started
                 row.update(val_scalars)
+                if selection is not None:
+                    write_val_composition(
+                        artifacts,
+                        selection,
+                        val_scalars,
+                        step=step,
+                        split=cfg.data.split_val,
+                    )
                 logger.info(
                     "val @step %d：nll=%.6g（常数基线 %.6g，ratio=%.4f）空窗占比 %.3f，耗时 %.2f s",
                     step,
@@ -1310,8 +1417,11 @@ def train(  # noqa: PLR0912, PLR0915 - 循环的分支/语句数靠注释说明�
                         gates_green=gates_green,
                         reason=f"val/ratio={ratio:.6f}（{previous}）",
                     )
+            e2e_due = e2e_every > 0 and step % e2e_every == 0
+            if e2e_due:
+                row.update(run_e2e_step(model, cfg, step=step, device=target_device))
             pending.append(row)
-            if step % log_every == 0 or step == cfg.optim.max_steps or val_due:
+            if step % log_every == 0 or step == cfg.optim.max_steps or val_due or e2e_due:
                 # val 步强制刷盘：val 读数必须与它在同一步的训练标量落在同一行里，
                 # 否则「这一步的 val」要跨 log_every 去找（§9-47 A9 的「走 _flush_scalars 那条路」）。
                 _flush_scalars(writer, artifacts.logs / HISTORY_FILENAME, pending)
@@ -1682,6 +1792,327 @@ class ManifestBatchSource:
         )
 
 
+#: val 分层抽样的层数（**非空**窗口按事件数等量分位切成的层数；空窗另单列一层）。
+#:
+#: RFC-0039 R2 首版取 4。层数不参与续训指纹（它只决定「看哪些窗口」，不决定训练语义）。
+VAL_DENSITY_STRATA: int = 4
+
+#: 选择算法版本（进指纹）：**改选择口径必须一起改它**，否则新旧选择会看起来是同一个集合。
+VAL_SELECTION_VERSION: int = 1
+
+
+def _largest_remainder(population: Sequence[int], total: int) -> list[int]:
+    """按各层总体大小**比例分配** `total` 个名额（最大余数法，**确定性**）。
+
+    并列余数按下标定序 —— 分配因此是 (population, total) 的纯函数，不依赖任何集合的迭代顺序。
+    """
+    sizes = [max(0, int(size)) for size in population]
+    grand = sum(sizes)
+    if total <= 0 or grand <= 0:
+        return [0] * len(sizes)
+    exact = [total * size / grand for size in sizes]
+    quota = [math.floor(value) for value in exact]
+    order = sorted(range(len(sizes)), key=lambda i: (-(exact[i] - quota[i]), i))
+    for index in order[: max(0, total - sum(quota))]:
+        quota[index] += 1
+    return [min(quota[i], sizes[i]) for i in range(len(sizes))]
+
+
+def _density_strata(
+    counts: NDArray[np.int64],
+    n_strata: int,
+) -> tuple[NDArray[np.int64], list[tuple[int, int]]]:
+    """按事件数分层：层 0 = 空窗；层 1..Q = 非空窗口的**等量**分位层。
+
+    Returns:
+        `(每个窗口的层号, [(下界, 上界)])`；上界 `-1` = 无上界。层定义要落盘（构成记账）。
+
+    Note:
+        分位切点取自**排序后**的非空计数 ⇒ 各层窗口数尽量相等；计数为整数且大量并列，
+        因此切点可能重复 —— 重复的层会被**合并**（不留下空层，观察到的层数 <= Q + 1）。
+    """
+    labels = np.zeros(int(counts.shape[0]), dtype=np.int64)
+    positive = counts[counts > 0]
+    if positive.size == 0:
+        return labels, [(0, 0)]
+    ordered = np.sort(positive)
+    q = max(1, int(n_strata))
+    edges: list[int] = []
+    for index in range(1, q):
+        edges.append(int(ordered[(index * ordered.size) // q]))
+    bounds: list[tuple[int, int]] = [(0, 0)]
+    previous = 0
+    for edge in edges:
+        if edge <= previous:
+            continue
+        bounds.append((previous + 1, edge))
+        previous = edge
+    if previous < int(ordered[-1]):
+        bounds.append((previous + 1, -1))
+    else:
+        # 最后一个切点已经等于最大值 ⇒ **没有**更高的层可取，把当前这层收成开区间。
+        # （若照抄「永远再追加一层」，全并列的输入会造出一个**空层**，而它的
+        #  population = 0 会让配额分配与「每层至少一个窗口」的直觉当场矛盾。）
+        bounds[-1] = (bounds[-1][0], -1)
+    lower = np.asarray([bound[0] for bound in bounds[1:]], dtype=np.int64)
+    labels[counts > 0] = np.searchsorted(lower, counts[counts > 0], side="right")
+    return labels, bounds
+
+
+@dataclass(frozen=True, slots=True)
+class ValStratum:
+    """一个密度层的记账（层定义 + 总体 + 配额 + 实取）。"""
+
+    index: int
+    lower: int
+    #: 闭区间上界；`-1` = 无上界。
+    upper: int
+    population: int
+    quota: int
+    taken: int
+
+    def describe(self) -> str:
+        """`层号[下界,上界]:总体/配额/实取`（构成摘要用）。"""
+        upper = "inf" if self.upper < 0 else str(self.upper)
+        return f"{self.index}[{self.lower},{upper}]:{self.population}/{self.quota}/{self.taken}"
+
+
+@dataclass(frozen=True, slots=True)
+class ValSelection:
+    """val 窗口集合的**选择记账**（RFC-0039 R2 要求「构成必须落盘并打进日志」）。
+
+    它是 `(config, seed, 数据集)` 的纯函数：同一个 run 的每一次 val 重放都得到同一个对象
+    （`fingerprint` 相同），而**换一个 val 集合 fingerprint 必然不同**。
+    """
+
+    requested: int
+    selected: int
+    batches: int
+    val_batch: int
+    stratified: bool
+    #: 密度来源（`window_cache` / `unavailable`）；没有它就没有分层。
+    density_source: str
+    strata: tuple[ValStratum, ...]
+    #: 事件数在**被选中**窗口上的 0/25/50/75/100 分位（无密度来源时为 None）。
+    event_quantiles: tuple[float, ...] | None
+    #: K（判定线条数）在**被选中**窗口上的 0/25/50/75/100 分位（无密度来源时为 None）。
+    k_quantiles: tuple[float, ...] | None
+    fingerprint: str
+    chunks: tuple[tuple[int, ...], ...]
+
+    def window_indices(self) -> list[int]:
+        """被选中的窗口下标（计划内的出现顺序）。"""
+        return [index for chunk in self.chunks for index in chunk]
+
+    def summary(self) -> str:
+        """一行摘要（进训练日志；不落盘的长表在 json 里）。"""
+        empty = "n/a" if self.event_quantiles is None else f"{self.event_quantiles[0]:.0f}"
+        median = "n/a" if self.event_quantiles is None else f"{self.event_quantiles[2]:.1f}"
+        base = (
+            f"窗口 {self.selected}/{self.requested}、批 {self.batches}（≤{self.val_batch}/批）、"
+            f"{'分层' if self.stratified else '未分层'}（{self.density_source}）、"
+            f"事件/窗 最小 {empty} 中位 {median}、指纹 {self.fingerprint[:12]}"
+        )
+        return base + " | " + " ".join(stratum.describe() for stratum in self.strata)
+
+    def as_dict(self) -> dict[str, Any]:
+        """落盘视图（`logs/val_composition.json`；键名与日志一一对应）。"""
+        return {
+            "version": VAL_SELECTION_VERSION,
+            "requested_windows": self.requested,
+            "selected_windows": self.selected,
+            "batches": self.batches,
+            "val_batch": self.val_batch,
+            "stratified": self.stratified,
+            "density_source": self.density_source,
+            "event_quantiles": None if self.event_quantiles is None else list(self.event_quantiles),
+            "k_quantiles": None if self.k_quantiles is None else list(self.k_quantiles),
+            "fingerprint": self.fingerprint,
+            "strata": [
+                {
+                    "index": stratum.index,
+                    "lower": stratum.lower,
+                    "upper": stratum.upper,
+                    "population": stratum.population,
+                    "quota": stratum.quota,
+                    "taken": stratum.taken,
+                }
+                for stratum in self.strata
+            ],
+        }
+
+
+def _empty_val_selection(batch: int) -> ValSelection:
+    """空 split 的选择（`batches()` 因此产出空流；不是异常）。"""
+    return ValSelection(
+        requested=0,
+        selected=0,
+        batches=0,
+        val_batch=batch,
+        stratified=False,
+        density_source="empty-split",
+        strata=(),
+        event_quantiles=None,
+        k_quantiles=None,
+        fingerprint="empty-split",
+        chunks=(),
+    )
+
+
+def _bucket_slots(plan: WindowPlan) -> tuple[list[int], dict[int, list[int]]]:
+    """计划里的槽位按**网格桶**分组，返回 `(桶序, 桶 -> 窗口下标)`。
+
+    `bucket_id` 的编号本身就是「在计划里首次出现的顺序」⇒ 排序即计划序（纯函数）。
+    """
+    per_bucket: dict[int, list[int]] = {}
+    for slot in range(plan.n_windows):
+        per_bucket.setdefault(int(plan.bucket_id[slot]), []).append(int(plan.order[slot]))
+    return sorted(per_bucket), per_bucket
+
+
+def _window_event_counts(density: WindowDensitySource, *, n_windows: int) -> NDArray[np.int64]:
+    """逐窗口事件数（**全 split**；分层与配额都以总体为准，不是以计划前缀为准）。"""
+    return np.asarray(
+        [density.window_event_count(index) for index in range(n_windows)],
+        dtype=np.int64,
+    )
+
+
+def _top_up(quotas: list[int], population: Sequence[int], total: int) -> list[int]:
+    """把「钳位到层总体之后」的名额缺口按层序补回（仍是确定性分配）。"""
+    shortfall = total - sum(quotas)
+    for index in range(len(quotas)):
+        if shortfall <= 0:
+            break
+        add = min(max(0, int(population[index]) - quotas[index]), shortfall)
+        quotas[index] += add
+        shortfall -= add
+    return quotas
+
+
+def _prefix_chunks(
+    per_bucket: dict[int, list[int]],
+    buckets: Sequence[int],
+    *,
+    total: int,
+    batch: int,
+) -> list[list[int]]:
+    """**回退口径**（没有密度来源时）：按桶首现序、每桶取前 `val_batch` 个（= R2 之前的行为）。"""
+    chunks: list[list[int]] = []
+    remaining = total
+    for bucket in buckets:
+        if remaining <= 0:
+            break
+        window_ids = per_bucket[bucket]
+        take = min(batch, remaining, len(window_ids))
+        chunks.append(window_ids[:take])
+        remaining -= take
+    return chunks
+
+
+def _stratified_chunks(
+    per_bucket: dict[int, list[int]],
+    buckets: Sequence[int],
+    labels: NDArray[np.int64],
+    quotas: Sequence[int],
+    *,
+    batch: int,
+) -> tuple[list[list[int]], list[int]]:
+    """按层取窗口（层内仍按桶首现序、每桶最多 `val_batch` 个 ⇒ 组批成本不退化）。"""
+    chunks: list[list[int]] = []
+    taken = [0] * len(quotas)
+    for stratum in range(len(quotas)):
+        remaining = int(quotas[stratum])
+        if remaining <= 0:
+            continue
+        for bucket in buckets:
+            if remaining <= 0:
+                break
+            picked = [index for index in per_bucket[bucket] if int(labels[index]) == stratum][
+                :batch
+            ]
+            if not picked:
+                continue
+            picked = picked[:remaining]
+            chunks.append(picked)
+            remaining -= len(picked)
+            taken[stratum] += len(picked)
+    return chunks, taken
+
+
+#: 构成记账里的分位点（0 / 25 / 50 / 75 / 100 百分位）。
+#:
+#: 为什么写成**比例**而不是百分位字面量：数值 75 与 `MERT_FRAME_RATE_HZ` 撞车，
+#: `test_no_hardcoded_physical_constants_outside_contracts` 会（正确地）把它拦下——
+#: 那道防线不看语义，只看数值字面量，所以这里换一种等价而更清楚的写法。
+QUANTILE_FRACTIONS: tuple[float, ...] = (0.0, 0.25, 0.5, 0.75, 1.0)
+
+
+def _quantiles(values: Sequence[int]) -> tuple[float, ...]:
+    """五数概括（`QUANTILE_FRACTIONS` 给出的 0/25/50/75/100 分位；输出 float 便于 json）。"""
+    return tuple(
+        float(value)
+        for value in np.quantile(np.asarray(values, dtype=np.int64), QUANTILE_FRACTIONS)
+    )
+
+
+def _flat(chunks: Sequence[Sequence[int]]) -> list[int]:
+    """把「批的列表」摊平成窗口下标序列（选择顺序；指纹与分位都按它算）。"""
+    return [index for chunk in chunks for index in chunk]
+
+
+def _assemble_selection(
+    *,
+    requested: int,
+    batch: int,
+    split: str,
+    chunks: list[list[int]],
+    counts: NDArray[np.int64] | None,
+    bounds: Sequence[tuple[int, int]],
+    population: Sequence[int],
+    quotas: Sequence[int],
+    taken: Sequence[int],
+    k_values: Sequence[int] | None,
+) -> ValSelection:
+    """把「选了什么」固化成 :class:`ValSelection`（含**集合指纹**与分位）。
+
+    指纹覆盖选择算法版本 + split + 每个被选窗口的 `(下标, 事件数)` 序列 ⇒
+    「换了一个 val 集合」必然表现为「指纹变了」，而不是让两轮数字静默不可比。
+    """
+    window_ids = _flat(chunks)
+    digest = hashlib.sha1()
+    digest.update(f"val-selection-v{VAL_SELECTION_VERSION}|split={split}|".encode())
+    for index in window_ids:
+        value = -1 if counts is None else int(counts[index])
+        digest.update(f"{index}:{value};".encode())
+    strata = tuple(
+        ValStratum(
+            index=index,
+            lower=bounds[index][0],
+            upper=bounds[index][1],
+            population=int(population[index]),
+            quota=int(quotas[index]),
+            taken=int(taken[index]),
+        )
+        for index in range(len(bounds))
+    )
+    return ValSelection(
+        requested=requested,
+        selected=len(window_ids),
+        batches=len(chunks),
+        val_batch=batch,
+        stratified=counts is not None,
+        density_source="window_cache" if counts is not None else "unavailable",
+        strata=strata,
+        event_quantiles=None
+        if counts is None
+        else _quantiles([int(counts[i]) for i in window_ids]),
+        k_quantiles=None if k_values is None else _quantiles(list(k_values)),
+        fingerprint=digest.hexdigest(),
+        chunks=tuple(tuple(chunk) for chunk in chunks),
+    )
+
+
 @dataclass(slots=True)
 class ManifestValSource:
     """固定验证集：从 `split_val` 计划里**按网格桶成组**取 N 个窗口，每次重放出逐位一致的一批。
@@ -1708,6 +2139,9 @@ class ManifestValSource:
     n_windows: int | None = None
     _dataset: ChartPairDataset | None = None
     _plan: WindowPlan | None = None
+    #: 选择结果（**缓存一次**）：密度读数要扫 7.5 万个窗口的稀疏计数（秒级），
+    #: 而选择本身是 (config, seed, 数据集) 的纯函数 ⇒ 每次 val 重算纯属浪费。
+    _selection: ValSelection | None = None
 
     def _ensure(self) -> ChartPairDataset:
         if self._dataset is None:
@@ -1796,25 +2230,87 @@ class ManifestValSource:
         同桶 ⇒ 同 `grid_key` ⇒ `collate_field_batch` 的网格身份约束满足（K 由 collate 补齐，
         补齐行的 `line_mask=False`，指标按有效线加权 ⇒ **语义不变**）。
         """
+        return [list(chunk) for chunk in self.selection().chunks]
+
+    def selection(self) -> ValSelection:
+        """「看哪些窗口」的**完整记账**（RFC-0039 R2；纯函数，缓存一次）。
+
+        为什么要有这一层：val 的**构成**从 R2 起是判读的一部分（空窗占比 / 事件数 / K 分位 /
+        集合指纹），而它必须是**可复查**的——旧口径（每桶前 N 个）只覆盖计划里最早出现的
+        十几个桶，实测 57.8% 空窗、事件/窗中位 0，比总体与训练流系统性容易。见
+        :func:`_density_strata` 与 :meth:`_compute_selection`。
+        """
+        if self._selection is None:
+            self._selection = self._compute_selection()
+        return self._selection
+
+    def _density_source(self) -> WindowDensitySource | None:
+        """窗口密度来源（RFC-0039 R2）：能廉价回答「这个窗口有多密」的数据集视图。
+
+        拿不到就返回 None —— 调用方据此**回退到旧口径并如实记账**（`stratified=False`），
+        而不是拿一个猜出来的密度去分层（那会把偏差从「选错窗口」变成「选错且看不出来」）。
+        """
+        from beatmorph.data.plan import WindowDensitySource
+
+        dataset = self._ensure()
+        return dataset if isinstance(dataset, WindowDensitySource) else None
+
+    def _compute_selection(self) -> ValSelection:
+        """跨桶 + 按事件密度分层 + 确定性（同 seed 逐位可复现）地选 `val_windows` 个窗口。
+
+        口径（RFC-0039 R2）：
+
+        1. **分层**：层 0 = 空窗；层 1..Q = 非空窗口按事件数的**等量分位**层；
+        2. **配额**：按各层总体大小**比例分配**（最大余数法）⇒ 选中集合的密度分布 ≈ 总体；
+        3. **组批**：同一 `bucket_id`（= 同网格身份）内才可同批，每桶最多 `val_batch` 个
+           ——前向成本 ∝ K²（§9-53），这条不能为了「更像抽样」而放弃；
+        4. **确定性**：桶序 = 计划首现序、层内窗序 = 计划序，全程无随机数。
+
+        没有密度来源时退回旧口径（按桶首现序、每桶前 `val_batch` 个）并记 `stratified=False`。
+        两种情况都返回**同一个** :class:`ValSelection` 类型，缺项如实为 None。
+        """
         total = self.windows()
-        if total <= 0:  # 空 split：没有槽位可取（`batches()` 因此产出空流）
-            return []
-        plan = self.plan()
         batch = max(1, int(self.cfg.optim.val_batch))
-        per_bucket: dict[int, list[int]] = {}
-        for slot in range(plan.n_windows):
-            per_bucket.setdefault(int(plan.bucket_id[slot]), []).append(int(plan.order[slot]))
-        chunks: list[list[int]] = []
-        taken = 0
-        # `bucket_id` 的编号本身就是「在计划里首次出现的顺序」⇒ 排序即计划序（纯函数）。
-        for bucket in sorted(per_bucket):
-            if taken >= total:
-                break
-            window_ids = per_bucket[bucket]
-            take = min(batch, total - taken, len(window_ids))
-            chunks.append(window_ids[:take])
-            taken += take
-        return chunks
+        requested = int(
+            self.n_windows if self.n_windows is not None else self.cfg.optim.val_windows
+        )
+        if total <= 0:  # 空 split：没有槽位可取（batches() 因此产出空流）
+            # 顺序有讲究：**空 split 必须在 plan() 之前拦下** —— `plan_epoch` 对空索引
+            # 直接抛（「必须有窗口才能排顺序」），而「没有留出集」是环境事实、不是缺陷。
+            return _empty_val_selection(batch)
+        plan = self.plan()
+        buckets, per_bucket = _bucket_slots(plan)
+        density = self._density_source()
+        if density is None:
+            return _assemble_selection(
+                requested=requested,
+                batch=batch,
+                split=self.cfg.data.split_val,
+                chunks=_prefix_chunks(per_bucket, buckets, total=total, batch=batch),
+                counts=None,
+                bounds=(),
+                population=(),
+                quotas=(),
+                taken=(),
+                k_values=None,
+            )
+        counts = _window_event_counts(density, n_windows=plan.n_windows)
+        labels, bounds = _density_strata(counts, VAL_DENSITY_STRATA)
+        population = [int(np.count_nonzero(labels == index)) for index in range(len(bounds))]
+        quotas = _top_up(_largest_remainder(population, total), population, total)
+        chunks, taken = _stratified_chunks(per_bucket, buckets, labels, quotas, batch=batch)
+        return _assemble_selection(
+            requested=requested,
+            batch=batch,
+            split=self.cfg.data.split_val,
+            chunks=chunks,
+            counts=counts,
+            bounds=bounds,
+            population=population,
+            quotas=quotas,
+            taken=taken,
+            k_values=[int(density.window_line_count(index) or 0) for index in _flat(chunks)],
+        )
 
     def batches(self) -> Iterator[FieldBatch]:
         """按计划顺序重放验证批（data.workers>0 时走 DataLoader，与训练同一套槽位机制）。

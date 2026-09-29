@@ -545,6 +545,30 @@ class WindowCacheReader:
             audio_padded_frames=int(meta[5]),
         )
 
+    # ── 廉价读数（**不物化稠密数组、不读音频**）──────────────────
+    def event_count(self, index: int) -> int:
+        """窗口内的**事件数**（= 稀疏计数之和）。
+
+        为什么需要它（RFC-0039 R2）：val 集合要**按事件密度分层**抽样，而「这个窗口有多密」
+        只有物化一次才知道——无缓存路径 0.85 s/窗（全 val split 要 17 h），所以只能从缓存读。
+        代价是 10 个 mmap 数组里的两个（counts_ptr / counts_val），微秒级。
+
+        口径：`build_target` 的每个事件恰好落进一个格子，Hold 的两端各计 1 ⇒ 稀疏计数之和
+        就是窗口的事件数（与 `PairSample.counts.sum()` 逐位一致，护栏见
+        `tests/unit/data/test_window_cache_event_count.py`）。
+        """
+        shard_id, local = self._index.shard_of(index)
+        shard = self._shard(shard_id)
+        start, stop = int(shard.counts_ptr[local]), int(shard.counts_ptr[local + 1])
+        if stop <= start:
+            return 0
+        return int(np.asarray(shard.counts_val[start:stop], dtype=np.int64).sum())
+
+    def line_count(self, index: int) -> int:
+        """窗口的 **K**（判定线条数；缓存的 `meta[0]`）。同上：只为分层与构成记账。"""
+        shard_id, local = self._index.shard_of(index)
+        return int(self._shard(shard_id).meta[local][0])
+
     def _shard(self, shard_id: int) -> _Shard:
         cached = self._shards.get(shard_id)
         if cached is not None:

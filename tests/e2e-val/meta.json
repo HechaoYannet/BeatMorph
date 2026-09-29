@@ -1,5 +1,7 @@
 {
-    "audio":"audio/fudahuang.mp3",
-    "feature":"feature/fudahuang.npz",
-    "json":"feature/fudahuang.npz"
+  "audio": "audio/fudahuang.mp3",
+  "feature": "feature/fudahuang.npz",
+  "feature_meta": "feature/fudahaung.json",
+  "method": "thinning",
+  "seed": 0
 }

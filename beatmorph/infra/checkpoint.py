@@ -90,6 +90,11 @@ RESUME_IGNORED_KEYS: tuple[str, ...] = (
     "optim.val_every",
     "optim.val_windows",
     "optim.val_batch",
+    # 端到端产物的**节奏与落点**（RFC-0039 R3）：它读模型、写文件，**不回写任何训练状态**
+    # （`generate_chart` 用 no_grad + eval，结束无条件恢复 train 状态）⇒ 与 val 同性：
+    # 改它只改「多久看一眼」，不改被训练的东西。
+    "run.e2e_every",
+    "run.e2e_dir",
     # 窗口预切缓存：只改「窗口怎么被读出来」（0.85 s → 9.6 ms），**样本逐位不变**
     # （plan 07 §9-52）⇒ 与 `data.workers` 同性：改它不该让已有实验目录失效。
     "data.window_cache_dir",

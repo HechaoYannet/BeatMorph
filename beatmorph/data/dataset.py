@@ -156,6 +156,7 @@ __all__ = [
     "DatasetManifestError",
     "GridMismatchError",
     "PairSample",
+    "SongWindows",
     "collate_field_batch",
     "load_pairs",
 ]
@@ -998,6 +999,37 @@ class ChartPairDataset(torch.utils.data.Dataset[PairSample]):
         """
         return self._no_context_fallbacks
 
+    # ── 廉价密度读数（RFC-0039 R2：val 分层抽样用）──────────────
+    def window_event_count(self, index: int) -> int | None:
+        """第 `index` 个窗口的**事件数**；不可廉价取得时返回 None（**不静默取 0**）。
+
+        为什么要有「None」这条：事件数只能从**窗口预切缓存**的稀疏计数里廉价读到；
+        无缓存时唯一的办法是物化整个样本（含音频，0.85 s/窗）。把「拿不到」与
+        「真的是 0 事件」混成一个数（0）会让分层抽样把全体窗口塞进「空窗层」——
+        那正是本机制要修的偏差，所以这里必须显式区分。
+        """
+        reader = self._window_cache
+        if reader is None:
+            return None
+        total = len(reader)
+        if index < 0:
+            index += total
+        if not 0 <= index < total:
+            raise IndexError(f"窗口下标 {index} 越界（共 {total} 个窗口）")
+        return reader.event_count(index)
+
+    def window_line_count(self, index: int) -> int | None:
+        """第 `index` 个窗口的 **K**（判定线条数）；同 :meth:`window_event_count`：缓存才有。"""
+        reader = self._window_cache
+        if reader is None:
+            return None
+        total = len(reader)
+        if index < 0:
+            index += total
+        if not 0 <= index < total:
+            raise IndexError(f"窗口下标 {index} 越界（共 {total} 个窗口）")
+        return reader.line_count(index)
+
     def grid_key(self, index: int) -> tuple[int, int, float]:
         """第 `index` 个窗口的**网格身份** `(x_bins, t_window, bpm_eff)`。
 
@@ -1748,6 +1780,98 @@ def _pair_row(raw: Dynamic, split: str, position: int) -> PairRow:
         name=name,
         composer=composer,
     )
+
+
+@dataclass(frozen=True, slots=True)
+class SongWindows:
+    """一首歌按**训练同一口径**切成的推理窗口（无遮盖、无目标；RFC-0039 R3）。
+
+    为什么要有这一层：端到端生成要「整首歌 → 一串窗口 → 逐窗前向 → 拼回整谱」。窗口的
+    **秒区间 / 网格身份 / 事件轨采样点**三件事在训练路径上各自已有一处实现
+    （`_window_grid` / `_slice_audio` / `line_tracks_at`），生成端重写一遍就等于造出第二份
+    换算——那正是 POSTMORTEM 的形态（红线 7：换算只许在 `field/` 内实现一次）。
+
+    与 :class:`PairSample` 的差别只有一条：**没有 counts / occlusion**（推理没有目标，
+    `generation/sampling.sample` 自己从「全遮盖」状态开始迭代）。
+
+    Attributes:
+        chart: 模板谱面（判定线事件轨 + BPMList + 元数据；这就是 R3 的「条件」）。
+        embedding: `(T_full, D)` 特征缓存数组。
+        grid: **全谱**网格（τ 轴终点已按口径截断）；解码与秒换算都用它。
+        difficulty: 定数条件。
+        x_bins / t_window: 与训练配置一致（同网格身份才谈得上「同一口径」）。
+
+    Note:
+        末尾不足一个窗口的 τ 余量**不生成**（见 :meth:`dropped_tail_bins`），并如实记账：
+        补零会造出一段没有条件的假 τ 区，解码器会在那里产出音符——比少生成 1-2 秒更糟。
+    """
+
+    chart: PhigrosChart
+    embedding: NDArray[Dynamic]
+    grid: FieldGrid
+    difficulty: float
+    x_bins: int
+    t_window: int
+
+    def n_lines(self) -> int:
+        """K：判定线条数（模板谱面给出；R3 不生成线）。"""
+        return len(self.chart.lines)
+
+    def n_windows(self) -> int:
+        """可生成的窗口数（末尾不足一窗的余量不计，见 `dropped_tail_bins`）。"""
+        return int(self.grid.t_bins) // int(self.t_window)
+
+    def dropped_tail_bins(self) -> int:
+        """被丢弃的 τ 尾部格数（0 表示整条轴都被覆盖）。"""
+        return int(self.grid.t_bins) - self.n_windows() * int(self.t_window)
+
+    def tau_start(self, index: int) -> float:
+        """第 `index` 个窗口的**绝对** τ 起点（拍）。"""
+        return float(index * int(self.t_window)) * TAU_GRID_DT
+
+    def window_grid(self, index: int) -> FieldGrid:
+        """窗口局部网格（`bpm_points` 单段化；与训练窗口逐位同口径）。"""
+        return _window_grid(
+            int(self.x_bins), int(self.t_window), self.grid.bpm_points, self.tau_start(index)
+        )
+
+    def window_start_seconds(self, index: int) -> float:
+        """窗口起点的**绝对**秒（解码出的窗内事件据此平移回整谱时间基）。"""
+        return float(tau_to_seconds(self.tau_start(index), self.grid.bpm_points))
+
+    def batch(self, index: int) -> FieldBatch:
+        """第 `index` 个窗口的 :class:`FieldBatch`（B=1；counts / occlusion 均为 None）。"""
+        if not 0 <= index < self.n_windows():
+            raise IndexError(f"窗口下标 {index} 越界（共 {self.n_windows()} 个）")
+        start = int(index) * int(self.t_window)
+        grid = self.window_grid(index)
+        tracks = line_tracks_at(
+            self.chart,
+            np.asarray(grid.tau_centers() + self.tau_start(index), dtype=np.float64),
+        )
+        audio, _frame_start, padded = _slice_audio(
+            self.embedding,
+            self.grid.bpm_points,
+            self.tau_start(index),
+            float(start + int(self.t_window)) * TAU_GRID_DT,
+        )
+        if padded > 0:
+            logger.warning(
+                "e2e 窗口 %d：音频越出特征缓存，补零 %d/%d 帧（检查 τ 轴终点口径）",
+                index,
+                padded,
+                int(audio.shape[0]),
+            )
+        batch = FieldBatch(
+            audio_emb=torch.as_tensor(audio, dtype=torch.float32).unsqueeze(0),
+            frame_rate=MERT_FRAME_RATE_HZ,
+            line_tracks=tracks.to(dtype=torch.float32).unsqueeze(0),
+            line_mask=torch.ones(1, self.n_lines(), dtype=torch.bool),
+            difficulty=torch.tensor([float(self.difficulty)], dtype=torch.float32),
+            grid=grid,
+        )
+        batch.assert_shapes()
+        return batch
 
 
 def load_pairs(manifest_path: Path, split: str) -> list[PairRow]:

@@ -62,6 +62,7 @@ __all__ = [
     "DEFAULT_PLAN_CHUNK",
     "PlanBatchSampler",
     "PlanSource",
+    "WindowDensitySource",
     "WindowPlan",
     "plan_epoch",
 ]
@@ -84,6 +85,24 @@ class PlanSource(Protocol):
 
     def window_row_index(self, index: int) -> int:
         """第 `index` 个窗口所属的 split 内**行**下标（谱面分层与覆盖率记账用）。"""
+        ...
+
+
+@runtime_checkable
+class WindowDensitySource(Protocol):
+    """计划层的**可选**能力：廉价回答「这个窗口有多密」（RFC-0039 R2）。
+
+    为什么单列一个协议而不并进 :class:`PlanSource`：分层抽样需要密度，取批顺序不需要它。
+    把密度做成 `PlanSource` 的必需方法，会让所有只关心顺序的调用方（含测试 stub）被迫实现
+    一个它们用不到、也无法真实回答的方法——那正是「接口比事实更大」的典型代价。
+    """
+
+    def window_event_count(self, index: int) -> int | None:
+        """窗口内事件数；**不可廉价取得时返回 None**（不得用 0 冒充「拿不到」）。"""
+        ...
+
+    def window_line_count(self, index: int) -> int | None:
+        """窗口的 K（判定线条数）；同上，拿不到就 None。"""
         ...
 
 

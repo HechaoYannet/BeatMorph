@@ -268,10 +268,26 @@ class OptimConfig:
     #: ⚠️ 它**不参与续训指纹**（见 `checkpoint.RESUME_IGNORED_KEYS`）：val 不产生梯度、
     #: 不参与 LR 与早停（§9-47 G-④）⇒ 改它不改变任何被训练的东西，只改变「多久看一次」。
     val_every: int = 100
-    #: 验证集窗口数：从 `split_val` 的计划（`plan_epoch(..., epoch=0)`）里**按网格桶成组**
-    #: 取 N 个窗口，每 `val_every` 步原样重放（同窗口 + 同遮盖种子 ⇒ 逐位一致，§9-47 A1）。
+    #: 验证集窗口数；每 `val_every` 步**原样重放同一批**（同窗口 + 同遮盖种子 ⇒ 逐位一致，
+    #: §9-47 A1；跨步可比只差权重）。
+    #:
+    #: **抽取口径（RFC-0039 R2，2026-09-29 采纳）**：不再是「每桶前 N 个」——那个口径只覆盖
+    #: 计划里最早出现的十几个桶，实测 **57.8% 空窗、事件/窗中位 0**，比总体与训练流系统性
+    #: 容易（§9-62 ⑪㉒）。现在由 `ManifestValSource.selection()` 做**跨桶 + 按事件密度分层**的
+    #: 确定性抽样（层 0 = 空窗；层 1..4 = 非空窗口的等量分位层；配额按层总体比例分配）；
+    #: 构成落盘到 `logs/val_composition.json` 并打进日志（空窗占比 / 事件数 / K 分位 / 集合指纹）。
+    #: ⚠️ **分层需要窗口预切缓存**（事件数只能从缓存的稀疏计数廉价读出）：没有缓存时
+    #: **回退**到旧口径并如实记 `stratified=false`，不假装做过分层。
+    #: ⚠️ **换 val 集合 = 换总体**：`val/ratio` 的历史数值与新集合**不可比**（RFC-0039 §4）。
+    #: 本字段不进续训指纹（它只决定「看哪些窗口」，不决定训练语义）。
+    #:
+    #: 代码默认值**故意保持 R2 之前的 128**（同 R1 的理由：转正落在生产配置，
+    #: 免得 smoke 等配置的总成本被静默改变）；`configs/phigros_masked.yaml` 取 512。
     val_windows: int = 128
     #: 每个验证批最多放几个窗口（**同一网格桶**内的窗口才可同批）。
+    #:
+    #: RFC-0039 R2 之后它同时是「分层抽样不牺牲组批」的旋钮：分层只改**取哪些桶/哪些窗口**，
+    #: 批内仍强制同网格身份（`_stratified_chunks`），否则前向成本会按 K² 律炸开。
     #:
     #: 为什么需要它（§9-53，实测）：计划是跨桶轮转发牌的，取「前 N 个槽位」会让 N 个窗口落在
     #: **N 个不同桶** ⇒ 每个窗口各自成 batch（B=1）× N 次前向。而前向成本 ∝ K²
@@ -375,6 +391,16 @@ class RunConfig:
     log_every: int = 50
     keep_last: int = 3
     keep_best: int = 1
+    #: **端到端产物的周期（步）**；0 = 关闭。RFC-0039 R3：每 N 步生成一张谱面到
+    #: `<e2e_dir>/outputs/<时间>-step<N>/` 供人工审阅。与 `save_every` / `optim.val_every`
+    #: **解耦**（三个周期各自独立），且**不进续训指纹**（它不改变任何被训练的东西）。
+    #:
+    #: **它不是门禁**：不产生 PASS/FAIL、不阻塞训练、不参与选权重；失败只告警并继续。
+    e2e_every: int = 20000
+    #: e2e 资产目录（内含 `meta.json` 指针清单 + `audio/` + `feature/` + `outputs/`）。
+    #: 相对路径按进程 CWD 解析（从仓库根启动）；资产缺失 ⇒ 启动时告警并把 e2e 关掉，
+    #: 而不是等到 20 000 步才第一次报错。
+    e2e_dir: str = "tests/e2e-val"
 
     @property
     def purpose_kind(self) -> RunPurpose:
@@ -502,6 +528,8 @@ def validate_config(cfg: TrainConfig) -> list[str]:  # noqa: PLR0912, PLR0915 - 
         problems.append(
             f"run.keep_last / keep_best 必须 >= 0，得到 {run.keep_last} / {run.keep_best}"
         )
+    if run.e2e_every < 0:
+        problems.append(f"run.e2e_every 必须 >= 0（0 = 关闭端到端产物），得到 {run.e2e_every}")
 
     gates = cfg.gates
     if gates.smoke_max_samples < 1:

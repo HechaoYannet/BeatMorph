@@ -40,6 +40,39 @@ class IndexDataset:
         return index
 
 
+class DensityIndexDataset(IndexDataset):
+    """带**廉价密度读数**的版本（RFC-0039 R2）：`window_event_count` / `window_line_count`。
+
+    为什么单列一个子类而不是给 `IndexDataset` 加上：现有的 val 取批测试钉的是**回退口径**
+    （没有密度来源时按桶首现序取，= R2 之前的行为）；给基类加上密度方法会让那些测试
+    悄悄改测另一条分支，而回退分支将**再没有任何测试覆盖**。
+
+    Args:
+        buckets: 同 :class:`IndexDataset`。
+        events: 逐窗口事件数（长度必须等于窗口总数）——测试**显式控制总体分布**。
+        k_base: K 的基数（`k_base + index % 3`，与桶身份无关，便于测「跨桶」）。
+    """
+
+    def __init__(
+        self,
+        buckets: Sequence[tuple[int, int]],
+        events: Sequence[int],
+        *,
+        k_base: int = 2,
+    ) -> None:
+        super().__init__(buckets)
+        if len(events) != len(self.keys):
+            raise ValueError(f"密度序列长度 {len(events)} != 窗口数 {len(self.keys)}")
+        self.events = [int(value) for value in events]
+        self.k_base = int(k_base)
+
+    def window_event_count(self, index: int) -> int:
+        return self.events[index]
+
+    def window_line_count(self, index: int) -> int:
+        return self.k_base + index % 3
+
+
 def identity_collate(samples: Sequence[int]) -> list[int]:
     """`collate_field_batch` 的替身：样本组装不是本测试的对象。"""
     return list(samples)

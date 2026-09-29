@@ -106,6 +106,7 @@ class ModelSchema:
     audio_align: bool = _DEFAULT_MODEL.audio_align
     head_skip: bool = _DEFAULT_MODEL.head_skip
     visible_input: bool = _DEFAULT_MODEL.visible_input
+    track_input: bool = _DEFAULT_MODEL.track_input
 
     def to_model_config(self) -> ModelConfig:
         """构造真正的 ModelConfig（其 __post_init__ 做架构级校验）。

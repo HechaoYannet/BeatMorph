@@ -102,6 +102,16 @@ class ModelConfig:
     #: 这条路没学到对齐/没学出权重）。本开关绕开那条路：按 token 自己的秒数取音频帧与其差分，
     #: 投影后**直接加**到 token 嵌入上（与 `beamtmorph/field` 的 τ→秒换算同源，见 `FieldGrid.tau_seconds`）。
     audio_align: bool = False
+    #: 条件里是否**真的给**判定线事件轨的内容（`track_input`）。
+    #:
+    #: 为什么需要这个开关（plan 07 §9-67）：e2e 的判定线事件轨是**从该曲真谱复制**来的，
+    #: 而人类谱的可读性做法（线在音符时刻闪现/变速）让这些轨本身就编码了音符时刻——
+    #: 实测「仅事件轨」的 (窗口,线) 组内 AUC 0.643，比音频（0.576）还高，且两者高度冗余
+    #: （联合 0.629 < 事件轨单独）。于是「从音乐出谱」这件事在**条件里**就被解决了大半，
+    #: 模型把依赖压在事件轨上（cond_track_zero 0.9-1.8）而音频边际掉到 ≈0。
+    #: 关掉它 = 只保留**线身份与位置编码**（模型仍然知道「哪条线、第几拍」），
+    #: 但拿不到任何运动/透明度/速度内容 ⇒ 内容只能来自音频。
+    track_input: bool = True
     #: 输入侧是否**真的看到**可见场（`visible_input`）。
     #:
     #: 为什么需要这个开关（plan 07 §9-66）：训练送进去的可见场永远是「随机 50% 的事件」，
@@ -527,6 +537,10 @@ class MaskedFieldModel(nn.Module):
             )
         batch_size, n_lines, t_line, _ = tracks.shape
         projected = self.track_proj(self.track_norm(tracks))
+        if not self.config.track_input:
+            # 只留「哪条线、第几拍」：位置编码与 line embedding 仍在下面加上，
+            # 因此模型保有线身份与时间轴，但拿不到运动/透明度/速度的内容（plan 07 §9-67）。
+            projected = torch.zeros_like(projected)
         positions = torch.arange(t_line, dtype=torch.float32, device=tracks.device)
         projected = projected + sinusoidal_encoding(
             positions,

@@ -334,6 +334,17 @@ class FieldGrid:
         """tau 格中心（T 个，拍）。"""
         return np.asarray((np.arange(self.t_bins) + 0.5) * self.d_tau, dtype=np.float64)
 
+    def tau_seconds(self) -> FloatArray:
+        """τ 格中心对应的**窗口内秒数**（T 个，秒）。
+
+        为什么由本模块提供：秒 <-> τ 的换算只允许在 `field/` 内实现（红线 7）。
+        窗口网格的 `bpm_points` 是单段等效 BPM（`bpm_eff = 60/J(τ_start)`，见
+        `beatmorph/data/dataset.py` 的 `_window_grid`），因此这里的值正好落在
+        **与音频帧相同**的窗口相对时间基上——生成侧的音画对齐需要它，
+        但换算本身不得在生成侧重写。
+        """
+        return np.asarray(tau_to_seconds(self.tau_centers(), self.bpm_points), dtype=np.float64)
+
     def range_mask(self) -> BoolArray:
         """RangeMask：(X,) 的 |x_center| <= 675。
 

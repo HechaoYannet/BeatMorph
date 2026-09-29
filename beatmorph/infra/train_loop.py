@@ -319,6 +319,8 @@ def model_from_config(
     """按配置建模型（固定初始化种子；可选抬高累积强度偏置）。"""
     torch.manual_seed(seed)
     model = MaskedFieldModel(cfg.model.to_model_config(), grid)
+    # 熵正则权重住在 optim（它是训练目标的一部分），但损失在模型内部计算 ⇒ 在这里注入。
+    model.cell_entropy_weight = float(cfg.optim.cell_entropy_weight)
     if initial_head_bias:
         set_initial_head_bias(model, initial_head_bias)
     return model

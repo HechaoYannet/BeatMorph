@@ -102,6 +102,9 @@ class ModelSchema:
     extended_dim: int = _DEFAULT_MODEL.extended_dim
     position_max_period: float = _DEFAULT_MODEL.position_max_period
     check_lambda: bool = _DEFAULT_MODEL.check_lambda
+    seconds_position: bool = _DEFAULT_MODEL.seconds_position
+    audio_align: bool = _DEFAULT_MODEL.audio_align
+    head_skip: bool = _DEFAULT_MODEL.head_skip
 
     def to_model_config(self) -> ModelConfig:
         """构造真正的 ModelConfig（其 __post_init__ 做架构级校验）。
@@ -278,6 +281,13 @@ class OptimConfig:
     #: 填充线的 `line_mask=False` 被排除；`ValAccumulator` 亦按有效线聚合）。
     #: 不改梯度、不进续训指纹（同 `val_windows`）。
     val_batch: int = 8
+    #: 空间 softmax 的**熵正则权重**（0 = 关闭）。惩罚项与事件项同结构：
+    #: `w · (1/r) · Σ_被遮盖 n · H(p_token) / max(E_total,1)`（H 为 token 内 (x,s,c) 分布的熵）
+    #: ⇒ `w` 与 `−log λ` 同量纲。
+    #: 实测依据（`runs/_diag_flat.py`，step-20000）：把模型自己的输出在 token 内摊平后
+    #: `val_ratio` **0.8867 → 0.7351**（只摊平 x 轴 → **0.6697**）⇒ 它的空间分布比均匀还差，
+    #: 代价 0.19-0.28 nats/line，比音频/LR/对齐等任何已测效应大两个数量级。
+    cell_entropy_weight: float = 0.0
     precision: str = "bf16-mixed"
     seed: int = 0
 
@@ -478,6 +488,10 @@ def validate_config(cfg: TrainConfig) -> list[str]:  # noqa: PLR0912, PLR0915 - 
         problems.append(f"optim.val_windows 必须 >= 1，得到 {optim.val_windows}")
     if optim.val_batch < 1:
         problems.append(f"optim.val_batch 必须 >= 1，得到 {optim.val_batch}")
+    if optim.cell_entropy_weight < 0.0:
+        problems.append(
+            f"optim.cell_entropy_weight 必须 >= 0（0 = 关闭），得到 {optim.cell_entropy_weight}"
+        )
 
     run = cfg.run
     if run.log_every < 1:

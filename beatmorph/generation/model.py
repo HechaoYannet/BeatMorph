@@ -85,6 +85,31 @@ class ModelConfig:
     extended_dim: int = 0
     position_max_period: float = 10000.0
     check_lambda: bool = True
+    #: 场 token 是否**额外**加一条「以秒为基准」的位置编码（plan 04 §5 的残留问题）。
+    #:
+    #: 为什么必须有它：窗口网格把 τ 轴重新标定为**窗口等效 BPM**（`bpm_eff = 60/J(τ_start)`，
+    #: 见 `beatmorph/data/dataset.py` 的 `_window_grid`），即 τ 格 → 秒的换算因子
+    #: **逐窗口不同**；而音频帧的位置编码以**秒**为基准（`encode_audio`）。模型此前只拿到
+    #: τ **格下标**、拿不到 `J`，因此**无法把音频帧与场 token 对齐**（实测：音频帧轴置换只值
+    #: 0.6% 的 NLL，plan 07 §9-61③）。打开它 = 把 τ 格映射到窗口内的秒数（唯一实现处
+    #: `beatmorph/field/grid.py` 的 `tau_to_seconds`），使两条轴落在同一时间基上。
+    seconds_position: bool = False
+    #: 是否把**与 τ 对齐的音频帧**直接注入场 token（`audio_align`）。
+    #:
+    #: 为什么需要：探针实测（`runs/_diag_audio_probe.py`）表明，按 τ→秒对齐取出 MERT 帧、
+    #: 用**线性**读出就能以 **val AUC 0.64** 预测「哪个 τ 切片有音符」（仅位置 0.54、随机 0.51）
+    #: ——信息在音频里；但模型的 `cond_audio_perm_delta ≈ 0` 说明**它一点没用上**（cross-attention
+    #: 这条路没学到对齐/没学出权重）。本开关绕开那条路：按 token 自己的秒数取音频帧与其差分，
+    #: 投影后**直接加**到 token 嵌入上（与 `beamtmorph/field` 的 τ→秒换算同源，见 `FieldGrid.tau_seconds`）。
+    audio_align: bool = False
+    #: 输出头是否保留**输入直连 skip**（`cell_skip` / `cum_skip`）。
+    #:
+    #: 原设计理由（plan 04 §9-17）：补全任务需要一条从「输入结构」到输出的**短梯度路径**，
+    #: 否则优化会停在只学边际分布的盆地。但实测（`runs/_diag_anti.py`）在**真实任务**上它可能
+    #: 是反向的：对**被遮盖** token，skip 的输入是常数 `[0…0, 1…1]` ⇒ 它只能给一个**与 token
+    #: 无关**的空间先验，而实测该先验**与真实事件格反相关**（命中率 0.367 < 0.5），且 token 内
+    #: 空间分布的熵只有 **1.88 / 7.16 nats**（近似 one-hot）。关掉它 = 逼 p(x,s,c) 只能来自 trunk。
+    head_skip: bool = True
 
     def __post_init__(self) -> None:
         if self.d_model % 2 != 0:
@@ -223,6 +248,7 @@ class FieldTokenEmbedding(nn.Module):
         self.line_embedding = nn.Embedding(config.k_max, config.d_model)
         self.norm = nn.LayerNorm(config.d_model)
         self.max_period = config.position_max_period
+        self.use_seconds_position: bool = bool(config.seconds_position)
 
     def forward(
         self,
@@ -232,6 +258,7 @@ class FieldTokenEmbedding(nn.Module):
         n_lines: int,
         t_bins: int,
         device: torch.device,
+        seconds: Tensor | None = None,
     ) -> tuple[Tensor, Tensor]:
         """state / occlusion 形状 (B, K, T, X, S, C) -> ((B, K, T, d), (B, K, T, 2 * cells))。
 
@@ -256,6 +283,14 @@ class FieldTokenEmbedding(nn.Module):
             self.norm.normalized_shape[0],
             max_period=self.max_period,
         ).reshape(1, 1, t_bins, -1)
+        if seconds is not None:
+            # 与音频帧**同一时间基**（秒）的位置编码：音频轴走 encode_audio 的秒编码，
+            # 场轴此前只有 τ 格下标 ⇒ 两条轴相差一个逐窗口不同的因子 J(τ_start)。
+            tokens = tokens + sinusoidal_encoding(
+                seconds.to(dtype=torch.float32).reshape(-1),
+                self.norm.normalized_shape[0],
+                max_period=self.max_period,
+            ).reshape(1, 1, t_bins, -1)
         line_ids = torch.arange(n_lines, device=device)
         tokens = tokens + self.line_embedding(line_ids).reshape(1, n_lines, 1, -1)
         features = torch.cat([flattened, occlusion_flat], dim=-1)
@@ -275,6 +310,7 @@ class FieldHead(nn.Module):
     def __init__(self, config: ModelConfig, grid: FieldGrid) -> None:
         super().__init__()
         self.mode: HeadMode = config.head
+        self.use_skip: bool = bool(config.head_skip)
         self.x_bins = grid.x_bins
         self.sides = grid.sides
         self.channels = grid.channels
@@ -301,7 +337,7 @@ class FieldHead(nn.Module):
         if self.mode == "factorized":
             delta_logits = self.cum_head(tokens).squeeze(-1)
             cell_logits = self.cell_head(tokens)
-            if input_features is not None:
+            if input_features is not None and self.use_skip:
                 delta_logits = delta_logits + self.cum_skip(input_features).squeeze(-1)
                 cell_logits = cell_logits + self.cell_skip(input_features)
             delta = F.softplus(delta_logits)
@@ -317,7 +353,7 @@ class FieldHead(nn.Module):
             cum: Tensor | None = cumulative_lambda_batched(lam, grid)
         else:
             raw = self.rate_head(tokens)
-            if input_features is not None:
+            if input_features is not None and self.use_skip:
                 raw = raw + self.cell_skip(input_features)
             rate = F.softplus(raw).reshape(
                 batch_size,
@@ -358,7 +394,20 @@ class MaskedFieldModel(nn.Module):
             [DecoderLayer(config, kind) for kind in config.layer_kinds()],
         )
         self.head = FieldHead(config, grid)
+        #: 时间对齐音频的直连通道（`audio_align`）：输入 = [帧, 帧差分] ⇒ d_model。
+        self.audio_align_proj: nn.Linear | None = (
+            nn.Linear(2 * config.audio_dim, config.d_model) if config.audio_align else None
+        )
         self._band_cache: dict[tuple[int, int, torch.device, torch.dtype], Tensor] = {}
+        self._seconds_cache: dict[tuple[int, str], Tensor] = {}
+        #: 空间 softmax 的**熵正则权重**（0 = 关闭）。由训练器从 `optim.cell_entropy_weight` 注入。
+        #:
+        #: 为什么需要：实测（`runs/_diag_flat.py`）把模型自己的输出**在 token 内摊平**后
+        #: `val_ratio` 从 **0.8867 → 0.7351**（只摊平 x 轴 → **0.6697**）⇒ 它那套又尖又错的
+        #: `(x,s,c)` 分布**比均匀还差**，代价约 0.19–0.28 nats/line，比其它任何效应大两个数量级。
+        #: 惩罚项与事件项**同结构**：`w · (1/r) · Σ_被遮盖 n · H(p_token) / D`（H 为 token 内
+        #: 空间分布的熵，D = max(E_total,1)），因此 `w` 与 `−log λ` 同量纲、可直接比较。
+        self.cell_entropy_weight: float = 0.0
 
     # ── 条件分支 ────────────────────────────────────────────────
     def difficulty_embedding(self, difficulty: Tensor) -> Tensor:
@@ -370,6 +419,38 @@ class MaskedFieldModel(nn.Module):
         )
         embedded: Tensor = self.difficulty_proj(encoded)
         return embedded
+
+    def _aligned_audio(self, batch: FieldBatch, grid: FieldGrid, device: torch.device) -> Tensor:
+        """(B, 1, T, d)：把**该 τ 切片对应时刻**的音频帧（及其差分）投影进 token 空间。
+
+        帧下标由 `FieldGrid.tau_seconds()`（τ→秒的唯一实现处）乘派生帧率得到——生成侧不重写换算。
+        """
+        audio = self.audio_norm(batch.audio_emb)  # (B, Ta, D)
+        n_frames = int(audio.shape[1])
+        seconds = self._field_seconds(grid, device=device).to(dtype=torch.float32)
+        frame = torch.clamp(
+            (seconds * float(batch.frame_rate)).round().to(dtype=torch.long), 0, n_frames - 1
+        )
+        previous = torch.clamp(frame - 1, 0, n_frames - 1)
+        current = audio[:, frame]  # (B, T, D)
+        delta = current - audio[:, previous]
+        features = torch.cat([current, delta], dim=-1)
+        assert self.audio_align_proj is not None  # 由调用方保证
+        projected: Tensor = self.audio_align_proj(features)
+        return projected.to(dtype=current.dtype).unsqueeze(1)
+
+    def _field_seconds(self, grid: FieldGrid, *, device: torch.device) -> Tensor:
+        """窗口局部 τ 格 -> **窗口内秒数**（τ→秒换算的唯一实现处是 `beatmorph/field/grid.py`）。
+
+        窗口网格的 `bpm_points` 是单段等效 BPM（`bpm_eff = 60/J(τ_start)`），因此这里的
+        秒数正好落在与 `encode_audio` 相同的窗口相对时间基上。
+        """
+        key = (int(grid.t_bins), str(device))
+        cached = self._seconds_cache.get(key)
+        if cached is None:
+            cached = torch.as_tensor(grid.tau_seconds(), dtype=torch.float32, device=device)
+            self._seconds_cache[key] = cached
+        return cached
 
     def encode_audio(self, batch: FieldBatch) -> Tensor:
         """(B, T_audio, D) -> (B, T_audio, d)；位置编码以**秒**为基准（由 frame_rate 派生）。"""
@@ -511,7 +592,14 @@ class MaskedFieldModel(nn.Module):
             n_lines=batch.n_lines(),
             t_bins=batch.grid.t_bins,
             device=state.device,
+            seconds=(
+                self._field_seconds(batch.grid, device=state.device)
+                if self.config.seconds_position
+                else None
+            ),
         )
+        if self.audio_align_proj is not None:
+            tokens = tokens + self._aligned_audio(batch, batch.grid, state.device)
         tokens = self.decode(batch, tokens)
         lam, cum, probability = self.head(
             tokens,
@@ -541,8 +629,32 @@ class MaskedFieldModel(nn.Module):
                 if batch.occlusion is not None
                 else full_poisson_loss(output, batch, reduction="per_event")
             )
+            if self.cell_entropy_weight > 0.0 and output.cell_prob is not None:
+                loss = loss + self._cell_entropy_penalty(output, batch)
             output = replace(output, loss=loss)
         return output
+
+    def _cell_entropy_penalty(self, output: FieldOutput, batch: FieldBatch) -> Tensor:
+        """`w · (1/r) · Σ_被遮盖 n · H(p) / D`——把空间分布从「又尖又错」推向平坦。
+
+        只统计**被遮盖事件所在的 token**（那正是事件项监督的位置），并按与事件项相同的
+        `1/r` 重标定与 `D` 归一，使权重的量纲与 `-log λ` 一致。
+        """
+        from beatmorph.generation.losses import _counts_or_raise, event_normalizer
+
+        prob = output.cell_prob
+        assert prob is not None
+        counts = _counts_or_raise(batch).to(dtype=prob.dtype)
+        occl = batch.occlusion_bool()
+        supervised = counts * occl.to(dtype=counts.dtype)
+        n_token = supervised.sum(dim=(3, 4, 5))  # (B, K, T)
+        safe = prob.clamp_min(1e-30)
+        entropy = -(safe * safe.log()).sum(dim=(3, 4, 5))  # (B, K, T)
+        per_line = apply_line_mask_batched((n_token * entropy).sum(dim=2), batch.line_mask_bool())
+        ratio = occlusion_ratio(batch)
+        if ratio <= 0.0:
+            return torch.zeros((), dtype=prob.dtype, device=prob.device)
+        return per_line.sum() * (self.cell_entropy_weight / ratio) / event_normalizer(batch)
 
     def forward(self, batch: FieldBatch, *, compute_loss: bool = True) -> FieldOutput:
         """标准前向：可见场 = counts * (~occlusion)（RFC-0029 §3.3-1 的输入约定）。"""

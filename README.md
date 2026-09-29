@@ -85,18 +85,16 @@ val 512 窗分层集（`f9d9f7d1068c`）；损失按事件归一；τ→秒表�
 
 | 未决 | 出处 |
 |------|------|
-| **修法只把前缀变无偏，没改 epoch 内的轮转结构**（epoch 内「每轮各谱一块」仍在 ⇒ 池级相关性仍在） | §9-70 ④ |
-| **质量为何会崩**（机制未定）；可见场抄写基线只到 0.744（那一条其实是「均匀底」在起作用） | §9-69 ④⑦ |
+| **修法只把前缀变无偏，epoch 内「每轮各谱一块」的池级相关性仍在**；可见场抄写基线 0.744 其实是「均匀底」在起作用 | §9-70 ④、§9-69⑦ |
 | **onset 前端值不值得全库重提**（+0.03 AUC）；**音频依赖为何在每个臂上都衰减**（4 臂复现） | §9-67 ⑤⑥ |
 | 「9 维线性打平 40M 模型」只在这一条判据上验证；§9-66 的 top-N F1 上界列；盲训练的迭代退化 | §9-66 存疑 1/2/4 |
-| `seconds_position` 是否值得开；装饰线**模型侧**旁路未做 | §9-64 ③、§9-65 |
-| `val_windows=512` 抽样精度 / `val_every` A/B；`val.batches()` 前缀不是代表集 | §9-63、§9-69 |
+| `seconds_position` 是否值得开；装饰线**模型侧**旁路未做；`val_windows` 抽样精度 / `val_every` A/B | §9-64 ③、§9-65、§9-63 |
 | RFC-0038/0039 重叠处置；`nll_shuffled_delta` margin；`grad_clip_norm`；G1 下限 0.05 的 per-event 语义 | RFC-0038/0039 §5 |
 | 批 K 上限 / RFC-0035 §1 的 91.3% 未更正 / `r==0` 遮盖退化 / 预算按步还是按 epoch | §9-59 / §9-52 / §9-43 |
 
-**一次性探针（⚠️ `scripts/local_*` 与 `runs/_*` 均不入库，清理即丢）**：本轮 = `_probe_composition.py`（训练分布
-vs 语料分布）、`_probe_plan_prefix.py`（前缀画像）、`_probe_plan_rounds.py`（零成本：coverage_at 看轮次结构）、
-`_probe_shuffle_check.py`（修法前后缀实测）、`_probe_tau_ceiling.py`（11 维岭回归的 τ 天花板）、`_probe_mass.py`；
+**一次性探针（⚠️ `scripts/local_*` 与 `runs/_*` 均不入库，清理即丢）**：本轮 = `_probe_composition.py`（训练 vs
+语料分布）、`_probe_plan_prefix.py`、`_probe_plan_rounds.py`（coverage_at 看轮次）、`_probe_shuffle_check.py`、
+`_probe_tau_ceiling.py`（11 维岭回归天花板）、`_probe_mass.py`；
 历史见 plan 07 §9-64/§9-66/§9-67/§9-69。
 ⚠️ **口径陷阱（第四次）**：`val.batches()` 前 40 批是稀疏层；跨 checkpoint 比较**必须固定同一批**，
 绝不能把子集读数与全 val 混着说。

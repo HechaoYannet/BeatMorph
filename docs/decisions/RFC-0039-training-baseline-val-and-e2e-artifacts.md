@@ -112,7 +112,20 @@
   `model.seconds_position` 与 `optim.cell_entropy_weight` 保持 `false` / `0`（**已实测无效**，见 §9-62 ⑦ 臂 A / ⑮ 臂 D）。
 - plan 04 §9-17 的结论**就地更正**（适用域回退到合成任务）。
 - plan 07 §9-62 增补 R1/R2/R3 的验收判据；`docs/TRAINING.md` 需在实现 R2/R3 时同步（**本轮未做**）。
-- **待实现（下一轮，本轮不做）**：R2 的抽取口径与构成落盘、R3 的触发钩子 / 产物写出 / `tests/e2e-val` 骨架。
+- **已实现（2026-09-29，同一轮内）**：
+  - **R2**：`ManifestValSource` 改为**跨桶 + 按事件密度分层**的确定性抽样（`ValSelection` /
+    `ValStratum` / `_density_strata` / `_largest_remainder` / `_top_up`）；密度来自
+    `WindowCacheReader.event_count`（**只读稀疏计数**：74 889 个窗口实测 **1.1 s**），
+    没有窗口缓存时**回退旧口径并如实记 `stratified=false`**（不假装分层）；
+    构成落盘 `logs/val_composition.json`，并在训练启动时把摘要打进日志。
+    生产配置：`val_windows: 128 → 512`、`val_every: 1000 → 10000`（节奏必须与窗口数一起改）。
+  - **R3**：新增 `beatmorph/infra/e2e.py`（端到端生成 + 产物写出）与
+    `beatmorph/data/dataset.py::SongWindows`（单曲窗口，复用训练同一条换算路径，红线 7）；
+    训练侧 `run.e2e_every` / `run.e2e_dir`（**都不进续训指纹**），触发时失败只告警
+    （`e2e_failed=1` 进 jsonl/TB），不打断训练。产物走 `decoder/` 的合法性/可玩性后处理，
+    违规项非空则**拒绝导出 `chart.json`**（红线 6），但 `meta.json` 一定写。
+  - 护栏：`tests/unit/infra/test_val_selection.py`（12 项）、`tests/unit/infra/test_e2e.py`（13 项）。
+  - 真实数据复评读数（512 窗新集合 + 端到端产物）见 plan 07 §9-63。
 - **不可逆的记账**：R2 生效后，`val/ratio` 的数值整体换总体，**历史曲线不再可比**。
 
 ## 5. 关联

@@ -467,14 +467,48 @@ git/data rev）/ `data_provenance.json`（来源与用途）/ `checkpoints/` / `
   新口径在**测出更优 `val/ratio` 的那一步**立即写盘，不随 `save_every`。无 val 时回落旧口径，
   且在日志里明说「不作为模型选择依据」。
 
-> ⚠️ **开 val 之前必须读这一段（实测开销，不是估算）**：§9-47 E 原先算的一次 val ≈ `val_every`
-> 预算的 **5.8%**，**实测是 0.7–1.5×**（即一次 val 的开销与它之间那 1000 步的训练**同量级**）。
-> 三个原因，缺一不可地都被低估了：① 对照臂是 **5 次前向**（E 只算了 1 次）；② 数据侧实测
-> **0.276 s/窗**（workers=8），不是 E 的 0.038 s；③ val 前缀抽到的 **K 比训练流重**
-> （p90 **106** vs 训练流 53–67），而前向成本 ∝ K²。
-> ⇒ 当前 `optim.val_every=1000 / val_windows=128` 会让训练**慢一倍以上**。要压回 5% 需在三者里
-> 裁定：`val_windows≈32` / `val_every≈4000` / **对照臂降频**（条件干预三元组不必每次 val 都跑）。
-> 详见 plan 07 §9-51 ③。
+> ⚠️ **开 val 之前必须读这一段（RFC-0039 R2 之后的实测口径）**
+>
+> **集合构成变了**：`optim.val_windows: 128 → 512`，且抽取口径从「每桶前 N 个」改成
+> **跨桶 + 按事件密度分层**的确定性抽样（`ManifestValSource.selection()`）。
+> 换集合 = **换总体** ⇒ **历史 `val/ratio` 不再可比**（只作历史记录）。
+> 每次 val 的构成落盘在 `runs/<experiment>/<时间戳>/logs/val_composition.json`，
+> 启动时也会打一行摘要（层/配额/事件分位/K 分位/**集合指纹**）。
+>
+> **实测开销（2026-09-29，plan 07 §9-63）**：512 窗 × 5 臂（模型 / 线内置换 / 音频置零 /
+> 音频帧轴置换 / 事件轨置零）= **205.8 / 210.6 s（3.4-3.5 min）**；
+> 密度扫描（74 889 个 val 窗口）只需 **0.9-1.3 s**（只读窗口缓存的稀疏计数）。
+> 配 `val_every=10000`（≈33 min 训练）⇒ val 占 **约 10%**。
+> ⚠️ **分层需要窗口预切缓存**：没有 `data.window_cache_dir` 时会**回退旧口径**并在构成里
+> 记 `stratified=false`（不假装做过分层）。
+>
+> 旧记录（2026-09-27，128 窗口口径）：一次 val 实测 100-168 s、跨墙但会自己恢复；
+> 当时的结论「val 前缀抽到的 K 比训练流重（p90 106）」在新口径下不再成立——
+> 新集合的 K/事件分布与总体一致（这正是 R2 要修的偏差）。
+
+**①b 端到端产物（RFC-0039 R3）：每 `run.e2e_every` 步生成一张谱面供人工审阅**
+
+```bash
+# 开关在 run 段：e2e_every=20000（0 = 关闭）、e2e_dir=tests/e2e-val
+uv run beatmorph-train --config-name phigros_masked --device cuda --skip-env-doctor
+# 产物：tests/e2e-val/outputs/<YYYYMMDD-HHMMSS>-step<N>/{chart.json, meta.json, notes.txt}
+```
+
+- **它不是门禁**：不产生 PASS/FAIL、不阻塞训练、不参与选权重。失败只告警并继续
+  （jsonl/TB 里 `e2e_failed=1`），`run.e2e_every` / `run.e2e_dir` **都不进续训指纹**。
+- **输入**在 `tests/e2e-val/meta.json`（指针清单；`audio/` `feature/` `outputs/` 不入库）。
+  **条件**优先按音频 sha1 从训练清单里找回该曲的真谱（判定线事件轨 + BPM + 定数）；
+  找不到就退化为**无条件生成**（合成模板），并在产物 `template.source` 里如实标注。
+- **产物怎么读**：`notes.txt` 一行摘要；`meta.json` 里有 `decode.aggregated`（逐窗解码统计，含 `model_expected_events` = 模型的 ∫λdV）、`windowed_decode`（窗口数 / τ 轴 / 丢弃尾巴）、
+  `template`（条件来源与 sha1）、`hold_pairing`、`stats`（合法性全部读数）。
+- **实测（2026-09-29，plan 07 §9-63）**：145 窗 × 8 步解码 + 后处理 = **45 s**；
+  产物 665 note、合法、跨线冲突 0；模型期望事件数 721（与解码候选 760 自洽）。
+- ⚠️ **解码臂**：`meta.json` 的 `method` 可选 `thinning`（默认）或 `peaks`。
+  **D1（peaks）的阈值在真实场上尚未标定**（α=1 时单窗解出 8.7-15.7 万个事件，
+  而模型自己的期望只有 0.02-2.96）——标定是 plan 05 M5.7 的事；在那之前人工审阅请用 `thinning`。
+- ⚠️ **事件预算闸**：单次产物累计事件超过 `MAX_DECODED_EVENTS`（60000）会**立即中止**并写出
+  「不含 `chart.json`」的诊断产物（2026-09-29 实测过：第一版没有这道闸，整首歌的事件全留在
+  内存里 ⇒ 21 GB 常驻、单核跑满、GPU 空转）。
 
 **② 断点续训**
 

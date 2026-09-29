@@ -129,6 +129,20 @@ class ModelConfig:
     #: 无关**的空间先验，而实测该先验**与真实事件格反相关**（命中率 0.367 < 0.5），且 token 内
     #: 空间分布的熵只有 **1.88 / 7.16 nats**（近似 one-hot）。关掉它 = 逼 p(x,s,c) 只能来自 trunk。
     head_skip: bool = True
+    #: 两条 skip 的**分开关**（plan 07 §9-68）：None = 跟随 `head_skip`（默认，向后兼容）。
+    #:
+    #: 为什么必须能分开：实测（`runs/_probe_tau_reward.py`）—— `head_skip=false` 之后模型对 τ 轴
+    #: **完全无感**（把输出的 τ 轴整体置换：`val_nll` Δ = −7e-6…+6e-5，四个不同臂都一样），
+    #: 而 `head_skip=true` 的老基线是 **+2.148**，两条轴的 x 置换都还在 +0.28…+0.44。
+    #: 也就是说：**拆掉 skip 换来了空间轴（命中率 0.367→0.75、val_ratio 0.9987→0.762），
+    #: 代价是把时间轴整个丢了**（skip 那条短路径曾经把「可见场在哪些 τ 上有证据」直接喂给 δ 分支，
+    #: 而可见事件与隐藏事件同处一片区域 ⇒ δ 天然带 τ 形状）。
+    #:
+    #: `cum_skip` 只作用于**标量 δ(τ)**（每 token 一个数），它给不出「与 token 无关的空间先验」
+    #: ——§9-62 指控的正是 `cell_skip` 那一侧（p(x,s,c) 的常数先验、命中率 0.367）。
+    #: 因此实验臂 = `head_skip=false` + `head_cum_skip=true`：**要回 τ，不要回空间捷径**。
+    head_cell_skip: bool | None = None
+    head_cum_skip: bool | None = None
 
     def __post_init__(self) -> None:
         if self.d_model % 2 != 0:
@@ -336,6 +350,13 @@ class FieldHead(nn.Module):
         super().__init__()
         self.mode: HeadMode = config.head
         self.use_skip: bool = bool(config.head_skip)
+        #: 分开关（None = 跟随 head_skip）；见 ModelConfig.head_cell_skip 的说明。
+        self.use_cell_skip: bool = (
+            self.use_skip if config.head_cell_skip is None else bool(config.head_cell_skip)
+        )
+        self.use_cum_skip: bool = (
+            self.use_skip if config.head_cum_skip is None else bool(config.head_cum_skip)
+        )
         self.x_bins = grid.x_bins
         self.sides = grid.sides
         self.channels = grid.channels
@@ -362,8 +383,9 @@ class FieldHead(nn.Module):
         if self.mode == "factorized":
             delta_logits = self.cum_head(tokens).squeeze(-1)
             cell_logits = self.cell_head(tokens)
-            if input_features is not None and self.use_skip:
+            if input_features is not None and self.use_cum_skip:
                 delta_logits = delta_logits + self.cum_skip(input_features).squeeze(-1)
+            if input_features is not None and self.use_cell_skip:
                 cell_logits = cell_logits + self.cell_skip(input_features)
             delta = F.softplus(delta_logits)
             probability = torch.softmax(cell_logits, dim=-1).reshape(
@@ -378,7 +400,7 @@ class FieldHead(nn.Module):
             cum: Tensor | None = cumulative_lambda_batched(lam, grid)
         else:
             raw = self.rate_head(tokens)
-            if input_features is not None and self.use_skip:
+            if input_features is not None and self.use_cell_skip:
                 raw = raw + self.cell_skip(input_features)
             rate = F.softplus(raw).reshape(
                 batch_size,

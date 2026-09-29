@@ -105,6 +105,8 @@ class ModelSchema:
     seconds_position: bool = _DEFAULT_MODEL.seconds_position
     audio_align: bool = _DEFAULT_MODEL.audio_align
     head_skip: bool = _DEFAULT_MODEL.head_skip
+    head_cell_skip: bool | None = _DEFAULT_MODEL.head_cell_skip
+    head_cum_skip: bool | None = _DEFAULT_MODEL.head_cum_skip
     visible_input: bool = _DEFAULT_MODEL.visible_input
     track_input: bool = _DEFAULT_MODEL.track_input
 

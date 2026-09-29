@@ -1,0 +1,5 @@
+{
+    "audio":"audio/fudahuang.mp3",
+    "feature":"feature/fudahuang.npz",
+    "json":"feature/fudahuang.npz"
+}

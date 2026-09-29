@@ -93,6 +93,18 @@ model:
   dropout: 0.1
   head: factorized
   audio_dim: 1024
+  # ★★ RFC-0039 R1（2026-09-29 决策者裁定通过）：以下两个开关**转正为基线配置**。
+  #   head_skip=false：移除输出头对**原始输入特征**的直连 skip。对被遮盖 token，它原来的输入恒为
+  #     常数 [0…0, 1…1] ⇒ 只能给一个与 token 无关的空间先验（实测与真实事件格**反相关**：命中率
+  #     0.367 < 0.5），并且这条「容易的路」让 trunk 学不动（权位移 5–20% vs head 1100–2900%）。
+  #   audio_align=true：把**与该 τ 切片同一时刻**的音频帧（含帧差分）投影后直连注入 token。
+  #   ⚠️ 两者**串联**才生效：只开 head_skip=false 只拿到一小部分收益（512 窗 val_ratio 0.9465），
+  #     只开 audio_align=true 完全无效（0.9608）。二者同时打开：训练损失 ~10 → 0.015、
+  #     512 窗 val_ratio 0.9608 → 0.7454（配对 t = +3.03）。全链实测见 plan 07 §9-62。
+  #   ⚠️ schema 的代码默认值**故意不变**（head_skip=true / audio_align=false），以免 smoke 等
+  #     其它配置与门禁被静默改变——转正的依据是**本配置**，不是默认值。
+  head_skip: false
+  audio_align: true
 
 optim:
   lr: 0.0003

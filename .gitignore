@@ -135,6 +135,13 @@ checkpoints/
 predictions/
 *.log
 
+# ── RFC-0039 R3：端到端生成审阅件 ──
+# 数据合规硬约束②：谱面与音乐允许本地落盘、**不得入库**。输入音频/特征与每 20k 步的生成产物只留本地；
+# 只有 meta.json 这类**指针清单**可入库（audio/ 已被上面的 *.mp3 规则覆盖，此处显式化以免将来换格式失效）。
+tests/e2e-val/audio/
+tests/e2e-val/feature/
+tests/e2e-val/outputs/
+
 # ── Hydra 配置运行时输出 ──
 multirun/
 hydra/

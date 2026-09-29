@@ -18,89 +18,78 @@ BeatMorph 从原始音频（WAV/MP3）+ 难度（+ 可选判定线事件轨）�
 
 > 本节读者是**下一个 session 的 agent**，不是历史记录。
 > **每次交接必须整节重写，不得追加**（规则见 [AGENTS.md](AGENTS.md) §6）。
-> 上次交接：**2026-09-30** ｜ 交接人：主会话（第十五轮：找到「模型学不会按音乐出谱」的根因并修掉——
-> 修法让音频**真的被用上**（置零代价 −0.075 → **+1.033** nats/line），但 `val_ratio` **没有变好**，
-> 故按决策者指令**未开 RFC**；同轮修掉 e2e 的「note 落在不可见 / 装饰判定线上」。
-> 全链见 plan 07 §9-64 / §9-65）
+> 上次交接：**2026-09-30** ｜ 交接人：主会话（第十六轮：**判据侧诊断** —— 目标根本不需要音乐、
+> 判据与目标脱节、输入侧封顶。§9-64 的对齐修复**是必要的但不是充分的**：它让音频从「被彻底抛弃」
+> 变成载荷项（`cond_audio_zero` −0.075 → +1.033），却**没有**让 `val_ratio` 变好。全链见 plan 07 §9-66）
 
 ### 当前状态
 
-自检（默认 CI，无网络 / 无权重 / 无 GPU）：`uv run ruff check . && uv run mypy beatmorph && uv run pytest -m "not slow and not gpu and not e2e"` → **1150 passed**（16 deselected）。⚠️ 提交时 `pre-commit` 的 `ruff-format` 会重排若干**旧文件**并使首次 commit 失败——`git add` 后重提交即可，**不要为此做全仓格式化**。
+自检：`ruff check beatmorph tests` ✅ ｜ `mypy beatmorph` ✅（84 files）｜ `pytest -m "not slow and not gpu and not e2e"` → **1154 passed**（16 deselected）。
+⚠️ `ruff check .` 现在会**红**，但红的不是本仓代码：`research/kipphi-rpejson/`（未跟踪、由决策者另行加入）未进 `pyproject.toml` 的 `extend-exclude`。
 
-**★ 根因（已实测）：τ→秒表被冻结 ⇒ 音频从来没在「对的时刻」进过模型**
+**★★ 判据侧三条硬读数（本轮新增，直接回答「为什么学不会音乐」）**
 
-| 事实 | 数值 |
-|---|---|
-| `_field_seconds` 的缓存键只有 `(t_bins, device)`，而 `t_bins` 是全库常数（`data.t_window`） | 表在**第一次前向**被冻结成**第一个窗口**的 BPM（**301.5**） |
-| val 512 窗的 `bpm_eff`（69–480） | 中位 **162** ⇒ **100%** 的窗口错位 |
-| 冻结下标只覆盖窗口**前段**的窗口 | **98.2%**（前 4 个 val 窗只取到前 50% 的音频） |
-| 修复前该通路的因果效应（置零 / 置换 / 换**正确对齐** / ×4） | **全部 ≤ 1.1e-4 nats/line**（= 0） |
-| 信息层「哪一拍有音符」（仅音频、**组内 AUC**） | 对齐 **0.534** → 冻结 **0.505**（随机 0.498） |
+1. **目标不需要音乐**：λ=exp(w·x) 的**9 维线性读出**（τ 的 5 个傅里叶项 + 可见场 3 个计数 + 偏置，
+   token 内空间分布取训练集边缘）在**同一个 `masked_poisson_loss`** 下拿到 `val_ratio` **0.7669**，
+   而 40M 参数模型是 **0.7620** ⇒ **模型的全部增益基本能被「抄可见场密度 + 空间边缘」解释完**。
+   （r=0.5 时可见密度几乎是隐藏密度的充分统计量——这是判据本身的性质，不是泄漏。）
+2. **判据与目标脱节**：同一个 armH@40000，`val_ratio 0.762` 与**真谱**的 `event F1 @50ms = 0.0022`
+   （timing F1 0.192，只对上 12.5% 的音符时刻；x 的 MAE 299 / 半宽 617 = 基本随机）**同时为真**。
+   要判「会不会写谱」必须看生成侧读数——本轮把这条读数建起来了（`runs/_eval_generation.py`，走 plan 06 权威实现）。
+3. **输入侧封顶**：(窗口,线) **组内** AUC —— 条件事件轨 **0.643**（生成时**有**）、音频（对齐）**0.576**、
+   音频（冻结）0.52、可见场 0.481（组内反信息，只告诉密度不告诉「哪一拍」）。模型真谱上的 timing F1@50ms
+   0.192 与「只用事件轨的线性上界 ≈0.21」同量级 ⇒ **τ 定位的瓶颈在输入，不在容量或目标函数**。
+   ⚠️ 上界那一列（top-N F1）只有 376 正例、对排序头部不稳 ⇒ **登记为未解决**，只引组内 AUC。
 
-**解法**：`_field_seconds` 删掉缓存、逐次求值（= 每个窗口用自己的 BPM）。配对 8000 步（同 seed /
-同数据 / 同 `data.workers=0`，唯一差别是这处代码；`runs/probe_alignctl2` vs `probe_alignfix2`）：
+**§9-64 的对齐修复（上轮）仍然成立、且本轮给出信息层的定价**：音频是「哪一拍有音符」的**最强单特征**
+（组内 0.5600 vs 事件轨 0.5369），而**冻结那张表把它砍到 0.5166**——被修掉的正是信息量最大的线索；
+配对 8000 步里对照臂到 8000 步已把音频彻底抛弃（`cond_audio_zero = −0.075`），修复臂仍是 **+1.033**。
 
-| 读数 | 对照 @4000 / @8000 | **修复 @4000 / @8000** |
-|---|---|---|
-| `cond_audio_zero_delta` | +0.548 / **−0.075** | **+1.547 / +1.033** |
-| `cond_audio_perm_delta` | −0.003 / +0.001 | −0.003 / +0.004 |
-| `val_ratio` | 0.774 / 0.859 | 0.814 / 0.903 |
-| `val_pred_over_true` | 0.627 / 0.423 | 0.495 / 0.212 |
+**生成制度臂（`model.visible_input=false`，新开关 + 4 项护栏）8k 步未分胜负**：盲臂 `val_ratio` 最好
+（0.8326 vs 修复 0.9030 / 对照 0.8586），但依赖几乎全压在事件轨上（`cond_track_zero` 1.039、音频只 0.272），
+生成侧更差（23 note / timing F1 0.009）。机制代价已知：盲模型对可见场与遮盖通道**完全无感** ⇒ 8 步迭代退化成 1 步。
+**24 000 步盲臂正在跑**（`runs/probe_genregime24k`，本轮交付时未回来）。
 
-⇒ **「音频被用上」已验证**（对照臂到 8000 步已把音频**彻底抛弃**：置零**不增加**损失）；
-**「谱面变好」未验证**（`val_ratio` 两处都略差，而单 run 步间摆幅本身有 0.08 ⇒ 未达可判读）。
-`cond_audio_perm ≈ 0` ⇒ 用上的仍是**内容/存在**，不是**时间对齐**。
+**✅ 判定线资格闸门（上轮，已复验）**：e2e 产物 665 note 里 238 个（35.8%）落在 note 时刻透明度 = 0 的线上的问题已修
+（在 `pair_events` 之前丢弃），复验 **665 → 411 note、两类违规 0 / 0**，主判定线 336 个未动。
 
-**⚠️ 两条量具更正（引用旧结论前必读）**
-
-1. **「训练损失 10 → 0.015」是空窗步的读数**（`batch_events=0`，`loss_empty` = 纯积分项），不是拟合读数。
-   同口径 `loss_nonempty_per_event` 分块中位：baseline **9.9–10.4**、armH(40k) **8.2–8.9** ⇒
-   `head_skip=false` 的训练侧真实收益约 **20%**，不是 660×。`val_ratio` 那条（0.9987→0.7620，配对 t=+3.03）不受影响。
-2. **探针的全局 AUC 会被「窗/线密度」同义反复主导**：`τ+可见场` 全局 **0.949**、**组内只有 0.597**
-   ⇒ 凡问「哪一拍有音符」，一律报**组内 AUC**（按 (窗口, 线) 分组）。
-
-**✅ 判定线资格闸门（决策者实测报告，已修并复验）**：e2e 产物 665 个 note 里 **238 个（35.8%）** 落在 note 时刻
-不透明度 = 0 的线上、**149 个（22.4%）** 落在装饰 / 表演线上。修法 = 在 `pair_events` **之前**按「该线该时刻可见
-+ 属于条件谱面承载 note 的线集合」丢弃场事件（`decoder.events.filter_field_events_by_line` + `infra/e2e.py::LineFilter`），
-记账进 `meta.json` 的 `line_filter_*`。同一 checkpoint 复验：**665 → 411 note**，两类违规 **0 / 0**，主判定线 336 个未动。
-⚠️ 合成模板**没有 alpha 轨** ⇒ 那是「没给信息」不是「不可见」，闸门必须放行（否则无条件生成路径会被一次清空）。
-
-**✅ 仍然成立的既有状态**（需要细节时看对应文档，这里不重复）：数据侧全库就绪（8551 RPE / 8084 唯一音频 /
-窗口 **train 634 952 + val 74 889** / 353.6 + 41.7 GB 预切缓存）；生产配置 = `head_skip=false` + `audio_align=true`
-（[RFC-0039](docs/decisions/RFC-0039-training-baseline-val-and-e2e-artifacts.md) R1）；门禁 **G1/G3/G4**（RFC-0037 删 G2）；
-val = 512 窗分层代表集（指纹 `f9d9f7d1068c`，空窗 10.8%）；训练损失按事件归一；窗口缓存使 `data_share` 中位 2.9%。
+**✅ 仍然成立的既有状态**（细节看对应文档）：数据侧全库就绪（8551 RPE / 窗口 train 634 952 + val 74 889 / 353.6 + 41.7 GB 缓存）；
+生产配置 = `head_skip=false` + `audio_align=true`；门禁 **G1/G3/G4**；val = 512 窗分层代表集（指纹 `f9d9f7d1068c`）；训练损失按事件归一。
+⚠️ 新增 `model.visible_input` 字段后，**旧 checkpoint 一律拒绝续训**（配置哈希 fail-closed，实测：`model.visible_input: '<缺失>' -> True`）——要续训只能重跑或改指纹口径。
 
 ### 下一步（按性价比排序，只留仍然有效的）
 
-1. ★ **音频问题的下一层：把「时间对齐」接上，或证明它接不上**
-   修复只接上了**内容**（`cond_audio_perm ≈ 0`）。两条互斥假设**尚未区分**（plan 07 §9-64 存疑 3/4）：
-   ① 音频的时间信息本来就不足（组内 AUC 0.534，只比随机高 0.036）；② cross-attention 的两条轴仍不在同一时间基
-   （field token 用 τ 格下标、音频 key 用秒）。② 有现成开关 `model.seconds_position=true`——它**同样被这次的 bug
-   冻结过**，现在才第一次可用。**建议**：跑 `seconds_position` 单臂（8000 步、与修复臂同 seed），判据用
-   **组内 AUC 口径的探针** + `cond_audio_perm`，**不要**只看 `val_ratio`。
-   ⚠️ 音频的增量信息在**当前目标**（遮盖补全、50% 事件可见）下接近 0（`τ+可见场` 组内 0.597 → 加音频 0.587）
-   ⇒ **在改目标之前，不要指望 `val_ratio` 因音频而跃升**。
-2. **解释「音频被用上」与 `val_ratio` 背道而驰**：修复臂 8k 步 `pred_over_true` 掉到 0.21（对照 0.42）。
-   要么「载荷项挤占了校准」，要么「8k 步还在早期」——**需要 24k 步配对 + 多点**才能判（本轮只够 8k 单点）。
-3. **plan 05 M5.7**：D1 阈值标定 + thinning 臂的 Hold 端点策略（R3 产物实测：665 个 hold 起点只有 2 个配上终点）。
-4. **评估入口接线**：形态已定＝独立 `beatmorph-eval`（仍未实现）。
+1. ★ **把判据接到生成侧，再谈「有效」**：`val_ratio` 与目标脱节（0.762 ↔ event F1 0.002）已经是实测事实。
+   本轮已交付读数脚本（`runs/_eval_generation.py <chart.json>`，走 plan 06 的 `evaluate_case`）。
+   下一步是把它接成**正式入口**（plan 06 的 `beatmorph-eval` + R3 产物自动评分），并把「哪一臂的产物更好」
+   作为判据之一；否则后面所有训练都还在优化一个与目标脱节的数。
+2. ★ **回收 24k 盲臂 + 跑一条配对非盲 24k**，判「推理制度训练」：判据用生成侧 timing/event F1 + `cond_audio_zero`，
+   **不要**只看 `val_ratio`（盲臂的 val_ratio 更好而生成更差，已经出现一次）。
+3. **质疑音频特征本身**：本轮所有探针都用「单帧 + 1 步差分」的 32 维随机投影。要抬 τ 定位（当前 0.576）
+   得换更强的读出：多帧上下文 / onset 强度 / 对数梅尔 / 少量可学习前端。这是**输入天花板**层面的工作，
+   与主干解耦，可以先用探针评估（不必训练）。
+4. **plan 05 M5.7**：D1 阈值标定 + thinning 臂的 Hold 端点策略（R3 产物：64 个 Hold 里 63 个零时长）。
+5. **评估入口接线**：形态已定＝独立 `beatmorph-eval`（仍未实现）。
 
-### 未决项（不阻塞「下一步」1–4）
+### 未决项（不阻塞「下一步」1–5）
 
 | 未决 | 出处 |
 |------|------|
+| **top-N F1 上界不稳**（376 正例 + 排序头部）⇒ 需要一个更大的生成侧评估集 | plan 07 §9-66 存疑 1 |
+| **「9 维线性打平 40M 模型」只在这一条判据上验证**（换 val 集 / 换 r 未做） | plan 07 §9-66 存疑 2 |
+| **音频特征未质疑**（多帧 / onset / 对数梅尔 未测） | plan 07 §9-66 存疑 3 |
+| **盲训练的迭代退化**（8 步 → 1 步）未解：真做推理制度训练需要按 schedule 变的遮盖通道（数据侧改动） | plan 07 §9-66 存疑 4 |
 | **`seconds_position` 修好后是否值得开**（cross-attn 的两条轴） | plan 07 §9-64 存疑 3 |
 | **`cond_audio_perm ≈ 0` 的机制**（信息不足 vs 对齐学不出来） | plan 07 §9-64 存疑 4 |
-| **跨 `data.workers` 的读数不可比**（实测 4000 步就分叉）⇒ 配对实验必须固定这一项 | plan 07 §9-64 存疑 5 |
-| **装饰线模型侧旁路尚未做**（本轮只做了导出侧闸门） | plan 07 §9-65 / RFC-0032 |
-| `val_windows=512` 的抽样精度未标定；`val_every=10000` 未做 A/B | plan 07 §9-63 存疑 1–2 |
-| **RFC-0038 与 RFC-0039 重叠部分的处置** | RFC-0038 / RFC-0039 §5 |
-| `val/nll_shuffled_delta` 的 margin 未标定；`grad_clip_norm=1.0`；G1 下限 0.05 的 per-event 语义 | RFC-0037 §6 |
+| **跨 `data.workers` 的读数不可比**（4000 步就分叉）⇒ 配对实验必须固定这一项 | plan 07 §9-64 存疑 5 |
+| **装饰线模型侧旁路尚未做**（只做了导出侧闸门） | plan 07 §9-65 / RFC-0032 |
+| `val_windows=512` 抽样精度 / `val_every=10000` A/B | plan 07 §9-63 存疑 1–2 |
+| RFC-0038 与 RFC-0039 重叠部分的处置 | RFC-0038 / RFC-0039 §5 |
+| `val/nll_shuffled_delta` margin / `grad_clip_norm` / G1 下限 0.05 的 per-event 语义 | RFC-0037 §6 |
 | 批 K 上限 / RFC-0035 §1 的 91.3% 未更正 / `r==0` 遮盖退化 / 预算按步还是按 epoch | plan 07 §9-59 / §9-52 / §9-43 / RFC-0033 |
-| **评估 / 可玩性**：NLL 好 ≠ 谱面可玩 | plan 07 §9-47 H |
+| **评估 / 可玩性**：NLL 好 ≠ 谱面可玩（现在有数了：event F1 0.002） | plan 07 §9-47 H / §9-66 ③ |
 
-**一次性探针（⚠️ `scripts/local_*` 与 `runs/_*` 均不入库，清理即丢）**：本轮读数脚本 = `runs/_diag_align_audit.py`（τ→秒错位的规模）、`runs/_diag_audio_paths.py`（按通路分解音频依赖，支持 `--ckpt-path`）、`runs/_diag_align_path.py`（λ 级直测）、`runs/_probe_audio_info2.py` + `runs/_probe_audio_within.py`（信息层，**含组内 AUC**）、`runs/_audit_e2e_lines.py <chart.json>`（note 落在哪条线上）、`runs/_trend_new.py`（损失趋势）。装配件 `runs/_diag_common.py`。历史：`local_cache_validate.py`、`local_loss_stability.py`、`local_build_profile.py`、`local_inorder_ab.py`、`local_worker_sweep.py`、`local_bucket_survey.py`、`local_cache_fingerprint_check.py`、`runs/_verify_r2r3.py`（`--mode val|e2e --ckpt baseline|armH`）。**G2 诊断套件已随 RFC-0037 退役**（勿引用其 verdict）。⚠️ `scripts/local_chart_mem.py` **坏了**（`deep_bytes` 漏 pydantic `__slots__`，偏低 1.85×）。⚠️ 长跑重定向探针的输出**只用 ASCII `=>`**（`⇒` 在 GBK 重定向下崩溃、吞掉结果）。
-
+**一次性探针（⚠️ `scripts/local_*` 与 `runs/_*` 均不入库，清理即丢）**：本轮读数脚本 = `runs/_probe_gain_ladder.py`（收益阶梯，走真损失）、`runs/_probe_localization.py`（定位组内 AUC）、`runs/_probe_ceiling.py`（输入上界，**口径有保留**）、`runs/_eval_generation.py <chart.json>`（生成侧 F1，走 plan 06）。上轮：`runs/_diag_align_audit.py`、`runs/_diag_audio_paths.py`（`--ckpt-path`）、`runs/_diag_align_path.py`、`runs/_probe_audio_info2.py` + `runs/_probe_audio_within.py`、`runs/_audit_e2e_lines.py`、`runs/_verify_r2r3.py`（`--mode val|e2e --ckpt|--ckpt-path [--blind]`）。装配件 `runs/_diag_common.py`。⚠️ `scripts/local_chart_mem.py` **坏了**（`deep_bytes` 漏 pydantic `__slots__`，偏低 1.85×）。⚠️ 长跑重定向探针的输出**只用 ASCII `=>`**（`⇒` 在 GBK 重定向下崩溃）。
 ## 为什么是 Phigros
 
 | 维度 | 4K 下落式（osu!mania / DDR） | **Phigros** |

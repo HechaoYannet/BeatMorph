@@ -102,6 +102,15 @@ class ModelConfig:
     #: 这条路没学到对齐/没学出权重）。本开关绕开那条路：按 token 自己的秒数取音频帧与其差分，
     #: 投影后**直接加**到 token 嵌入上（与 `beamtmorph/field` 的 τ→秒换算同源，见 `FieldGrid.tau_seconds`）。
     audio_align: bool = False
+    #: 输入侧是否**真的看到**可见场（`visible_input`）。
+    #:
+    #: 为什么需要这个开关（plan 07 §9-66）：训练送进去的可见场永远是「随机 50% 的事件」，
+    #: 而推理（迭代并行解码）的**第一步**是「什么都还没确证」⇒ 可见场全 0、遮盖通道全 1。
+    #: 模型因此从未在「没有任何可见证据」的制度下训练过，而那个制度正是「只能靠音乐出谱」
+    #: 的制度。关掉它 = 把训练送进推理第一步的输入分布（可见场置 0、遮盖通道置 1），
+    #: 迫使落点只能来自音频 + 事件轨 + τ/线先验；损失与遮盖测度**一个字不改**
+    #: （事件项仍只监督被遮盖事件、仍按 1/r 重标定 ⇒ 仍是对全谱密度 MLE 的无偏估计）。
+    visible_input: bool = True
     #: 输出头是否保留**输入直连 skip**（`cell_skip` / `cum_skip`）。
     #:
     #: 原设计理由（plan 04 §9-17）：补全任务需要一条从「输入结构」到输出的**短梯度路径**，
@@ -249,6 +258,8 @@ class FieldTokenEmbedding(nn.Module):
         self.norm = nn.LayerNorm(config.d_model)
         self.max_period = config.position_max_period
         self.use_seconds_position: bool = bool(config.seconds_position)
+        #: 见 ModelConfig.visible_input：True = 看得见可见场（补全制度），False = 生成制度。
+        self.blind: bool = not bool(config.visible_input)
 
     def forward(
         self,
@@ -276,6 +287,10 @@ class FieldTokenEmbedding(nn.Module):
         occlusion_flat = occlusion.reshape(batch_size, n_lines, t_bins, self.cells).to(
             dtype=state.dtype,
         )
+        if self.blind:
+            # 生成制度（plan 07 §9-66）：可见场全 0、遮盖通道全 1 —— 迭代解码第一步的输入。
+            flattened = torch.zeros_like(flattened)
+            occlusion_flat = torch.ones_like(occlusion_flat)
         tokens = self.visible(flattened) + self.occlusion(occlusion_flat)
         positions = torch.arange(t_bins, dtype=torch.float32, device=device)
         tokens = tokens + sinusoidal_encoding(

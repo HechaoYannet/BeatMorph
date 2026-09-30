@@ -1045,6 +1045,9 @@ class ChartPairDataset(torch.utils.data.Dataset[PairSample]):
         self._feature_cache = OrderedDict()
         self._plan_from_cache = False
         self._no_context_fallbacks = 0
+        # ⚠️ 剥掉的属性必须在 worker 侧**重新建出**：少一个就会在 _apply_scorable_target 里
+        # 变成 AttributeError（本轮实测：DataLoader 一开就崩，而单进程路径完全正常）。
+        self._dropped_non_scorable = {}
 
     # ── 只读诊断 ────────────────────────────────────────────────
     def rows(self) -> list[PairRow]:

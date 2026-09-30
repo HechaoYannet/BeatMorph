@@ -1985,12 +1985,21 @@ def _bucket_slots(plan: WindowPlan) -> tuple[list[int], dict[int, list[int]]]:
     return sorted(per_bucket), per_bucket
 
 
-def _window_event_counts(density: WindowDensitySource, *, n_windows: int) -> NDArray[np.int64]:
-    """逐窗口事件数（**全 split**；分层与配额都以总体为准，不是以计划前缀为准）。"""
-    return np.asarray(
-        [density.window_event_count(index) for index in range(n_windows)],
-        dtype=np.int64,
-    )
+def _window_event_counts(
+    density: WindowDensitySource,
+    *,
+    n_windows: int,
+) -> NDArray[np.int64] | None:
+    """逐窗口事件数（**全 split**；分层与配额都以总体为准，不是以计划前缀为准）。
+
+    返回 None = **这个视图答不出密度**（实测：窗口缓存关闭时 `window_event_count` 逐个返回 None，
+    而数据集仍然实现了该协议 ⇒ 调用方原本会拿到一列 None 再 `int()` 崩掉）。
+    调用方据此回退到未分层选择并**如实记账**，而不是拿一个猜出来的密度去分层。
+    """
+    values = [density.window_event_count(index) for index in range(n_windows)]
+    if any(value is None for value in values):
+        return None
+    return np.asarray(values, dtype=np.int64)
 
 
 def _top_up(quotas: list[int], population: Sequence[int], total: int) -> list[int]:
@@ -2299,7 +2308,16 @@ class ManifestValSource:
         plan = self.plan()
         buckets, per_bucket = _bucket_slots(plan)
         density = self._density_source()
-        if density is None:
+        counts = (
+            None if density is None else _window_event_counts(density, n_windows=plan.n_windows)
+        )
+        if counts is None:
+            # 密度不可得（没有密度视图，或视图答不出——例：本轮的去表演口径不能用旧窗口缓存）
+            # ⇒ 回退到未分层选择并把 stratified=False 记进选择记账里。
+            logger.warning(
+                "val 密度不可得（窗口缓存未启用，或该口径没有缓存）⇒ 回退到未分层选择；"
+                "本集合的构成与分层集（f9d9f7d1068c）**不可直接比**，跨口径比较必须用同一套 val 窗口。",
+            )
             return _assemble_selection(
                 requested=requested,
                 batch=batch,
@@ -2312,7 +2330,8 @@ class ManifestValSource:
                 taken=(),
                 k_values=None,
             )
-        counts = _window_event_counts(density, n_windows=plan.n_windows)
+        # counts 不为 None ⇒ density 不为 None（上面那一步就是它唯一可能的 None 来源）
+        assert density is not None
         labels, bounds = _density_strata(counts, VAL_DENSITY_STRATA)
         population = [int(np.count_nonzero(labels == index)) for index in range(len(bounds))]
         quotas = _top_up(_largest_remainder(population, total), population, total)

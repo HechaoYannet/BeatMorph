@@ -80,7 +80,7 @@ import json
 import zlib
 from bisect import bisect_left
 from collections import OrderedDict
-from collections.abc import Sequence
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 from itertools import pairwise
 from pathlib import Path
@@ -530,8 +530,14 @@ class DatasetConfig:
     scorable_target: bool = False
     seed: int = 0
     limit: int | None = None
+    #: 索引构建的**进程数**（1 = 串行，保持默认行为）。
+    #:
+    #: 为什么需要：索引构建是**逐行解析全库谱面**的，实测单核跑满、24 核里只用 1 个，
+    #: 全量 train 一次 30-40 min；而它能按行完美并行（每行独立、结果按行序拼装）。
+    #: **不改任何读数**：并行路径与串行路径的窗口、记账、顺序逐位一致（`test_dataset_index_parallel`）。
+    index_jobs: int = 1
 
-    def __post_init__(self) -> None:
+    def __post_init__(self) -> None:  # noqa: PLR0912 —— 扁平校验清单，分支数不反映复杂度
         object.__setattr__(self, "manifest_path", Path(self.manifest_path))
         object.__setattr__(self, "chart_dir", Path(self.chart_dir))
         object.__setattr__(self, "feature_dir", Path(self.feature_dir))
@@ -549,6 +555,8 @@ class DatasetConfig:
             raise ValueError(
                 f"未知的遮盖粒度 {self.occlusion_granularity!r}（合法值：event/frame/cell/block）"
             )
+        if self.index_jobs < 1:
+            raise ValueError(f"index_jobs 必须 >= 1，得到 {self.index_jobs}")
         if self.scorable_target and self.window_cache_dir is not None:
             raise ValueError(
                 "scorable_target=True 与窗口预切缓存**不能同时开**：缓存里的计数是按旧口径"
@@ -736,6 +744,22 @@ class _IndexCounters:
     notes_non_scorable_dropped: int = 0
     skipped_format: dict[str, int] = field(default_factory=dict)
 
+    def merge(self, other: _IndexCounters) -> None:
+        """把另一个计数器的读数并入本计数器（并行索引构建用；**逐字段相加**）。
+
+        为什么必须有它而不是在各 worker 里直接改共享计数器：`_build_plan` 的并行路径要保证
+        「与串行**逐位一致**」，而唯一的办法是让每个 worker 产出**自己的完整读数**、
+        再按行序合并 —— 就地累加会随进程数改变结果。
+        """
+        for field_name in self.__slots__:
+            current = getattr(self, field_name)
+            incoming = getattr(other, field_name)
+            if isinstance(current, dict):
+                for key, value in incoming.items():
+                    current[key] = current.get(key, 0) + value
+            else:
+                setattr(self, field_name, current + incoming)
+
     def add_skip(self, skip: _SkipRow) -> None:
         """行级跳过记账（reason 键与字段名一一对应）。"""
         if skip.reason == "format":
@@ -813,6 +837,27 @@ def _file_stamp(path: Path) -> str:
     except OSError:
         return "missing"
     return f"{info.st_size}:{info.st_mtime_ns}"
+
+
+#: 并行索引构建的**进程内**工作副本（每个 worker 进程一份；一次构建 = 一份配置）。
+#: 不放进 payload：每行都重建一次 ChartPairDataset 会重复解析清单（6750 次）。
+_WORKER_DATASET: ChartPairDataset | None = None
+
+
+def _plan_row_worker(
+    payload: tuple[DatasetConfig, int, PairRow],
+) -> tuple[_RowPlan | _SkipRow, _IndexCounters]:
+    """并行索引构建的 worker：**一行一个任务**，结果由调用方按行序拼装。
+
+    走的是与串行**完全同一份** _plan_row（谱面 LRU、特征元数据、去表演过滤都在里面），
+    因此并行不引入第二套口径；worker 之间不共享任何可变状态（计数器各自返回、按行序合并）。
+    """
+    global _WORKER_DATASET
+    config, row_index, row = payload
+    if _WORKER_DATASET is None:
+        _WORKER_DATASET = ChartPairDataset(config)
+    counters = _IndexCounters()
+    return _WORKER_DATASET._plan_row(row_index, row, counters), counters
 
 
 def _plan_fingerprint(config: DatasetConfig, rows: Sequence[PairRow]) -> str:
@@ -1307,11 +1352,45 @@ class ChartPairDataset(torch.utils.data.Dataset[PairSample]):
         return self._plan
 
     def _build_plan(self) -> _DatasetPlan:
+        """索引构建：config.index_jobs > 1 时按行并行，否则串行（默认）。
+
+        两条路径共用 _assemble，因此**窗口、记账、顺序逐位一致**——差别只在「谁算的」。
+        并行是纯加速器：index_jobs 不进任何指纹、不改任何读数。
+        """
+        jobs = max(1, int(self.config.index_jobs))
+        if jobs == 1 or len(self._rows) < 2 * jobs:
+
+            def serial_rows() -> Iterator[tuple[_RowPlan | _SkipRow, _IndexCounters]]:
+                # ⚠️ **每个计数器的读数必须原样交给 _assemble**：早先的写法在这里新建并丢弃
+                # 了一个空计数器，于是 events_beyond_tau_end / tau_end_* / 去表演台账全部归零，
+                # 而窗口数看不出来 —— 被 tests/unit/data/test_dataset_tau_end.py 抓住。
+                for index, row in enumerate(self._rows):
+                    row_counters = _IndexCounters()
+                    yield self._plan_row(index, row, row_counters), row_counters
+
+            return self._assemble(serial_rows(), serial=True)
+        from concurrent.futures import ProcessPoolExecutor
+
+        payloads = [(self.config, index, row) for index, row in enumerate(self._rows)]
+        chunk = max(1, len(payloads) // (jobs * 8))
+        with ProcessPoolExecutor(max_workers=jobs) as pool:
+            return self._assemble(
+                pool.map(_plan_row_worker, payloads, chunksize=chunk), serial=False, jobs=jobs
+            )
+
+    def _assemble(
+        self,
+        stream: Iterable[tuple[_RowPlan | _SkipRow, _IndexCounters]],
+        *,
+        serial: bool,
+        jobs: int = 1,
+    ) -> _DatasetPlan:
+        """把逐行结果按行序拼装成索引（串行 / 并行**共用**，保证两条路径一致）。"""
         counters = _IndexCounters()
         entries: list[_WindowEntry] = []
-        for row_index, row in enumerate(self._rows):
+        for row_index, (planned, row_counters) in enumerate(stream):
+            counters.merge(row_counters)
             counters.n_rows += 1
-            planned = self._plan_row(row_index, row, counters)
             if isinstance(planned, _SkipRow):
                 counters.add_skip(planned)
                 continue
@@ -1333,6 +1412,8 @@ class ChartPairDataset(torch.utils.data.Dataset[PairSample]):
                         bpm_eff=float(bpm_eff),
                     ),
                 )
+        if not serial:
+            logger.info("索引构建：并行 %d 进程（读数与串行逐位一致）", jobs)
         stats = counters.freeze(len(entries))
         logger.info("%s", stats.describe())
         if stats.n_windows == 0:

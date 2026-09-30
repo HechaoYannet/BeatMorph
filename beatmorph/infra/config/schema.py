@@ -239,6 +239,10 @@ class DataConfig:
     #: 实测该口径会摘掉 train 的 **22.81%** / val 的 **18.68%** 事件；判据只此一份实现：
     #: `beatmorph.decoder.events.note_is_scorable`。与 `window_cache_dir` 互斥（缓存按旧口径物化）。
     scorable_target: bool = False
+    #: 索引构建的进程数（1 = 串行，默认）。索引是**逐行解析全库**的，实测单核跑满、
+    #: 24 核里只用 1 个；按行并行后全量 train 从 30-40 min 降到分钟级。**不进任何指纹**：
+    #: 并行与串行产出逐位一致（`tests/unit/data/test_dataset_index_parallel.py`）。
+    index_jobs: int = 1
     max_samples: int | None = None
 
 

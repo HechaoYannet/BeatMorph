@@ -131,6 +131,7 @@ from beatmorph.field.grid import (
 from beatmorph.field.target import CHANNEL_INDEX, HOLD_END_CHANNEL, build_target
 from beatmorph.generation.batch import FieldBatch
 from beatmorph.generation.masks import (
+    Granularity,
     assert_hold_pairs_not_split,
     build_occlusion_batch,
     occluded_event_share,
@@ -511,6 +512,12 @@ class DatasetConfig:
     x_bins: int = RPE_X_GRID_BINS
     k_max: int = DEFAULT_K_MAX
     occlusion_ratio: float = 0.5
+    #: 遮盖粒度（`generation.masks.Granularity`）。默认 `"event"`（契约路径）。
+    #: `"block"` = (τ, x) 小块遮盖（块内含空格）—— 它保留「同一 token 内的可见邻居」，
+    #: 从而让「被预测 token 内部的空间分布」重新可从输入推断（plan 07 §9-75②/§9-76）。
+    #: ⚠️ **只有 `"event"` 与窗口缓存兼容**：缓存把遮盖压成 token 位图并断言区块结构；
+    #: 其它粒度必须把 `window_cache_dir` 设为 None（否则装配期直接抛 WindowCacheError）。
+    occlusion_granularity: Granularity = "event"
     seed: int = 0
     limit: int | None = None
 
@@ -528,6 +535,10 @@ class DatasetConfig:
             raise ValueError(f"k_max 必须 >= 1，得到 {self.k_max}")
         if not 0.0 <= self.occlusion_ratio <= 1.0:
             raise ValueError(f"occlusion_ratio 必须在 [0, 1]，得到 {self.occlusion_ratio}")
+        if self.occlusion_granularity not in ("event", "frame", "cell", "block"):
+            raise ValueError(
+                f"未知的遮盖粒度 {self.occlusion_granularity!r}（合法值：event/frame/cell/block）"
+            )
         if self.limit is not None and self.limit < 0:
             raise ValueError(f"limit 必须 >= 0 或 None，得到 {self.limit}")
         if self.tau_end_s is not None and self.tau_end_s <= 0.0:
@@ -1074,6 +1085,25 @@ class ChartPairDataset(torch.utils.data.Dataset[PairSample]):
         ]
         return "\n".join(lines)
 
+    def _remask(self, sample: PairSample, index: int) -> PairSample:
+        """按 `occlusion_granularity` **从计数重算**遮盖（非 `event` 粒度下必须走这一步）。
+
+        为什么需要：窗口预切缓存把遮盖压成 **(K, T) token 位图**，并在装配时断言稠密遮盖恰等于
+        它的广播（`window_cache._token_view`）⇒ 那个紧凑表示只对「按 token 扩张」的粒度成立。
+        块状粒度下**计数本身仍然有效**（缓存存的就是计数），只是遮盖必须重新生成；
+        种子沿用与建缓存时相同的派生式 ⇒ 与「无缓存路径」逐位一致。
+        """
+        plan = self._ensure_plan()
+        entry = plan.entries[index]
+        seed = _window_seed(self.config.seed, entry.row_index, entry.window_index)
+        occlusion, _attempts, _degraded = _window_occlusion(
+            sample.counts,
+            ratio=self.config.occlusion_ratio,
+            seed=seed,
+            granularity=self.config.occlusion_granularity,
+        )
+        return dataclasses.replace(sample, occlusion=occlusion)
+
     # ── Dataset 协议 ────────────────────────────────────────────
     def __len__(self) -> int:
         """窗口总数（**不含**被丢弃的尾巴与被跳过的窗口）。"""
@@ -1086,7 +1116,10 @@ class ChartPairDataset(torch.utils.data.Dataset[PairSample]):
         （`tests/unit/data/test_window_cache.py` 锁定它与本方法逐位一致）。
         """
         if self._window_cache is not None:
-            return self._window_cache.sample(index)
+            sample = self._window_cache.sample(index)
+            if self.config.occlusion_granularity != "event":
+                sample = self._remask(sample, index)
+            return sample
         plan = self._ensure_plan()
         total = len(plan.entries)
         if index < 0:
@@ -1373,6 +1406,7 @@ class ChartPairDataset(torch.utils.data.Dataset[PairSample]):
             window_counts,
             ratio=config.occlusion_ratio,
             seed=seed,
+            granularity=config.occlusion_granularity,
         )
         if degraded:
             self._no_context_fallbacks += 1
@@ -1434,6 +1468,7 @@ def _window_occlusion(
     *,
     ratio: float,
     seed: int,
+    granularity: Granularity = "event",
 ) -> tuple[Tensor, int, bool]:
     """构造窗口遮盖，**保证 r < 1**（否则 losses 会拒绝该 batch）。
 
@@ -1450,7 +1485,10 @@ def _window_occlusion(
         `(occlusion (K, T, X, S, C) bool, 尝试次数, 是否退化)`。
     """
     batch, _stats = build_occlusion_batch(
-        counts.unsqueeze(0), ratio=ratio, seed=seed % _SEED_MODULUS
+        counts.unsqueeze(0),
+        ratio=ratio,
+        granularity=granularity,
+        seed=seed % _SEED_MODULUS,
     )
     occlusion = batch.squeeze(0)
     if occluded_event_share(counts, occlusion) < 1.0:
@@ -1460,6 +1498,7 @@ def _window_occlusion(
         candidate, _stats = build_occlusion_batch(
             counts.unsqueeze(0),
             ratio=ratio,
+            granularity=granularity,
             seed=candidate_seed,
         )
         candidate = candidate.squeeze(0)

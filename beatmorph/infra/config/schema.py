@@ -229,6 +229,10 @@ class DataConfig:
     x_bins: int = RPE_X_GRID_BINS
     k_max: int = DEFAULT_K_MAX
     occlusion_ratio: float = 0.5
+    #: 遮盖粒度（translated to `generation.masks.Granularity`）。默认 "event"（契约路径）。
+    #: `"block"` = (τ, x) 小块遮盖（块内含空格）—— 让「被预测 token 内部的空间分布」重新可从输入推断
+    #: （plan 07 §9-76）。⚠️ 只有 `"event"` 与窗口缓存兼容：其它粒度必须同时把 `window_cache_dir` 设为 null。
+    occlusion_granularity: str = "event"
     max_samples: int | None = None
 
 

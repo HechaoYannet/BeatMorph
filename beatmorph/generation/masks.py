@@ -38,7 +38,18 @@ from beatmorph.core.contracts.phigros import NoteType
 from beatmorph.field.target import CHANNEL_INDEX, HOLD_END_CHANNEL
 
 #: 遮盖粒度（plan 04 §4.5「遮盖粒度」消融；默认必须是 "event"）
-Granularity = Literal["event", "frame", "cell"]
+#:
+#: `"block"` 是 plan 07 §9-76 新增的**块状**粒度：在 (τ, x) 平面上按 `BLOCK_TAU × BLOCK_X` 的小块
+#: 遮挡**块内全部格子（含空格）**。它与其余三种的**结构性区别**：
+#: `event`/`frame`/`cell` 都是「先选事件、再扩张到整个 (k,τ) token」⇒ **被遮盖 token 的可见场恒为常数**，
+#: 于是「被预测 token 内部的空间分布」在自己的输入里根本不存在（§9-75② 的结论）；
+#: `block` 只遮住 token 的一小块 x 范围 ⇒ 同一 token 内仍有可见邻居，空间补全重新成为可学的任务。
+Granularity = Literal["event", "frame", "cell", "block"]
+
+#: 块状遮盖的 τ 跨度与 x 跨度（格）。**必须远小于整个 token**（T=192 / X=128），
+#: 否则又退化成「整个 token 被遮」——那正是要修的那个结构。
+BLOCK_TAU: int = 4
+BLOCK_X: int = 32
 
 #: 诊断「抄邻居」的默认 tau 邻域半径（格）
 DEFAULT_LEAK_WINDOW: int = 1
@@ -348,6 +359,50 @@ def expand_to_tokens(counts: Tensor, occlusion: Tensor) -> Tensor:
     return per_token.reshape(k_dim, t_dim, 1, 1, 1).expand_as(counts).clone()
 
 
+def _block_occlusion(
+    counts: Tensor,
+    *,
+    ratio: float,
+    seed: int,
+    block_tau: int = BLOCK_TAU,
+    block_x: int = BLOCK_X,
+) -> tuple[Tensor, int, int]:
+    """按 (τ, x) 小块遮盖（**块内所有格子，含空格**）。
+
+    返回 `(occlusion, 块总数, 被选中的块数)`。
+
+    为什么不能复用 `_units` 的表示：那套表示把每个单位展开成**平坦下标列表**，而块状粒度下
+    单位总数 × 每单位格数 = 整张张量（K·T·X·S·C，真实窗口约 1.2e7）⇒ 会构造上千万个 Python int。
+    这里改为**只对选中的块做切片赋值**（O(块数)），权重用一次分块求和预先算好。
+    """
+    k_dim, t_dim, x_dim = int(counts.shape[0]), int(counts.shape[1]), int(counts.shape[2])
+    cells = counts.reshape(k_dim, t_dim, x_dim, -1)
+    t_starts = list(range(0, t_dim, block_tau))
+    x_starts = list(range(0, x_dim, block_x))
+    weights = np.zeros((k_dim, len(t_starts), len(x_starts)), dtype=np.float64)
+    for ti, t0 in enumerate(t_starts):
+        for xi, x0 in enumerate(x_starts):
+            weights[:, ti, xi] = (
+                cells[:, t0 : t0 + block_tau, x0 : x0 + block_x].sum(dim=(1, 2, 3)).numpy()
+            )
+    occlusion = torch.zeros(counts.shape, dtype=torch.bool)
+    flat = weights.reshape(-1)
+    target = float(ratio) * float(counts.sum().item())
+    accumulated = 0.0
+    chosen = 0
+    # ⚠️ 与 `_units` 路径一致：**先洗牌再按权重累积**（同一 seed 结果可复现）
+    for position in np.random.default_rng(seed).permutation(flat.size):
+        if accumulated >= target:
+            break
+        blk_k, blk_ti, blk_xi = np.unravel_index(int(position), weights.shape)
+        t0 = t_starts[int(blk_ti)]
+        x0 = x_starts[int(blk_xi)]
+        occlusion[int(blk_k), t0 : t0 + block_tau, x0 : x0 + block_x] = True
+        accumulated += float(flat[int(position)])
+        chosen += 1
+    return occlusion, int(flat.size), int(chosen)
+
+
 def build_occlusion(
     counts: Tensor,
     *,
@@ -372,11 +427,31 @@ def build_occlusion(
     if not 0.0 <= ratio <= 1.0:
         raise ValueError(f"ratio 必须在 [0, 1]，得到 {ratio!r}")
     total_events = float(counts.sum().item())
+    weights: list[float] = []
     pairs, unpaired = _hold_pairs(counts)
     occlusion = torch.zeros(counts.shape, dtype=torch.bool)
-    units, weights = _units(counts, granularity, pairs)
+    n_units_total = 0
+    n_units_chosen = 0
     chosen: list[int] = []
-    if total_events > 0.0 and units and ratio > 0.0:
+    units: list[list[int]] = []
+    if granularity == "block":
+        # 块状粒度走**独立路径**：不做 token 扩张、不做稀释（块内本来就含空格）。
+        # 统计里的 units 用「块」计（见 `_block_occlusion` 的说明：不能展开成平坦下标）。
+        occlusion, n_units_total, n_units_chosen = _block_occlusion(counts, ratio=ratio, seed=seed)
+        # Hold 配对必须同遮（契约，RFC-0029 §3.3-2）。块状粒度下按**格子**补遮：
+        # 每个配对独立判定、只补那一个端点格子 —— **不**扩张到整个 token（那是 event 粒度的做法，
+        # 而块状粒度的设计本来就是「token 内允许孤立被遮格」）。门禁实测：不做这一步会直接
+        # 抛「hold 配对点被拆散：起止平坦下标 … 的遮盖状态不一致」。
+        closure = occlusion.reshape(-1)
+        for left, right in pairs:
+            if bool(closure[left]) != bool(closure[right]):
+                closure[left] = True
+                closure[right] = True
+    else:
+        units, weights_units = _units(counts, granularity, pairs)
+        weights = weights_units
+        n_units_total = len(units)
+    if granularity != "block" and total_events > 0.0 and units and ratio > 0.0:
         order = np.random.default_rng(seed).permutation(len(units))
         target = float(ratio) * total_events
         accumulated = 0.0
@@ -386,6 +461,7 @@ def build_occlusion(
             index = int(position)
             chosen.append(index)
             accumulated += weights[index]
+        n_units_chosen = len(chosen)
         flat = occlusion.reshape(-1)
         for index in chosen:
             flat[torch.as_tensor(units[index], dtype=torch.long)] = True
@@ -416,8 +492,8 @@ def build_occlusion(
         ratio=(n_occluded / total_events) if total_events > 0.0 else 0.0,
         n_events=int(total_events),
         n_occluded=n_occluded,
-        n_units=len(units),
-        n_units_occluded=len(chosen),
+        n_units=n_units_total,
+        n_units_occluded=n_units_chosen,
         n_hold_pairs=len(pairs),
         n_hold_unpaired=unpaired,
         neighbor_leak=neighbor_leak_rate(counts, occlusion),

@@ -1521,6 +1521,7 @@ class ManifestBatchSource:
                     x_bins=data.x_bins,
                     k_max=data.k_max,
                     occlusion_ratio=data.occlusion_ratio,
+                    occlusion_granularity=data.occlusion_granularity,  # type: ignore[arg-type]
                     seed=self.seed,
                     limit=data.max_samples,
                     chart_cache_size=data.chart_cache_size,
@@ -2182,6 +2183,7 @@ class ManifestValSource:
                     x_bins=data.x_bins,
                     k_max=data.k_max,
                     occlusion_ratio=data.occlusion_ratio,
+                    occlusion_granularity=data.occlusion_granularity,  # type: ignore[arg-type]
                     seed=self.seed,
                     limit=data.max_samples,
                     chart_cache_size=data.chart_cache_size,

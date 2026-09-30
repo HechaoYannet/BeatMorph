@@ -57,6 +57,9 @@ data:
   x_bins: 128
   k_max: 128
   occlusion_ratio: 0.5
+  # 遮盖粒度：event（默认，契约路径）| block（(τ,x) 小块，保留 token 内可见邻居）。
+  # ⚠️ 非 event 时窗口缓存不兼容 ⇒ 必须同时把 window_cache_dir 设为 null。
+  occlusion_granularity: event
   # ★ τ 轴终点口径（RFC-0031，plan 03 §9-14）——"audio" = min(谱面口径, 特征缓存的音频时长)。
   #   实测（2026-09-27 第五轮，全库 8551 张）：**52.2%** 的谱面 META.chartTime 虚高
   #   （中位 52.8×、最大 3.4e6×），旧口径（"chart"）把 train split 撑到 **3361 万窗**

@@ -3646,4 +3646,68 @@ pos = [2*tau_f - 1, sin(2*pi*tau_f*4), cos(2*pi*tau_f*4),
 * 「τ AUC 稳定在 0.95 而 `val_ratio` 还在降」⇒ 下一段的收益在**空间轴**上，
   这与 §9-69 的 `gap_space` = 58.58% > `gap_tau` = 42.46% 一致。
 
+### §9-79 第二十九轮：**「我们喂给模型的数据有一半不是玩法」——去表演口径落地（决策者裁定）**（2026-09-30）
+
+#### ① 问题的规模（新增 `runs/_probe_scorable_share.py`，与调研任务 research/kipphi-rpejson 同口径）
+
+判定 = **命中时刻该线 `alphaEvents` 跨层求和 ≤ 0 ⇒ 玩家看不见、判不到**（prpr A 级语义）。
+
+| | train（300 张 / 392 502 note） | val（300 张 / 395 943 note） |
+|---|---|---|
+| 假音符 `isFake=1` | 2.11%（dataset 已滤） | 2.81% |
+| **命中时线不可见** | **22.81%** | **18.68%** |
+| ↳ 其中在**真线**上 | **12.94%（50 789）** | 10.59%（41 911） |
+| 可计分 | 75.08% | 78.50% |
+| **可计分落在装饰线上** | **0** | **0** |
+
+⇒ ① 占目标**两成**的事件是玩家看不到的表演 note（落点由演出设计决定、不由音乐决定）；
+② 其中**一半在真线上** ⇒ **线级剥离拿不掉**，恰好混在玩法事件里；
+③ 「可计分」与「装饰线」在真实语料里**零交集**，是管线把两类混在了一起。
+
+**线轴**（`runs/_probe_line_strip.py`，各 300 张）：
+
+| | 全部线（中位 / p90 / max） | 真线（中位 / p90） | k_max=128 超限行 |
+|---|---|---|---|
+| train | 26 / 68 / 240 | **5 / 12** | 2.0% → **0** |
+| val | 25 / 62 / 434 | **5 / 13** | 2.7% → **0** |
+
+⇒ **模型此前把绝大部分容量用在「这条线上 λ 恒为 0」**；祖先线代价极小（train 0.06 条/谱、4.7% 的谱需要）。
+
+#### ② 落地（提交 `a1220d8` + `308675c`，决策者口径：**train 与 val 同口径**）
+
+* `decoder.events.note_is_scorable / scorable_note_mask / gameplay_subchart`：
+  **判据只有一份实现**，生成闸门（`scorable_lines` → e2e 的 allowed_lines）与训练目标共用；
+* `gameplay_subchart` = **真线 ∪ 祖先线** + 只留可计分 note；线序保持相对顺序、
+  `father` 与 `note.line_id` 一并重映射；**必须连带祖先**（`JudgeLine.pose_at` 会合成父线运动，
+  摘掉父线 = 换输入而不是去表演）；无任何可计分 note ⇒ 抛错，调用方跳过该行；
+* `unknown_alpha_is_visible`：生成闸门默认 True（合成模板没给 alpha 轨 = 「没这个信息」），
+  训练目标显式 **False**（真实谱面没有 alphaEvents ⇒ 不可见）；**两个默认值故意相反，已写在现场注释里**；
+* `data.scorable_target`（与 `window_cache_dir` 互斥、进索引指纹、`build_windows` 拒跑）；
+* 过滤点只在 `_chart_for`（唯一谱面入口）⇒ `_note_bins` / `_hold_blocked_boundaries` /
+  `_count_events_beyond_axis` / `build_target` 四条镜像口径自动一致；
+* 台账 `notes_non_scorable_dropped` / `skipped_no_playable_lines` 进索引摘要（不静默丢弃）。
+
+CI：ruff/mypy ✅、pytest **1194 passed**（新增 7 项）。护栏 `tests/unit/data/test_scorable_target.py`。
+
+#### ③ 为什么这是「数据噪声」的正确刻画
+
+不是随机噪声，而是**系统性的、与目标定义不符的内容**：目标函数把「演出装饰」当成「玩法事件」，
+于是 ① 约两成的梯度在教模型**忽略音乐**（装饰的落点由演出决定）；② 线轴上 83% 的位置
+正确答案是「什么都不放」，模型学到的「输出边际分布」在很大程度上是**最优反应**，
+这解释了 §9-62 的「常数先验」、零模型基线能到 0.72–0.76、以及音频依赖在每个臂上衰减。
+去表演之后，「零模型打平」这件事本身应当失效——**那正是本轮的判据**。
+
+#### ④ 预登记判据与进行中的臂
+
+`probe_noperf` = `plan_window_shuffle + mask_lambda + head_tau_bias + scorable_target`，8 000 步。
+判据（跑之前写死）：
+1. `val_ratio` **< 0.50**（在 `probe_taubias` 的 0.5571 上再要一成）；
+2. **线轴利用率**：`line_only` 这条「每线一个常数」的零模型基线应当**明显变差**
+   （去表演后线密度不再是主要信息来源）——这是「模型不再靠边际分布」的直接证据；
+3. G1/G3/G4 全绿（已通过：G1 977.4→−2.09，G3 −1.21 vs 5.74）。
+
+⚠️ 口径已变 ⇒ **损失数值不可与 `probe_taubias` 直接比较**，必须在**同一套 val 口径**下对照
+（`runs/_probe_val_ratio.py` 已写好：固定 val 窗口、把任意 checkpoint 放到指定口径上复算 ratio）。
+⚠️ **名债**：开关仍叫 `scorable_target`，但它现在同时剥离线轴；改名（`playable_only`）留待下一轮。
+
 [POSTMORTEM-2026-08-05]: ../POSTMORTEM-2026-08-05-frame-rate-misalignment.md

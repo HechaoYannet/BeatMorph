@@ -109,6 +109,7 @@ class ModelSchema:
     head_cum_skip: bool | None = _DEFAULT_MODEL.head_cum_skip
     visible_input: bool = _DEFAULT_MODEL.visible_input
     track_input: bool = _DEFAULT_MODEL.track_input
+    mask_lambda: bool = _DEFAULT_MODEL.mask_lambda
 
     def to_model_config(self) -> ModelConfig:
         """构造真正的 ModelConfig（其 __post_init__ 做架构级校验）。

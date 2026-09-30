@@ -97,6 +97,8 @@ data:
   max_samples: null
 
 model:
+  # 输出场按遮盖通道置零（未被遮盖处的最优 λ 恒为 0，见 ModelConfig.mask_lambda / plan 07 §9-74）。
+  mask_lambda: false
   d_model: 256
   n_heads: 4
   n_layers: 6

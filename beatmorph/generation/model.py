@@ -121,6 +121,17 @@ class ModelConfig:
     #: 迫使落点只能来自音频 + 事件轨 + τ/线先验；损失与遮盖测度**一个字不改**
     #: （事件项仍只监督被遮盖事件、仍按 1/r 重标定 ⇒ 仍是对全谱密度 MLE 的无偏估计）。
     visible_input: bool = True
+    #: 输出场是否**按遮盖通道置零**（lam <- lam * occlusion）。
+    #:
+    #: 为什么需要这个开关（plan 07 §9-74）：遮盖测度下的最优 λ 在**未被遮盖的格子上恒为 0**——
+    #: 事件项只监督被遮盖处，而积分项对任何非零强度都是纯成本。实测（`runs/_probe_mask_response.py`，
+    #: armH 的 8k 快照）：模型的 λ 质量有 **55.6% 落在未被遮盖 token 上**（被遮盖 token 只占 44.2%），
+    #: 即**与 token 数成正比、对遮盖毫无响应**；而在被遮盖 token 内部（= 真正被监督的子集），
+    #: 组内 τ AUC 只有 **0.5130**。把 λ 按遮盖置零是**与被监督集合逐格对齐**的硬约束，
+    #: 不引入任何新参数、也不改变损失语义（它只是把「最优解已知为 0 的那些格子」钉成 0）。
+    #: ⚠️ 推理时（生成制度）遮盖通道全 1 ⇒ 该乘法是恒等，不影响迭代解码的第一步；
+    #: 后续迭代步里仍未确证的格子仍为 1 ⇒ 只裁掉「已经确证」的地方，正是想要的语义。
+    mask_lambda: bool = False
     #: 输出头是否保留**输入直连 skip**（`cell_skip` / `cum_skip`）。
     #:
     #: 原设计理由（plan 04 §9-17）：补全任务需要一条从「输入结构」到输出的**短梯度路径**，
@@ -685,6 +696,12 @@ class MaskedFieldModel(nn.Module):
             range_mask=batch.range_mask_bool(),
             input_features=features,
         )
+        if self.config.mask_lambda and bool(occlusion.any()):
+            # lam <- lam * occlusion：把最优解已知为 0 的**未被遮盖格子**钉成 0（见 ModelConfig）。
+            # ⚠️ 必须带 `occlusion.any()` 守卫：**全可见**批（G3 门禁、val 的全事件对照）在全事件口径下
+            # 监督的是**全部**事件，此时置零会把事件项打成 +inf（下一版实测：门禁退出码 7「lambda 出现 NaN」）。
+            # 生成制度（全遮盖）下 `any()` 为真而乘法是恒等，两条边界都对。
+            lam = lam * occlusion.to(dtype=lam.dtype)
         if self.config.check_lambda:
             assert_lambda_valid(lam)
         diagnostics: dict[str, Tensor] = {

@@ -25,6 +25,7 @@ from beatmorph.decoder.events import (
     events_to_notes,
     note_type_for_channel,
     pair_events,
+    scorable_lines,
     x_center,
 )
 from beatmorph.decoder.fieldops import (
@@ -128,6 +129,7 @@ __all__ = [
     "postprocess_events",
     "same_instant_groups",
     "sample_mark",
+    "scorable_lines",
     "smooth_cells",
     "stage_points",
     "tau_rate_per_beat",

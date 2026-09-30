@@ -17,13 +17,16 @@ from beatmorph.core.contracts.phigros import (
     EventKeyframe,
     EventLayer,
     JudgeLine,
+    NoteType,
     PhigrosChart,
+    PhigrosNote,
     Side,
 )
 from beatmorph.decoder.events import (
     LINE_FILTER_KEYS,
     FieldEvent,
     filter_field_events_by_line,
+    scorable_lines,
 )
 from beatmorph.field.grid import TAU_GRID_DT
 from tests.unit.decoder._builders import make_bpm_points, make_grid
@@ -158,3 +161,56 @@ def test_no_allowed_lines_means_no_decorative_filtering() -> None:
     assert len(kept) == 1
     assert stats["line_filter_allowed_lines"] == -1.0
     assert stats["line_filter_dropped_empty_line"] == 0.0
+
+
+# ── allowed_lines 的**来源**口径（决策者 2026-09-30 裁定）─────────────────────────
+# 旧口径 `frozenset(note.line_id for note in template.notes)` 只看「有没有 note」，
+# 于是「只有假音符」和「命中时线不可见」的表演线也被放进了 allowed_lines。
+# 真实语料 45 张 / 53 007 个 note 里，落在装饰线上的**可计分** note = **0**，
+# 而我们的 e2e 产物是唯一的例外（23 个，5.6%）。下面这条断言钉住新口径。
+
+
+def _note(line_id: int, seconds: float, *, fake: bool = False) -> PhigrosNote:
+    return PhigrosNote(
+        line_id=line_id,
+        t=seconds,
+        position_x=0.0,
+        side=Side.FRONT,
+        type=NoteType.TAP,
+        is_fake=fake,
+    )
+
+
+def test_scorable_lines_needs_a_scorable_note_not_just_a_note() -> None:
+    """只有「非 fake 且命中时线可见」的 note 才让线进入 allowed_lines。"""
+    chart = _chart(
+        [
+            JudgeLine(line_id=0, event_layers=[_alpha_track(255, 255, 100.0)]),
+            # 命中时刻（beat 0.5 = 0.25 s @120BPM）alpha = 0
+            JudgeLine(line_id=1, event_layers=[_alpha_track(0.0, 255.0, 10.0)]),
+            JudgeLine(line_id=2, event_layers=[_alpha_track(255.0, 255.0, 100.0)]),
+            # 有层但**没有 alpha 轨**：可见性**未知**，不因此剔除
+            JudgeLine(line_id=3, event_layers=[EventLayer(layer_index=0)]),
+        ],
+    )
+    chart = chart.model_copy(
+        update={
+            "notes": [
+                _note(0, 0.25),
+                _note(1, 0.25),
+                _note(2, 0.25, fake=True),
+                _note(3, 0.25),
+            ],
+        },
+    )
+    assert scorable_lines(chart) == frozenset({0, 3})
+    # 旧口径（只看有没有 note）会给出全部四条线 —— 这正是被修掉的那个 bug
+    assert frozenset(int(note.line_id) for note in chart.notes) == frozenset({0, 1, 2, 3})
+
+
+def test_scorable_lines_empty_chart_has_no_allowed_lines() -> None:
+    """空模板 ⇒ 空集合（调用方据此退回「不按装饰线过滤」，而不是把所有线都当成可承载）。"""
+    assert (
+        scorable_lines(_chart([JudgeLine(line_id=0, event_layers=[EventLayer(layer_index=0)])]))
+        == frozenset()
+    )

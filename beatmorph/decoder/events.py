@@ -288,6 +288,41 @@ def _has_alpha_track(chart: PhigrosChart, line_id: int) -> bool:
     )
 
 
+def scorable_lines(chart: PhigrosChart, *, opacity_threshold: float = 0.0) -> frozenset[int]:
+    """允许承载 note 的判定线集合 = 「**有可计分 note**」的线（决策者 2026-09-30 裁定的口径）。
+
+    为什么不是「有 note 的线」：旧口径是
+
+    ```python
+    frozenset(int(note.line_id) for note in template.notes)
+    ```
+
+    它只看**有没有 note**，于是模板里「只有假音符」或「命中时线不可见」的线也被当成能承载 note 的线。
+    实测（调研任务 research/kipphi-rpejson 的报告 §1，模板 15831）：34 条线里旧口径放过 0/28/29
+    三条**表演线**，产物在它们上面放了 23 个 note（5.6%）；而真实语料 45 张 / 53 007 个 note 里
+    **落在装饰线上的可计分 note = 0** ⇒ 我们的产物是唯一的例外。
+
+    本仓自己的 split 上同口径复核（`runs/_probe_scorable_share.py`，train 300 张 / 392 502 note）：
+    命中时线不可见 **22.81%**（其中真线上 12.94%）、可计分 75.08%、**可计分落在装饰线上 = 0**。
+
+    口径与 :func:`filter_field_events_by_line` 逐条一致：fake 不计分；线**没有 alpha 轨**时
+    「可见性未知」⇒ **不因可见性剔除**（理由见 :func:`_has_alpha_track`）。
+    """
+    out: set[int] = set()
+    for note in chart.notes:
+        if note.is_fake:
+            continue
+        line_id = int(note.line_id)
+        if not 0 <= line_id < len(chart.lines):
+            continue
+        if _has_alpha_track(chart, line_id):
+            beats = float(seconds_to_tau(note.t, chart.bpm_points))
+            if float(chart.lines[line_id].pose_at(beats, chart).alpha) <= float(opacity_threshold):
+                continue
+        out.add(line_id)
+    return frozenset(out)
+
+
 def filter_field_events_by_line(
     events: Sequence[FieldEvent],
     *,
@@ -362,5 +397,6 @@ __all__ = [
     "filter_field_events_by_line",
     "note_type_for_channel",
     "pair_events",
+    "scorable_lines",
     "x_center",
 ]

@@ -62,6 +62,7 @@ from beatmorph.decoder import (
     pair_events,
     postprocess_chart,
     postprocess_events,
+    scorable_lines,
     to_numpy,
 )
 from beatmorph.field.grid import FieldGrid
@@ -606,7 +607,11 @@ def generate_chart(
     )
     # 判定线资格闸门（决策者 2026-09-30 实测报告）：装饰 / 表演线不该有 note，
     # 且 note 时刻不可见的线判不到——两条判据都在解码事件层（配对之前）拦掉。
-    playable_lines = frozenset(int(note.line_id) for note in template.notes)
+    # ⚠️ 判据必须是「有**可计分** note」（非 fake 且命中时线可见），**不是**「有 note」：
+    # 旧口径只看有没有 note，于是模板里只有假音符 / 命中时不可见的那几条表演线也被当成了
+    # 「可以承载 note 的线」，实测让 23 个 note（5.6%）落到表演线上；而真实语料里
+    # 「落在装饰线上的可计分 note」是 **0**（调研报告 §1/§2，本仓复核见 scorable_lines 的 docstring）。
+    playable_lines = scorable_lines(template)
     line_filter = LineFilter(
         chart=template,
         allowed_lines=playable_lines if playable_lines else None,

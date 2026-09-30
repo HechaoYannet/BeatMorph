@@ -1721,52 +1721,68 @@ class ManifestBatchSource:
             step += 1
         else:
             self._cursor = step - 1
-        plan = self.plan(chunk=batch_size)
-        sampler = PlanBatchSampler(plan, batch_size=batch_size, start_step=step)
-        # 批次切分在**主进程**完成（只有 dataset 与 collate_fn 进 worker）。槽位终点由
-        # batch_sampler 自己上报，**不**从 collate 出来的批次反推——记账不依赖物化。
-        dispatched: deque[int] = deque()
-        order = plan.order
-
-        def _indices() -> Iterator[list[int]]:
-            for start, stop in sampler.spans():
-                dispatched.append(stop)
-                # 首元素 = 本批的槽位终点标签（负编码 `-stop-1`，与合法的非负窗口下标
-                # 不可能冲突）；`_SlotTaggedDataset` 在 worker 侧把它翻译成 `SlotTag`，
-                # 于是「批 <-> 槽位」这个对应关系能穿过进程边界回来。
-                yield [-(stop + 1), *(int(value) for value in order[start:stop])]
-
-        loader = DataLoader(
-            _SlotTaggedDataset(dataset),
-            batch_sampler=_indices(),
-            collate_fn=partial(_collate_with_slot, collate_field_batch),
-            num_workers=workers,
-            persistent_workers=True,
-            prefetch_factor=2,
-            pin_memory=torch.cuda.is_available(),
-            in_order=self._ab_force_in_order,
-        )
-        # 生成器被提前关闭时由 GC 回收 loader（DataLoader.__del__ 会收掉 worker 进程）；
-        # 长跑里 generator 与训练同寿命，不必手动收尾。**产出一批才更新一次 `_cursor`**：
-        # 缓冲里多收的批次不改记账，因此 `coverage()` 与 `workers=0` 逐位一致。
-        buffer: dict[int, FieldBatch] = {}
-        iterator = iter(loader)
+        # ⚠️ 外层循环 = **跨 epoch 的无限流**（plan 07 §9-82）。旧写法在 loader 排空后直接
+        # return ⇒ 训练循环的 next(stream) 抛 StopIteration 把整个 run 打断（实测：
+        # limit=2 的小切片在第 53 步、正好一个 epoch 处崩）。全量 train 有 175 723 窗，
+        # 20 万步的 run 会在 epoch 边界上踩到同一条路 —— 所以这里必须是无限流。
+        epoch_step = step
         while True:
-            if not (dispatched and dispatched[0] in buffer):
-                try:
-                    stop, batch = next(iterator)
-                except StopIteration:
-                    if dispatched or buffer:
-                        raise RuntimeError(
-                            "取批重排缓冲未排空（待交付 "
-                            f"{len(dispatched)} 批 / 已收 {len(buffer)} 批）——乱序交付丢了批"
-                        ) from None
-                    return
-                buffer[stop] = batch
-                continue
-            stop = dispatched.popleft()
-            self._cursor = stop
-            yield buffer.pop(stop)
+            plan = self.plan(chunk=batch_size)
+            sampler = PlanBatchSampler(plan, batch_size=batch_size, start_step=epoch_step)
+            # 批次切分在**主进程**完成（只有 dataset 与 collate_fn 进 worker）。槽位终点由
+            # batch_sampler 自己上报，**不**从 collate 出来的批次反推——记账不依赖物化。
+            dispatched: deque[int] = deque()
+            order = plan.order
+
+            # 默认参数把循环变量**绑进闭包**（ruff B023）：外层 while 每轮重建这三个对象，
+            # 不绑定就成"闭包读到的可能是下一轮的 sampler"这类隐患。
+            def _indices(
+                sampler: PlanBatchSampler = sampler,
+                dispatched: deque[int] = dispatched,
+                order: NDArray[np.int64] = order,
+            ) -> Iterator[list[int]]:
+                for start, stop in sampler.spans():
+                    dispatched.append(stop)
+                    # 首元素 = 本批的槽位终点标签（负编码 `-stop-1`，与合法的非负窗口下标
+                    # 不可能冲突）；`_SlotTaggedDataset` 在 worker 侧把它翻译成 `SlotTag`，
+                    # 于是「批 <-> 槽位」这个对应关系能穿过进程边界回来。
+                    yield [-(stop + 1), *(int(value) for value in order[start:stop])]
+
+            loader = DataLoader(
+                _SlotTaggedDataset(dataset),
+                batch_sampler=_indices(),
+                collate_fn=partial(_collate_with_slot, collate_field_batch),
+                num_workers=workers,
+                persistent_workers=True,
+                prefetch_factor=2,
+                pin_memory=torch.cuda.is_available(),
+                in_order=self._ab_force_in_order,
+            )
+            # 生成器被提前关闭时由 GC 回收 loader（DataLoader.__del__ 会收掉 worker 进程）；
+            # 长跑里 generator 与训练同寿命，不必手动收尾。**产出一批才更新一次 `_cursor`**：
+            # 缓冲里多收的批次不改记账，因此 `coverage()` 与 `workers=0` 逐位一致。
+            buffer: dict[int, FieldBatch] = {}
+            iterator = iter(loader)
+            while True:
+                if not (dispatched and dispatched[0] in buffer):
+                    try:
+                        stop, batch = next(iterator)
+                    except StopIteration:
+                        if dispatched or buffer:
+                            raise RuntimeError(
+                                "取批重排缓冲未排空（待交付 "
+                                f"{len(dispatched)} 批 / 已收 {len(buffer)} 批）——乱序交付丢了批"
+                            ) from None
+                        break
+                    buffer[stop] = batch
+                    continue
+                stop = dispatched.popleft()
+                self._cursor = stop
+                yield buffer.pop(stop)
+            # 本 epoch 排空 ⇒ 翻页并重建 loader（`_start_next_epoch` 会 +1 并清空计划，
+            # 下一次 `self.plan()` 就是新 epoch 的顺序）
+            self._start_next_epoch()
+            epoch_step = 1
 
     def _draw(
         self,

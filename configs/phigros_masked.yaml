@@ -123,6 +123,9 @@ optim:
   lr: 0.0003
   weight_decay: 0.01
   batch_size: 1        # 跨谱 batching 需要同一网格身份，见 beatmorph/data/dataset.py 的说明
+  # 诊断开关：只训 model.head（冻结解码器与输入嵌入）。用于把「头能不能解出任务」与
+  # 「联合优化能不能解出」分开（plan 04 §9-17 的手法，plan 07 §9-72 定位到解码器后必须做）。
+  train_head_only: false
   max_steps: 20000
   # ★ val（plan 07 §9-47，2026-09-27 第十轮）：此前 val_every 只是**空转**的字段，
   #   TB 里没有任何 val 曲线，而 best.pt 按**训练损失**选 —— 实测那等于「按谁抽到最空的

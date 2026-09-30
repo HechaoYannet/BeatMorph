@@ -1204,8 +1204,19 @@ def train(  # noqa: PLR0912, PLR0915 - 循环的分支/语句数靠注释说明�
     target_device = torch.device(device)
     # 注意：--device cuda 必须同时搬批次（plan 07 §9-22）；只搬模型会让训练路径直接失败。
     model = model_from_config(cfg, first_batch.grid, seed=cfg.optim.seed).to(target_device)
+    if bool(cfg.optim.train_head_only):
+        # 诊断用：冻结除输出头以外的一切（见 OptimConfig.train_head_only）。
+        frozen = 0
+        for name, parameter in model.named_parameters():
+            keep = name.startswith("head.")
+            parameter.requires_grad_(keep)
+            frozen += 0 if keep else 1
+        logger.warning(
+            "optim.train_head_only=True：已冻结 %d 个参数组，只训 model.head（诊断开关，勿用于生产）",
+            frozen,
+        )
     optimizer = torch.optim.AdamW(
-        model.parameters(),
+        (p for p in model.parameters() if p.requires_grad),
         lr=cfg.optim.lr,
         weight_decay=cfg.optim.weight_decay,
         betas=betas_of(cfg),

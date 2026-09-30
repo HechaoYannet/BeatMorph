@@ -379,12 +379,24 @@ def _block_occlusion(
     cells = counts.reshape(k_dim, t_dim, x_dim, -1)
     t_starts = list(range(0, t_dim, block_tau))
     x_starts = list(range(0, x_dim, block_x))
-    weights = np.zeros((k_dim, len(t_starts), len(x_starts)), dtype=np.float64)
-    for ti, t0 in enumerate(t_starts):
-        for xi, x0 in enumerate(x_starts):
-            weights[:, ti, xi] = (
-                cells[:, t0 : t0 + block_tau, x0 : x0 + block_x].sum(dim=(1, 2, 3)).numpy()
-            )
+    # ⚠️ **必须向量化**：按块循环求和是 K×⌈T/dt⌉×⌈X/dx⌉ 次张量归约（真实窗口约 1.9 万次），
+    # 实测把步时从 0.06 s 拖到 0.8 s（浪费 13 倍）。这里一次 reshape+sum 算完全部块权重。
+    n_t, n_x = len(t_starts), len(x_starts)
+    channels = int(cells.shape[-1])
+    if n_t * block_tau == t_dim and n_x * block_x == x_dim:
+        weights = (
+            cells.reshape(k_dim, n_t, block_tau, n_x, block_x, channels)
+            .sum(dim=(2, 4, 5))
+            .to(torch.float64)
+            .numpy()
+        )
+    else:  # 不整除时退回逐块（真实网格 192/4、128/32 都整除，但不要依赖它）
+        weights = np.zeros((k_dim, n_t, n_x), dtype=np.float64)
+        for ti, t0 in enumerate(t_starts):
+            for xi, x0 in enumerate(x_starts):
+                weights[:, ti, xi] = (
+                    cells[:, t0 : t0 + block_tau, x0 : x0 + block_x].sum(dim=(1, 2, 3)).numpy()
+                )
     occlusion = torch.zeros(counts.shape, dtype=torch.bool)
     flat = weights.reshape(-1)
     target = float(ratio) * float(counts.sum().item())

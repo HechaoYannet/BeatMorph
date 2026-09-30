@@ -123,6 +123,13 @@ model:
   #     其它配置与门禁被静默改变——转正的依据是**本配置**，不是默认值。
   head_skip: false
   audio_align: true
+  # ★ 头的无条件 τ 偏置（plan 07 §9-77，默认关）。开启后 = 在头的 logits 上加 (192,) 的
+  #   可学习偏置，让「无条件场先验」不再依赖被 local 层平均掉的 τ 位置信息。
+  #   实测依据：未训练模型的 decode 输出沿 τ 起伏 2.06，训练后 0.00000（三层 local 压平）；
+  #   而语料 τ 表在真实 val 上的组内 AUC 是 0.9292（模型 0.5009）。
+  head_tau_bias: false
+  # 空间分支上的同一件事：直接表达无条件的联合先验 p(τ, x, s, c)。
+  head_cell_tau_bias: false
 
 optim:
   lr: 0.0003

@@ -57,12 +57,31 @@ FORBIDDEN_ASSIGNMENT_FRAGMENTS = (
 )
 
 
+def _matches_forbidden_fragment(lowered: str) -> bool:
+    """按 **`_` 分词后整段**匹配片段（不是子串包含）。
+
+    为什么要改：原实现是「子串包含」，于是 `head_tau_bias` 因为含 `d_tau` 被判成
+    「自建 τ 格宽常量」——它只是个布尔开关名。整段匹配仍然拦得住 `d_tau` / `tau_dt` /
+    `seconds_per_beat`；以 `_` 开头的片段（`_dt`）按**后缀**匹配，保持对 `grid_dt` 的覆盖。
+    """
+    parts = lowered.split("_")
+    for fragment in FORBIDDEN_ASSIGNMENT_FRAGMENTS:
+        if fragment.startswith("_"):
+            if lowered.endswith(fragment):
+                return True
+            continue
+        want = fragment.split("_")
+        size = len(want)
+        if any(parts[index : index + size] == want for index in range(len(parts) - size + 1)):
+            return True
+    return False
+
+
 def _is_forbidden_assignment(target: ast.expr) -> bool:
     """赋值目标是否是「自建 tau 格宽常量」。"""
     if not isinstance(target, ast.Name):
         return False
-    lowered = target.id.lower()
-    return any(fragment in lowered for fragment in FORBIDDEN_ASSIGNMENT_FRAGMENTS)
+    return _matches_forbidden_fragment(target.id.lower())
 
 
 def _is_sixty_division(node: ast.BinOp) -> bool:
@@ -177,3 +196,26 @@ def test_scanner_accepts_the_allowed_api(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     assert _scan_source(planted) == []
+
+
+def test_forbidden_assignment_matches_whole_segments_only() -> None:
+    """片段必须整段命中：`d_tau` 违规，而 `head_tau_bias`（含子串 d_tau）**不**违规。
+
+    若这条失守，任何 `...d_tau...` 的开关名都会被判成「自建 τ 格宽常量」——
+    门禁就会用「改名字」而不是「改行为」来通过，红线的方向就反了。
+    """
+
+    def flagged(source: str) -> bool:
+        node = ast.parse(source).body[0]
+        if isinstance(node, ast.AnnAssign):
+            return _is_forbidden_assignment(node.target)
+        assert isinstance(node, ast.Assign)
+        return any(_is_forbidden_assignment(target) for target in node.targets)
+
+    assert flagged("d_tau = 1.0")
+    assert flagged("tau_dt = 1.0")
+    assert flagged("grid_dt = 1.0")
+    assert flagged("seconds_per_beat = 0.5")
+    assert not flagged("head_tau_bias: bool = False")
+    assert not flagged("head_tau_prior: bool = False")
+    assert not flagged("tau_bias: bool = False")

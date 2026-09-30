@@ -110,6 +110,8 @@ class ModelSchema:
     visible_input: bool = _DEFAULT_MODEL.visible_input
     track_input: bool = _DEFAULT_MODEL.track_input
     mask_lambda: bool = _DEFAULT_MODEL.mask_lambda
+    head_tau_bias: bool = _DEFAULT_MODEL.head_tau_bias
+    head_cell_tau_bias: bool = _DEFAULT_MODEL.head_cell_tau_bias
 
     def to_model_config(self) -> ModelConfig:
         """构造真正的 ModelConfig（其 __post_init__ 做架构级校验）。

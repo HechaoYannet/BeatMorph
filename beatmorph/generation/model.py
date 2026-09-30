@@ -154,6 +154,23 @@ class ModelConfig:
     #: 因此实验臂 = `head_skip=false` + `head_cum_skip=true`：**要回 τ，不要回空间捷径**。
     head_cell_skip: bool | None = None
     head_cum_skip: bool | None = None
+    #: 头的**无条件 τ 偏置**（plan 07 §9-77）。True ⇒ 在 `cum`（δ 分支）的 logits 上加一个
+    #: 形状 (t_bins,) 的**可学习**偏置，softplus **之前**相加。
+    #:
+    #: 为什么必须有这条路：实测（`runs/_probe_tau_layer_trace.py`，1 批 CPU）
+    #: 未训练模型 decode 输出沿 τ 的相对起伏是 **2.06**（架构能表达 τ），
+    #: 而训练后同一个量是 **0.00000** —— 三个 local 自注意力层把它压成「沿 τ 不变」。
+    #: 而 τ 位置编码只加在**输入** token 上、`head_skip=False` 时头只剩 decode 的输出
+    #: ⇒ **头没有任何别的 τ 通路**，于是「学一张语料 τ 表」在当前装配下不可达。
+    #: 那张表值多少：`runs/_probe_window_phase.py` 实测语料 τ 直方图在真实 val 上
+    #: （窗,线）组内 AUC = **0.9292**（模型 0.5009），而 §9-69 量到 τ 轴占常数基线的 42.46%。
+    #: 192 个参数、初始化为 0 ⇒ **开启时与关闭时逐位同构**，改动不改变既有语义。
+    #: ⚠️ 与 `head_cum_skip` 的区别：skip 是「从**输入特征**读」，偏置是「无视输入直接给先验」
+    #: ——前者在被遮盖 token 上输入恒为常数，后者不依赖输入。
+    head_tau_bias: bool = False
+    #: 空间分支的同一件事：在 `cell` 的 logits 上加形状 (t_bins, cells) 的可学习偏置。
+    #: 语义 = 让头直接表达**无条件联合先验** p(τ, x, s, c)；条件调制仍全部来自解码器。
+    head_cell_tau_bias: bool = False
 
     def __post_init__(self) -> None:
         if self.d_model % 2 != 0:
@@ -372,6 +389,17 @@ class FieldHead(nn.Module):
         self.sides = grid.sides
         self.channels = grid.channels
         self.cells = grid.x_bins * grid.sides * grid.channels
+        self.t_bins = grid.t_bins
+        #: 两条无条件 τ 偏置（plan 07 §9-77）。None = 关闭（**不注册参数** ⇒ 旧 checkpoint 逐位兼容）。
+        enabled = config.head == "factorized"
+        self.tau_bias: nn.Parameter | None = (
+            nn.Parameter(torch.zeros(self.t_bins)) if enabled and config.head_tau_bias else None
+        )
+        self.cell_tau_bias: nn.Parameter | None = (
+            nn.Parameter(torch.zeros(self.t_bins, self.cells))
+            if enabled and config.head_cell_tau_bias
+            else None
+        )
         if config.head == "factorized":
             self.cum_head = nn.Linear(config.d_model, 1)
             self.cell_head = nn.Linear(config.d_model, self.cells)
@@ -398,6 +426,14 @@ class FieldHead(nn.Module):
                 delta_logits = delta_logits + self.cum_skip(input_features).squeeze(-1)
             if input_features is not None and self.use_cell_skip:
                 cell_logits = cell_logits + self.cell_skip(input_features)
+            # 无条件 τ 偏置：**绕开**「τ 位置只存在于输入 token、被 local 层平均掉」这条断链。
+            # 加在 softplus/softmax **之前** ⇒ 它直接决定 ΔΛ(t) 与 p(τ,·) 的形状。
+            if self.tau_bias is not None:
+                delta_logits = delta_logits + self.tau_bias.reshape(1, 1, self.t_bins)
+            if self.cell_tau_bias is not None:
+                cell_logits = cell_logits + self.cell_tau_bias.reshape(
+                    1, 1, self.t_bins, self.cells
+                )
             delta = F.softplus(delta_logits)
             probability = torch.softmax(cell_logits, dim=-1).reshape(
                 batch_size,

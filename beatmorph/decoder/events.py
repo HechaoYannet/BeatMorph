@@ -288,6 +288,49 @@ def _has_alpha_track(chart: PhigrosChart, line_id: int) -> bool:
     )
 
 
+def note_is_scorable(
+    chart: PhigrosChart,
+    note: PhigrosNote,
+    *,
+    opacity_threshold: float = 0.0,
+) -> bool:
+    """**唯一**的「这个 note 算不算可计分」判据（生成闸门与训练目标共用同一个实现）。
+
+    可计分 = 不是假音符，且**命中时刻该线可见**（alpha 经 `pose_at` 跨层求和 + 父线递归）。
+    线**没有 alpha 轨**时可见性未知 ⇒ 不因可见性剔除（理由见 :func:`_has_alpha_track`）。
+
+    为什么必须只有一个实现：同一条判据现在有两个消费方——
+    ① **生成侧**（`scorable_lines` → e2e 的 allowed_lines）：不该有 note 的线上一个 note 都不许有；
+    ② **训练侧**（`data.scorable_target`）：目标只入账可计分的 note。
+    两边口径一旦分叉，模型学的和产物守的就不是同一件事，而且**都不报错**。
+
+    数据事实（`runs/_probe_scorable_share.py`，与调研任务 research/kipphi-rpejson 同口径）：
+    train 300 张 / 392 502 note 里**命中时线不可见 22.81%**（其中真线上 12.94%）、可计分 75.08%；
+    val 300 张 / 395 943 note 里不可见 18.68%、可计分 78.50%；两个 split 的
+    「**可计分 note 落在装饰线上**」**都是 0** ⇒ 这两类在真实语料里本不相交。
+    """
+    if bool(note.is_fake):
+        return False
+    line_id = int(note.line_id)
+    if not 0 <= line_id < len(chart.lines):
+        return False
+    if not _has_alpha_track(chart, line_id):
+        return True
+    beats = float(seconds_to_tau(note.t, chart.bpm_points))
+    return float(chart.lines[line_id].pose_at(beats, chart).alpha) > float(opacity_threshold)
+
+
+def scorable_note_mask(
+    chart: PhigrosChart,
+    *,
+    opacity_threshold: float = 0.0,
+) -> list[bool]:
+    """与 `chart.notes` **等长同序**的可计分掩码（目标过滤与台账都用它）。"""
+    return [
+        note_is_scorable(chart, note, opacity_threshold=opacity_threshold) for note in chart.notes
+    ]
+
+
 def scorable_lines(chart: PhigrosChart, *, opacity_threshold: float = 0.0) -> frozenset[int]:
     """允许承载 note 的判定线集合 = 「**有可计分 note**」的线（决策者 2026-09-30 裁定的口径）。
 
@@ -308,19 +351,8 @@ def scorable_lines(chart: PhigrosChart, *, opacity_threshold: float = 0.0) -> fr
     口径与 :func:`filter_field_events_by_line` 逐条一致：fake 不计分；线**没有 alpha 轨**时
     「可见性未知」⇒ **不因可见性剔除**（理由见 :func:`_has_alpha_track`）。
     """
-    out: set[int] = set()
-    for note in chart.notes:
-        if note.is_fake:
-            continue
-        line_id = int(note.line_id)
-        if not 0 <= line_id < len(chart.lines):
-            continue
-        if _has_alpha_track(chart, line_id):
-            beats = float(seconds_to_tau(note.t, chart.bpm_points))
-            if float(chart.lines[line_id].pose_at(beats, chart).alpha) <= float(opacity_threshold):
-                continue
-        out.add(line_id)
-    return frozenset(out)
+    mask = scorable_note_mask(chart, opacity_threshold=opacity_threshold)
+    return frozenset(int(note.line_id) for note, ok in zip(chart.notes, mask, strict=True) if ok)
 
 
 def filter_field_events_by_line(
@@ -395,8 +427,10 @@ __all__ = [
     "event_sort_key",
     "events_to_notes",
     "filter_field_events_by_line",
+    "note_is_scorable",
     "note_type_for_channel",
     "pair_events",
     "scorable_lines",
+    "scorable_note_mask",
     "x_center",
 ]

@@ -119,6 +119,7 @@ from beatmorph.data.pipeline.embed import (
     load_feature_cache,
 )
 from beatmorph.data.tracks import N_TRACK_CHANNELS, line_tracks_at
+from beatmorph.decoder.events import scorable_note_mask
 from beatmorph.field.grid import (
     SECONDS_PER_MINUTE,
     FieldGrid,
@@ -518,6 +519,15 @@ class DatasetConfig:
     #: ⚠️ **只有 `"event"` 与窗口缓存兼容**：缓存把遮盖压成 token 位图并断言区块结构；
     #: 其它粒度必须把 `window_cache_dir` 设为 None（否则装配期直接抛 WindowCacheError）。
     occlusion_granularity: Granularity = "event"
+    #: **目标口径**：只把「可计分」note 计入目标（决策者 2026-09-30 裁定）。
+    #:
+    #: 可计分 = 非 fake 且**命中时刻该线可见**（判据只有一份实现：`decoder.events.note_is_scorable`）。
+    #: 为什么必须能切换：实测（`runs/_probe_scorable_share.py`）train 里**命中时线不可见**的 note 占
+    #: **22.81%**（其中 12.94% 落在**真线**上 ⇒ 线级剥离拿不掉），val 18.68%；而真实语料里
+    #: 「可计分 note 落在装饰线上」= **0** ⇒ 我们的目标把两个本不相交的集合混在了一起。
+    #: 那部分事件由**演出设计**决定、不由音乐决定 ⇒ 占目标两成的梯度在鼓励模型忽略音乐。
+    #: ⚠️ 打开它会使目标口径改变 ⇒ 损失数值**不可**与关闭时直接比较（须在同一口径下对照）。
+    scorable_target: bool = False
     seed: int = 0
     limit: int | None = None
 
@@ -538,6 +548,12 @@ class DatasetConfig:
         if self.occlusion_granularity not in ("event", "frame", "cell", "block"):
             raise ValueError(
                 f"未知的遮盖粒度 {self.occlusion_granularity!r}（合法值：event/frame/cell/block）"
+            )
+        if self.scorable_target and self.window_cache_dir is not None:
+            raise ValueError(
+                "scorable_target=True 与窗口预切缓存**不能同时开**：缓存里的计数是按旧口径"
+                "（含命中时不可见的 note）物化的，静默复用会得到一套与配置不符的目标。"
+                "请显式把 window_cache_dir 设为 None（或重建覆盖该口径的缓存）。"
             )
         if self.limit is not None and self.limit < 0:
             raise ValueError(f"limit 必须 >= 0 或 None，得到 {self.limit}")
@@ -622,6 +638,9 @@ class DatasetIndexStats:
     tau_end_fallback_rows: int = 0
     #: 落在 τ 轴之外、未被计入目标的事件数（`build_target` 的同口径统计）。
     events_beyond_tau_end: int = 0
+    #: `scorable_target=True` 时被摘掉的**不可计分** note 数（命中时线不可见 / 假音符）。
+    #: 关闭该开关时恒为 0——**没开就不许有数**，否则台账会假装口径生效过。
+    notes_non_scorable_dropped: int = 0
     skipped_format: dict[str, int] = field(default_factory=dict)
 
     def describe(self) -> str:
@@ -643,6 +662,11 @@ class DatasetIndexStats:
             f"τ 轴截断 {self.tau_end_truncated_rows} 行"
             f"（{self.tau_end_truncated_seconds / 3600:.1f} 小时空窗）"
             f"、回退 {self.tau_end_fallback_rows} 行、轴外事件 {self.events_beyond_tau_end}"
+            + (
+                ""
+                if self.notes_non_scorable_dropped == 0
+                else f" | 目标口径：摘掉不可计分 note {self.notes_non_scorable_dropped}"
+            )
         )
 
 
@@ -705,6 +729,7 @@ class _IndexCounters:
     tau_end_truncated_seconds: float = 0.0
     tau_end_fallback_rows: int = 0
     events_beyond_tau_end: int = 0
+    notes_non_scorable_dropped: int = 0
     skipped_format: dict[str, int] = field(default_factory=dict)
 
     def add_skip(self, skip: _SkipRow) -> None:
@@ -737,6 +762,7 @@ class _IndexCounters:
             tau_end_truncated_seconds=self.tau_end_truncated_seconds,
             tau_end_fallback_rows=self.tau_end_fallback_rows,
             events_beyond_tau_end=self.events_beyond_tau_end,
+            notes_non_scorable_dropped=self.notes_non_scorable_dropped,
             skipped_format=dict(self.skipped_format),
         )
 
@@ -801,6 +827,8 @@ def _plan_fingerprint(config: DatasetConfig, rows: Sequence[PairRow]) -> str:
         "occlusion_ratio": config.occlusion_ratio,
         "tau_end_s": config.tau_end_s,
         "tau_end_policy": config.tau_end_policy,
+        # 目标口径**必须进指纹**：它决定哪些 note 进桶 ⇒ 换口径必须让索引缓存失效
+        "scorable_target": config.scorable_target,
     }
     digest.update(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode())
     for row in rows:
@@ -926,6 +954,9 @@ class ChartPairDataset(torch.utils.data.Dataset[PairSample]):
         #: 「重掷种子后仍 r == 1 => 退化为无遮盖」的窗口数（**诊断计数**，
         #: 逐进程累加：DataLoader 各 worker 各有一份副本）。
         self._no_context_fallbacks = 0
+        #: 每行被摘掉的**不可计分** note 数（`scorable_target=True` 时的台账）。
+        #: 幂等赋值：`_chart_for` 关掉 LRU 时会被重复调用，累加会翻倍。
+        self._dropped_non_scorable: dict[int, int] = {}
 
     #: 交给 DataLoader worker 时**不**序列化的派生 / 进程内状态（各 worker 自己按需重建）。
     #:
@@ -941,6 +972,7 @@ class ChartPairDataset(torch.utils.data.Dataset[PairSample]):
         "_feature_cache",
         "_plan_from_cache",
         "_no_context_fallbacks",
+        "_dropped_non_scorable",
     )
 
     def __getstate__(self) -> dict[str, Any]:
@@ -1195,10 +1227,38 @@ class ChartPairDataset(torch.utils.data.Dataset[PairSample]):
             self._chart_cache.move_to_end(row_index)
             return cached
         chart = self._read_chart_or_skip(row)
+        chart = self._apply_scorable_target(row_index, chart)
         self._chart_cache[row_index] = chart
         if len(self._chart_cache) > size:
             self._chart_cache.popitem(last=False)
         return chart
+
+    def _apply_scorable_target(
+        self,
+        row_index: int,
+        chart: PhigrosChart | _SkipRow,
+    ) -> PhigrosChart | _SkipRow:
+        """按 `config.scorable_target` 把**不可计分**的 note 从目标谱面里摘掉（plan 07 §9-79）。
+
+        为什么在这里做：`_chart_for` 是**唯一的**谱面入口，因此 `_note_bins`（窗口规划与
+        Hold 配对）、`_hold_blocked_boundaries`、`_count_events_beyond_axis`、`build_target`
+        四条镜像口径**自动**一致——在别处各滤一次就一定会分叉。
+
+        ⚠️ `chart_time_s` 被**补回到原来的 `duration_s()`**：否则摘掉末尾的 note 会把 τ 轴
+        缩短，于是「目标口径变了」和「窗口集合变了」会同时发生，A/B 无法归因。
+        配对统计记在 `self._dropped_non_scorable[row_index]`（幂等赋值，供索引台账汇总）。
+        """
+        if not self.config.scorable_target or isinstance(chart, _SkipRow):
+            return chart
+        mask = scorable_note_mask(chart)
+        dropped = sum(1 for ok in mask if not ok)
+        self._dropped_non_scorable[row_index] = dropped
+        if dropped == 0:
+            return chart
+        kept = [note for note, ok in zip(chart.notes, mask, strict=True) if ok]
+        axis_end = chart.duration_s()
+        meta = chart.meta.model_copy(update={"chart_time_s": axis_end})
+        return chart.model_copy(update={"notes": kept, "meta": meta})
 
     def _embedding(self, row: PairRow) -> NDArray[Dynamic]:
         """取该行的特征数组（带 LRU；同一谱面的相邻窗口取批时命中率高）。"""
@@ -1321,6 +1381,7 @@ class ChartPairDataset(torch.utils.data.Dataset[PairSample]):
         )
         if grid.t_bins < config.t_window:
             return _SkipRow("no_windows")
+        counters.notes_non_scorable_dropped += self._dropped_non_scorable.get(row_index, 0)
         counters.events_beyond_tau_end += _count_events_beyond_axis(
             chart,
             grid.bpm_points,

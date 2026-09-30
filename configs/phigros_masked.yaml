@@ -60,6 +60,10 @@ data:
   # 遮盖粒度：event（默认，契约路径）| block（(τ,x) 小块，保留 token 内可见邻居）。
   # ⚠️ 非 event 时窗口缓存不兼容 ⇒ 必须同时把 window_cache_dir 设为 null。
   occlusion_granularity: event
+  # 目标口径（plan 07 §9-79）：只入账**可计分** note（非 fake 且命中时线可见）。
+  # 实测摘掉 train 22.81% / val 18.68% 的事件（其中一半落在真线上 ⇒ 线级剥离拿不掉）；
+  # 真实语料里「可计分 note 落在装饰线上」= 0。打开它必须同时把 window_cache_dir 设为 null。
+  scorable_target: false
   # ★ τ 轴终点口径（RFC-0031，plan 03 §9-14）——"audio" = min(谱面口径, 特征缓存的音频时长)。
   #   实测（2026-09-27 第五轮，全库 8551 张）：**52.2%** 的谱面 META.chartTime 虚高
   #   （中位 52.8×、最大 3.4e6×），旧口径（"chart"）把 train split 撑到 **3361 万窗**

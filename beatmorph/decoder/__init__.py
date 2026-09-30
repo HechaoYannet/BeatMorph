@@ -23,9 +23,11 @@ from beatmorph.decoder.events import (
     PairingStats,
     confidence_array,
     events_to_notes,
+    note_is_scorable,
     note_type_for_channel,
     pair_events,
     scorable_lines,
+    scorable_note_mask,
     x_center,
 )
 from beatmorph.decoder.fieldops import (
@@ -121,6 +123,7 @@ __all__ = [
     "intensity_scale",
     "jacobian_cells",
     "merge_reports",
+    "note_is_scorable",
     "note_type_for_channel",
     "ogata_thinning",
     "omega_value",
@@ -130,6 +133,7 @@ __all__ = [
     "same_instant_groups",
     "sample_mark",
     "scorable_lines",
+    "scorable_note_mask",
     "smooth_cells",
     "stage_points",
     "tau_rate_per_beat",

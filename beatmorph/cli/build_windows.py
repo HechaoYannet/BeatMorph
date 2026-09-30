@@ -99,6 +99,14 @@ def main(argv: list[str] | None = None) -> int:
     if args.jobs < 1 or shard_windows < 1:
         logger.error("--jobs 与 --shard-windows 必须 >= 1")
         return EXIT_ARGS
+    if bool(data.scorable_target):
+        # 缓存里的计数是**按物化时的目标口径**写的；而该口径下 DatasetConfig 会拒绝加载缓存
+        # （见 DatasetConfig.__post_init__）。与其物化一份永远用不上的 350 GB 缓存，不如早失败。
+        logger.error(
+            "data.scorable_target=true 时不构建窗口预切缓存：缓存按目标口径物化，"
+            "而该口径下 DatasetConfig 会直接拒绝加载缓存（请把 window_cache_dir 设为 null 跑原路径）。"
+        )
+        return EXIT_ARGS
 
     config = DatasetConfig(
         manifest_path=manifest,

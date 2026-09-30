@@ -235,6 +235,10 @@ class DataConfig:
     #: `"block"` = (τ, x) 小块遮盖（块内含空格）—— 让「被预测 token 内部的空间分布」重新可从输入推断
     #: （plan 07 §9-76）。⚠️ 只有 `"event"` 与窗口缓存兼容：其它粒度必须同时把 `window_cache_dir` 设为 null。
     occlusion_granularity: str = "event"
+    #: 目标只入账**可计分** note（非 fake 且命中时刻线可见，见 plan 07 §9-79）。
+    #: 实测该口径会摘掉 train 的 **22.81%** / val 的 **18.68%** 事件；判据只此一份实现：
+    #: `beatmorph.decoder.events.note_is_scorable`。与 `window_cache_dir` 互斥（缓存按旧口径物化）。
+    scorable_target: bool = False
     max_samples: int | None = None
 
 

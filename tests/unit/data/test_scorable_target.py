@@ -27,7 +27,7 @@ from beatmorph.core.contracts.phigros import (
     Side,
 )
 from beatmorph.data.dataset import DatasetConfig, _plan_fingerprint
-from beatmorph.decoder.events import scorable_lines, scorable_note_mask
+from beatmorph.decoder.events import gameplay_subchart, scorable_lines, scorable_note_mask
 
 BPM = 120.0
 
@@ -117,6 +117,42 @@ def test_fake_note_is_never_scorable() -> None:
         [_note(0, 0.25, fake=True)],
     )
     assert scorable_note_mask(chart) == [False]
+
+
+def test_gameplay_subchart_drops_decoration_lines_and_remaps_indices() -> None:
+    """去表演 = **真线 ∪ 祖先线** + 只留可计分 note；father 与 line_id 一并重映射。"""
+    chart = _chart(
+        [
+            # 0 装饰线（无 note）—— 但它是线 1 的父线，必须留着当几何载体
+            JudgeLine(line_id=0, event_layers=[_alpha_track(255.0, 255.0, 100.0)]),
+            JudgeLine(line_id=1, father=0, event_layers=[_alpha_track(255.0, 255.0, 100.0)]),
+            # 2 装饰线：note 命中时不可见
+            JudgeLine(line_id=2, event_layers=[_alpha_track(0.0, 255.0, 10.0)]),
+            # 3 空装饰线
+            JudgeLine(line_id=3, event_layers=[EventLayer(layer_index=0)]),
+        ],
+        [
+            _note(1, 0.25),
+            _note(2, 0.25),
+            _note(3, 0.25),
+        ],
+    )
+    playable = gameplay_subchart(chart)
+    # 线 1 有可计分 note ⇒ 留下；线 0 是它的父线 ⇒ 留下（几何载体）；2 / 3 摘掉
+    assert len(playable.lines) == 2
+    assert playable.lines[0].line_id == 0
+    assert playable.lines[1].line_id == 1
+    assert playable.lines[1].father == 0
+    assert [note.line_id for note in playable.notes] == [1]
+
+
+def test_gameplay_subchart_raises_when_nothing_is_scorable() -> None:
+    chart = _chart(
+        [JudgeLine(line_id=0, event_layers=[_alpha_track(0.0, 255.0, 10.0)])],
+        [_note(0, 0.25)],
+    )
+    with pytest.raises(ValueError, match="没有任何可计分 note"):
+        gameplay_subchart(chart)
 
 
 def test_scorable_target_and_window_cache_are_mutually_exclusive(tmp_path: Path) -> None:

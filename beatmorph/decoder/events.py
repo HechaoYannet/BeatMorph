@@ -293,11 +293,13 @@ def note_is_scorable(
     note: PhigrosNote,
     *,
     opacity_threshold: float = 0.0,
+    unknown_alpha_is_visible: bool = True,
 ) -> bool:
     """**唯一**的「这个 note 算不算可计分」判据（生成闸门与训练目标共用同一个实现）。
 
     可计分 = 不是假音符，且**命中时刻该线可见**（alpha 经 `pose_at` 跨层求和 + 父线递归）。
-    线**没有 alpha 轨**时可见性未知 ⇒ 不因可见性剔除（理由见 :func:`_has_alpha_track`）。
+    线**没有 alpha 轨**时的默认值由 `unknown_alpha_is_visible` 给：生成闸门默认「未知 ⇒ 不算不可见」，
+    训练目标显式传 False（真实谱面里没有 alphaEvents 的层求和为 0 ⇒ 不可见，A 级语义）。
 
     为什么必须只有一个实现：同一条判据现在有两个消费方——
     ① **生成侧**（`scorable_lines` → e2e 的 allowed_lines）：不该有 note 的线上一个 note 都不许有；
@@ -315,7 +317,13 @@ def note_is_scorable(
     if not 0 <= line_id < len(chart.lines):
         return False
     if not _has_alpha_track(chart, line_id):
-        return True
+        # 两条路径的默认值**故意相反**：
+        # * 生成闸门（默认 True）：模板/合成谱可能压根没给 alpha 轨 ⇒ 那是「没这个信息」，
+        #   判成不可见会把合成路径的 note 一次清空（`_has_alpha_track` 的原始理由）；
+        # * 训练目标（`gameplay_subchart` 传 False）：语料是**真实谱面**，RPE 的 A 级语义是
+        #   「没有 alphaEvents 的层求和为 0 ⇒ 不可见」（docs/knowledges/phigros-format.md），
+        #   所以没有 alpha 轨的线上的 note **不可计分** —— 这也正是语料实测（22.81%）的口径。
+        return bool(unknown_alpha_is_visible)
     beats = float(seconds_to_tau(note.t, chart.bpm_points))
     return float(chart.lines[line_id].pose_at(beats, chart).alpha) > float(opacity_threshold)
 
@@ -324,10 +332,17 @@ def scorable_note_mask(
     chart: PhigrosChart,
     *,
     opacity_threshold: float = 0.0,
+    unknown_alpha_is_visible: bool = True,
 ) -> list[bool]:
     """与 `chart.notes` **等长同序**的可计分掩码（目标过滤与台账都用它）。"""
     return [
-        note_is_scorable(chart, note, opacity_threshold=opacity_threshold) for note in chart.notes
+        note_is_scorable(
+            chart,
+            note,
+            opacity_threshold=opacity_threshold,
+            unknown_alpha_is_visible=unknown_alpha_is_visible,
+        )
+        for note in chart.notes
     ]
 
 
@@ -353,6 +368,63 @@ def scorable_lines(chart: PhigrosChart, *, opacity_threshold: float = 0.0) -> fr
     """
     mask = scorable_note_mask(chart, opacity_threshold=opacity_threshold)
     return frozenset(int(note.line_id) for note, ok in zip(chart.notes, mask, strict=True) if ok)
+
+
+def gameplay_subchart(
+    chart: PhigrosChart,
+    *,
+    opacity_threshold: float = 0.0,
+    unknown_alpha_is_visible: bool = False,
+) -> PhigrosChart:
+    """谱面 -> **只含可玩内容**的子谱面：真线（∪ 其祖先线）+ 只留可计分 note。
+
+    决策者口径（2026-09-30）：「将谱面表演的所有成分去掉，包括不计分 note、装饰线、不可见线等，
+    **train 和 val 口径必须相同**」。实测（`runs/_probe_line_strip.py`，各 300 张）：
+
+    | | 全部线（中位） | 真线（中位） | 可计分 note |
+    |---|---|---|---|
+    | train | 26（p90 68，max 240） | **5**（p90 12） | 75.17% |
+    | val | 25（p90 62，max 434） | **5**（p90 13） | 79.02% |
+
+    ⇒ 线轴缩到约 **1/5**，k_max=128 的超限行从 2.0–2.7% 降到 **0**（覆盖变好），
+    而模型不再需要把大部容量用在「这条线上 λ 恒为 0」上。
+
+    **为什么必须连带祖先线**：`JudgeLine.pose_at` 会把父线的位移/旋转合成进来，
+    真线的**几何**可能由一条自己没有可计分 note 的线驱动；摘掉它等于换了输入而不是去掉表演。
+    实测代价极小：train 平均 **0.06** 条/谱（4.7% 的谱需要），val **0.17** 条/谱（5.4%）。
+
+    线序与原索引**保持相对顺序**（`father` 与 `note.line_id` 一并重映射）；
+    被摘掉的装饰线由调用方**原样封存**，导出时按原索引插回（本函数不负责回插）。
+    `meta` 不动 ⇒ τ 轴与窗口集合不因去表演而改变。
+
+    Raises:
+        ValueError: 整张谱面没有任何可计分 note（调用方应据此跳过该行，而不是喂一张空谱）。
+    """
+    mask = scorable_note_mask(
+        chart,
+        opacity_threshold=opacity_threshold,
+        unknown_alpha_is_visible=unknown_alpha_is_visible,
+    )
+    real = {int(note.line_id) for note, ok in zip(chart.notes, mask, strict=True) if ok}
+    keep: set[int] = set(real)
+    for line_id in real:
+        keep |= {int(line.line_id) for line in chart.lines[line_id].ancestry(chart)}
+    if not keep:
+        raise ValueError("谱面没有任何可计分 note：没有可玩内容（调用方应跳过该行）")
+    order = [index for index in range(len(chart.lines)) if index in keep]
+    remap = {old: new for new, old in enumerate(order)}
+    lines = [
+        chart.lines[old].model_copy(
+            update={"line_id": remap[old], "father": remap.get(int(chart.lines[old].father), -1)},
+        )
+        for old in order
+    ]
+    notes = [
+        note.model_copy(update={"line_id": remap[int(note.line_id)]})
+        for note, ok in zip(chart.notes, mask, strict=True)
+        if ok
+    ]
+    return chart.model_copy(update={"lines": lines, "notes": notes})
 
 
 def filter_field_events_by_line(
@@ -427,6 +499,7 @@ __all__ = [
     "event_sort_key",
     "events_to_notes",
     "filter_field_events_by_line",
+    "gameplay_subchart",
     "note_is_scorable",
     "note_type_for_channel",
     "pair_events",

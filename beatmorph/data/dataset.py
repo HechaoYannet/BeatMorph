@@ -119,7 +119,7 @@ from beatmorph.data.pipeline.embed import (
     load_feature_cache,
 )
 from beatmorph.data.tracks import N_TRACK_CHANNELS, line_tracks_at
-from beatmorph.decoder.events import scorable_note_mask
+from beatmorph.decoder.events import gameplay_subchart
 from beatmorph.field.grid import (
     SECONDS_PER_MINUTE,
     FieldGrid,
@@ -641,6 +641,8 @@ class DatasetIndexStats:
     #: `scorable_target=True` 时被摘掉的**不可计分** note 数（命中时线不可见 / 假音符）。
     #: 关闭该开关时恒为 0——**没开就不许有数**，否则台账会假装口径生效过。
     notes_non_scorable_dropped: int = 0
+    #: `scorable_target=True` 时整张谱面没有可计分 note（去表演后无内容）而被跳过的行数。
+    skipped_no_playable_lines: int = 0
     skipped_format: dict[str, int] = field(default_factory=dict)
 
     def describe(self) -> str:
@@ -653,7 +655,7 @@ class DatasetIndexStats:
             f"跳过行：谱面缺失 {self.skipped_chart_missing}、无特征 {self.skipped_no_feature}、"
             f"无定数 {self.skipped_no_difficulty}、非 RPE [{formats or '无'}]、"
             f"解析失败 {self.skipped_parse_error}、线数超 k_max {self.skipped_too_many_lines}、"
-            f"无可用窗口 {self.skipped_no_windows} | "
+            f"无可用窗口 {self.skipped_no_windows}、去表演后无内容 {self.skipped_no_playable_lines} | "
             f"跳过窗口：Hold 切断 {self.skipped_windows_hold_split}、"
             f"跨 BPM 变更点 {self.skipped_windows_bpm_crossing}、"
             f"无法满足 r<1 {self.skipped_windows_no_visible_context}"
@@ -719,6 +721,8 @@ class _IndexCounters:
     skipped_parse_error: int = 0
     skipped_too_many_lines: int = 0
     skipped_no_windows: int = 0
+    #: `scorable_target=True` 时整张谱面没有可计分 note（去表演后无内容）而被跳过的行数。
+    skipped_no_playable_lines: int = 0
     skipped_windows_hold_split: int = 0
     skipped_windows_bpm_crossing: int = 0
     skipped_windows_no_visible_context: int = 0
@@ -752,6 +756,7 @@ class _IndexCounters:
             skipped_parse_error=self.skipped_parse_error,
             skipped_too_many_lines=self.skipped_too_many_lines,
             skipped_no_windows=self.skipped_no_windows,
+            skipped_no_playable_lines=self.skipped_no_playable_lines,
             skipped_windows_hold_split=self.skipped_windows_hold_split,
             skipped_windows_bpm_crossing=self.skipped_windows_bpm_crossing,
             skipped_windows_no_visible_context=self.skipped_windows_no_visible_context,
@@ -1250,15 +1255,15 @@ class ChartPairDataset(torch.utils.data.Dataset[PairSample]):
         """
         if not self.config.scorable_target or isinstance(chart, _SkipRow):
             return chart
-        mask = scorable_note_mask(chart)
-        dropped = sum(1 for ok in mask if not ok)
-        self._dropped_non_scorable[row_index] = dropped
-        if dropped == 0:
-            return chart
-        kept = [note for note, ok in zip(chart.notes, mask, strict=True) if ok]
-        axis_end = chart.duration_s()
-        meta = chart.meta.model_copy(update={"chart_time_s": axis_end})
-        return chart.model_copy(update={"notes": kept, "meta": meta})
+        dropped = len(chart.notes)
+        try:
+            playable = gameplay_subchart(chart)
+        except ValueError:
+            # 整张谱面没有任何可计分 note ⇒ 没有可玩内容。**必须记账跳过**，不许喂空谱。
+            self._dropped_non_scorable[row_index] = dropped
+            return _SkipRow("no_playable_lines")
+        self._dropped_non_scorable[row_index] = dropped - len(playable.notes)
+        return playable
 
     def _embedding(self, row: PairRow) -> NDArray[Dynamic]:
         """取该行的特征数组（带 LRU；同一谱面的相邻窗口取批时命中率高）。"""
